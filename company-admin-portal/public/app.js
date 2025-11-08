@@ -24,7 +24,7 @@ const app = {
      */
     async checkAuth() {
         try {
-            const response = await fetch('/api/auth/current');
+            const response = await fetch('/company-admin/api/auth/current');
             const data = await response.json();
 
             if (data.success && data.authenticated) {
@@ -51,7 +51,7 @@ const app = {
 
         // Load companies
         try {
-            const response = await fetch('/api/companies');
+            const response = await fetch('/company-admin/api/companies');
             const data = await response.json();
 
             if (data.success) {
@@ -94,7 +94,7 @@ const app = {
         console.log(`[LOGIN] Logging in as ${companyId}`);
 
         try {
-            const response = await fetch('/api/auth/login', {
+            const response = await fetch('/company-admin/api/auth/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ companyId })
@@ -122,7 +122,7 @@ const app = {
         console.log('[LOGOUT] Logging out');
 
         try {
-            await fetch('/api/auth/logout', { method: 'POST' });
+            await fetch('/company-admin/api/auth/logout', { method: 'POST' });
             this.currentCompany = null;
             this.employees = [];
             this.showNotification('Logged out successfully', 'success');
@@ -163,7 +163,7 @@ const app = {
         console.log('[DATA] Loading company info');
 
         try {
-            const response = await fetch('/api/company/info');
+            const response = await fetch('/company-admin/api/company/info');
             const data = await response.json();
 
             if (data.success) {
@@ -200,7 +200,7 @@ const app = {
         console.log('[DATA] Loading employees');
 
         try {
-            const response = await fetch('/api/company/connections');
+            const response = await fetch('/company-admin/api/company/connections');
             const data = await response.json();
 
             if (data.success) {
@@ -330,7 +330,7 @@ const app = {
         console.log('[INVITE] Creating invitation for:', employeeName);
 
         try {
-            const response = await fetch('/api/company/invite-employee', {
+            const response = await fetch('/company-admin/api/company/invite-employee', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ employeeName, role, department })
@@ -419,7 +419,7 @@ const app = {
         console.log('[CREDENTIAL] Issuing credential to:', connectionId);
 
         try {
-            const response = await fetch('/api/company/issue-credential', {
+            const response = await fetch('/company-admin/api/company/issue-credential', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
