@@ -1,0 +1,59 @@
+{
+  "name": "hyperledger-identus-ssi-infrastructure",
+  "version": "4.0.0",
+  "description": "Production Self-Sovereign Identity (SSI) Infrastructure using Hyperledger Identus",
+  "private": true,
+  "workspaces": [
+    "services/certification-authority",
+    "services/edge-wallets/sdk-ts",
+    "services/edge-wallets/alice-wallet",
+    "services/edge-wallets/bob-wallet"
+  ],
+  "scripts": {
+    "install:all": "yarn install && yarn workspaces run install",
+    "build:sdk": "yarn workspace @hyperledger/identus-edge-agent-sdk build",
+    "build:wallets": "yarn workspace alice-wallet build && yarn workspace bob-wallet build",
+    "dev:ca": "cd services/certification-authority && PORT=3005 node server.js",
+    "dev:alice": "yarn workspace alice-wallet dev",
+    "dev:bob": "yarn workspace bob-wallet dev",
+    "health-check": "bash infrastructure/scripts/health-check.sh",
+    "validate-env": "bash scripts/validate-env.sh",
+    "sanitize-configs": "bash scripts/sanitize-configs.sh",
+    "test": "echo 'No tests configured yet' && exit 0",
+    "lint": "echo 'No linting configured yet' && exit 0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/hyperledger-identus-ssi.git"
+  },
+  "keywords": [
+    "hyperledger",
+    "identus",
+    "atala-prism",
+    "self-sovereign-identity",
+    "ssi",
+    "verifiable-credentials",
+    "decentralized-identifiers",
+    "did",
+    "didcomm",
+    "w3c-vc",
+    "blockchain",
+    "cryptography",
+    "x25519",
+    "ed25519"
+  ],
+  "author": "Hyperledger Identus SSI Infrastructure Team",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/your-org/hyperledger-identus-ssi/issues"
+  },
+  "homepage": "https://github.com/your-org/hyperledger-identus-ssi#readme",
+  "engines": {
+    "node": ">=18.0.0",
+    "yarn": ">=1.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "typescript": "^5.0.0"
+  }
+}
