@@ -1,0 +1,29 @@
+# Certification Authority - Specific .gitignore
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+ca.log
+server.log
+
+# Secrets
+apikeys.json
+credentials/
+*.pem
+*.key
+
+# Backups
+backups/
+*.tar.gz
+
+# Session storage (if file-based)
+sessions/
+
+# Uploaded files
+uploads/
+
+# Test data
+test-data/
