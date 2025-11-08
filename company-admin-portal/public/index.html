@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Company Admin Portal - Hyperledger Identus</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+</head>
+<body>
+    <!-- Loading Screen -->
+    <div id="loading-screen" class="loading-screen">
+        <div class="loading-content">
+            <div class="loading-spinner"></div>
+            <p>Loading Company Admin Portal...</p>
+        </div>
+    </div>
+
+    <!-- Login Screen -->
+    <div id="login-screen" class="login-screen hidden">
+        <div class="login-container">
+            <div class="login-header">
+                <h1>🏢 Company Admin Portal</h1>
+                <p class="subtitle">Hyperledger Identus SSI Infrastructure</p>
+            </div>
+
+            <div class="company-selector">
+                <h2>Select Your Company</h2>
+                <div id="company-cards" class="company-cards">
+                    <!-- Company cards will be populated by JavaScript -->
+                </div>
+            </div>
+
+            <div class="login-footer">
+                <p>Multitenancy Cloud Agent • PRISM DID Management • Employee Administration</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Dashboard -->
+    <div id="admin-dashboard" class="dashboard hidden">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <div class="header-left">
+                <span class="company-logo" id="header-logo">🏢</span>
+                <div class="header-info">
+                    <h1 id="header-company-name">Company</h1>
+                    <p id="header-tagline">Admin Portal</p>
+                </div>
+            </div>
+            <div class="header-right">
+                <button class="btn btn-secondary" onclick="app.logout()">Logout</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="dashboard-content">
+            <!-- Company Information Section -->
+            <section class="section">
+                <div class="section-header">
+                    <h2>🆔 Company DID Information</h2>
+                    <button class="btn btn-secondary btn-sm" onclick="app.loadCompanyInfo()">
+                        Refresh
+                    </button>
+                </div>
+                <div class="section-body">
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <label>Company DID (Short Form)</label>
+                            <div class="copyable-text">
+                                <code id="company-did">Loading...</code>
+                                <button class="copy-btn" onclick="app.copyToClipboard('#company-did')">Copy</button>
+                            </div>
+                        </div>
+                        <div class="info-item">
+                            <label>Website</label>
+                            <span id="company-website">-</span>
+                        </div>
+                        <div class="info-item full-width">
+                            <label>Public Keys</label>
+                            <ul id="public-keys-list" class="key-list">
+                                <li>Loading...</li>
+                            </ul>
+                        </div>
+                        <div class="info-item full-width">
+                            <label>Service Endpoints</label>
+                            <ul id="services-list" class="key-list">
+                                <li>Loading...</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Employee Management Section -->
+            <section class="section">
+                <div class="section-header">
+                    <h2>👥 Employee Management</h2>
+                    <div class="header-actions">
+                        <button class="btn btn-primary" onclick="app.showInviteModal()">
+                            ➕ Invite New Employee
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="app.loadEmployees()">
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+                <div class="section-body">
+                    <div class="employee-stats">
+                        <div class="stat-card">
+                            <div class="stat-value" id="total-employees">0</div>
+                            <div class="stat-label">Total Connections</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="active-employees">0</div>
+                            <div class="stat-label">Active</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="pending-employees">0</div>
+                            <div class="stat-label">Pending</div>
+                        </div>
+                    </div>
+
+                    <div class="table-container">
+                        <table class="employee-table">
+                            <thead>
+                                <tr>
+                                    <th>Employee / Label</th>
+                                    <th>Connection ID</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="employee-table-body">
+                                <tr>
+                                    <td colspan="5" class="loading-row">Loading employees...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Invite Employee Modal -->
+    <div id="invite-modal" class="modal hidden">
+        <div class="modal-overlay" onclick="app.closeInviteModal()"></div>
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>Invite New Employee</h2>
+                <button class="modal-close" onclick="app.closeInviteModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="invite-form" onsubmit="app.handleInviteSubmit(event)">
+                    <div class="form-group">
+                        <label for="employee-name">Employee Name *</label>
+                        <input type="text" id="employee-name" name="employeeName" required
+                               placeholder="e.g., John Doe">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="employee-role">Role / Position</label>
+                            <input type="text" id="employee-role" name="role"
+                                   placeholder="e.g., Software Engineer">
+                        </div>
+                        <div class="form-group">
+                            <label for="employee-department">Department</label>
+                            <input type="text" id="employee-department" name="department"
+                                   placeholder="e.g., Engineering">
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" onclick="app.closeInviteModal()">
+                            Cancel
+                        </button>
+                        <button type="submit" class="btn btn-primary">
+                            Generate Invitation
+                        </button>
+                    </div>
+                </form>
+
+                <!-- Invitation Result (shown after generation) -->
+                <div id="invitation-result" class="invitation-result hidden">
+                    <div class="success-message">
+                        ✅ Invitation created successfully for <strong id="invited-employee-name"></strong>!
+                    </div>
+
+                    <div class="invitation-content">
+                        <div class="qr-code-container">
+                            <canvas id="invitation-qr"></canvas>
+                            <p class="qr-label">Scan with Identus Wallet</p>
+                        </div>
+
+                        <div class="invitation-url-container">
+                            <label>Invitation URL</label>
+                            <div class="copyable-text">
+                                <input type="text" id="invitation-url" readonly>
+                                <button class="copy-btn" onclick="app.copyInvitationUrl()">Copy</button>
+                            </div>
+                            <p class="help-text">
+                                Share this URL or QR code with the employee to establish a DIDComm connection.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="form-actions">
+                        <button class="btn btn-primary" onclick="app.closeInviteModal(); app.loadEmployees();">
+                            Done
+                        </button>
+                        <button class="btn btn-secondary" onclick="app.resetInviteForm()">
+                            Invite Another
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="notification-toast" class="notification-toast hidden">
+        <span id="notification-message"></span>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
