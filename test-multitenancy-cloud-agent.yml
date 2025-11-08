@@ -1,0 +1,131 @@
+version: '3.8'
+
+# Multitenancy Test Cloud Agent Infrastructure
+# Security-hardened configuration with:
+# - Custom database user (NOT default postgres)
+# - NO external database port exposure
+# - Secure credentials
+# - Docker network isolation
+
+networks:
+  identus-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+
+services:
+  # PostgreSQL Database - INTERNAL ONLY (NO external port)
+  multitenancy-test-db:
+    container_name: multitenancy-test-db
+    image: postgres:16
+    environment:
+      # SECURITY: Custom postgres password (not used by Cloud Agent)
+      POSTGRES_PASSWORD: "Nza3a9SwAfmP#%7oTZ8$!X#0Ydzfb3TY"
+      # Database initialization
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    volumes:
+      # Custom pg_hba.conf for Docker network trust authentication
+      - ./multitenancy-test-pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      # Database initialization script with custom user
+      - ./init-multitenancy-test-dbs.sql:/docker-entrypoint-initdb.d/init-dbs.sql:ro
+      # Persistent storage
+      - multitenancy-test-db-data:/var/lib/postgresql/data
+    command: >
+      postgres
+      -c hba_file=/etc/postgresql/pg_hba.conf
+      -c listen_addresses='*'
+      -c max_connections=200
+      -c shared_buffers=256MB
+    networks:
+      - identus-network
+    # SECURITY: NO port mapping to host (internal Docker network only)
+    # NO "ports:" section = database not accessible from host/internet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U identus_multitenancy -d pollux_multitenancy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Cloud Agent - Multitenancy Enabled
+  multitenancy-test-cloud-agent:
+    container_name: multitenancy-test-cloud-agent
+    image: hyperledgeridentus/identus-cloud-agent:2.0.0
+    environment:
+      # SECURITY: Secure admin token (32 chars random)
+      ADMIN_TOKEN: "N9TEJXrZlIX4Qg8R1RSlJwC820QZKwXb"
+
+      # Multitenancy Configuration
+      API_KEY_ENABLED: 'true'
+      API_KEY_AUTO_PROVISIONING: 'false'  # Manual tenant creation only
+      API_KEY_AUTHENTICATE_AS_DEFAULT_USER: 'false'
+      API_KEY_SALT: "3c5734ee9ec393fdadd72d6f53f95d1b0ae6599055a73914fe1b31a83898e6dc"
+      DEFAULT_WALLET_ENABLED: 'false'  # No default wallet in multitenancy mode
+
+      # Service URLs
+      REST_SERVICE_URL: http://91.99.4.54:8200/cloud-agent
+      DIDCOMM_SERVICE_URL: http://91.99.4.54:8290/didcomm
+
+      # Database Configuration - CUSTOM USER (NOT postgres)
+      POLLUX_DB_HOST: multitenancy-test-db
+      POLLUX_DB_PORT: 5432
+      POLLUX_DB_NAME: pollux_multitenancy
+      POLLUX_DB_USER: identus_multitenancy
+      # NO DB_PASSWORD - using trust authentication from pg_hba.conf
+
+      CONNECT_DB_HOST: multitenancy-test-db
+      CONNECT_DB_PORT: 5432
+      CONNECT_DB_NAME: connect_multitenancy
+      CONNECT_DB_USER: identus_multitenancy
+
+      AGENT_DB_HOST: multitenancy-test-db
+      AGENT_DB_PORT: 5432
+      AGENT_DB_NAME: agent_multitenancy
+      AGENT_DB_USER: identus_multitenancy
+
+      WALLET_DB_HOST: multitenancy-test-db
+      WALLET_DB_PORT: 5432
+      WALLET_DB_NAME: node_multitenancy
+      WALLET_DB_USER: identus_multitenancy
+
+      # Secrets Storage - PostgreSQL for testing (Vault for production)
+      SECRET_STORAGE_BACKEND: postgres
+
+      # PRISM Node Connection (shared with production)
+      PRISM_NODE_HOST: 91.99.4.54
+      PRISM_NODE_PORT: 50053
+
+      # DIDComm Mediator (shared with production)
+      DIDCOMM_SERVICE_ENDPOINT: http://91.99.4.54:8080
+
+      # Logging
+      LOG_LEVEL: INFO
+
+    ports:
+      # HTTP API - exposed on host port 8200
+      - "8200:8085"
+      # DIDComm endpoint - exposed on host port 8290
+      - "8290:8090"
+      # Admin interface - internal only
+      # - "8286:8086"  # Commented out - admin not exposed externally
+
+    networks:
+      - identus-network
+
+    depends_on:
+      multitenancy-test-db:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/_system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    restart: unless-stopped
+
+volumes:
+  multitenancy-test-db-data:
+    driver: local

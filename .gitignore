@@ -1,0 +1,51 @@
+# Node modules
+node_modules/
+**/node_modules/
+
+# Build outputs
+.next/
+**/.next/
+dist/
+build/
+
+# Logs
+*.log
+/tmp/*.log
+*.log.*
+
+# Environment files with secrets
+.env
+.env.local
+**/.env
+
+# Temporary files
+/tmp/*
+!/ tmp/.gitkeep
+*.tmp
+*.temp
+
+# Database files
+*.db
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+**/db-data/
+**/mongodb-data/
+
+# Backups
+/backups/
+*.tar.gz
+
+# Sensitive credentials (keep these templates only)
+# NOTE: multitenancy-test-credentials.txt is included for documentation purposes
+# as this is a test/development environment
