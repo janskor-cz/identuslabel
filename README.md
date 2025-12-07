@@ -19,7 +19,7 @@ A complete, production-ready implementation of Self-Sovereign Identity infrastru
 - **DIDComm v2 Messaging**: Secure, encrypted peer-to-peer communication
 - **W3C Verifiable Credentials**: Standards-compliant credential issuance and verification
 - **StatusList2021 Revocation**: Privacy-preserving credential revocation using compressed bitstrings
-- **Edge Wallets**: Browser-based wallets with IndexedDB storage for user-controlled identity
+- **Edge Wallet**: Browser-based wallet with IndexedDB storage for user-controlled identity
 
 ### Security & Privacy
 
@@ -78,14 +78,19 @@ A complete, production-ready implementation of Self-Sovereign Identity infrastru
 
 ### Access Points
 
-| Service | URL | Purpose |
-|---------|-----|---------|
-| **CA Portal** | `https://identuslabel.cz/ca` | Certification Authority admin interface |
-| **Alice Wallet** | `https://identuslabel.cz/alice` | Example edge wallet (Alice) |
-| **Bob Wallet** | `https://identuslabel.cz/bob` | Example edge wallet (Bob) |
-| **Secure Portal** | `https://identuslabel.cz/ca/dashboard` | VC-authenticated content portal |
-| **Cloud Agent API** | `https://identuslabel.cz/cloud-agent` | Main CA Cloud Agent REST API |
-| **Mediator** | `https://identuslabel.cz/mediator` | DIDComm message routing service |
+| Service | URL | Purpose | Status |
+|---------|-----|---------|--------|
+| **CA Portal** | `https://identuslabel.cz/ca` | Certification Authority admin interface | ✅ Operational |
+| **Alice Wallet** | `https://identuslabel.cz/alice` | Primary development wallet | ✅ Operational |
+| **Secure Portal** | `https://identuslabel.cz/ca/dashboard` | VC-authenticated content portal | ✅ Operational |
+| **Cloud Agent API** | `https://identuslabel.cz/cloud-agent` | Main CA Cloud Agent REST API | ✅ Operational |
+| **Enterprise Agent** | `https://identuslabel.cz/enterprise` | Enterprise multitenancy Cloud Agent | ✅ Operational |
+| **Company Admin Portal** | `https://identuslabel.cz/company-admin` | Company DID and employee management | ✅ Operational |
+| **Mediator** | `https://identuslabel.cz/mediator` | DIDComm message routing service | ✅ Operational |
+| **Multitenancy Agent** | Internal: `http://91.99.4.54:8200` (not proxied) | Inter-company multitenancy | ✅ Operational |
+| **PRISM Node** | `91.99.4.54:50053` | VDR/blockchain layer (gRPC) | ✅ Operational |
+
+**Note**: Bob Wallet decommissioned November 9, 2025. All development and testing should use Alice Wallet only.
 
 ---
 
@@ -96,15 +101,13 @@ A complete, production-ready implementation of Self-Sovereign Identity infrastru
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Client Layer                              │
-│  ┌──────────────┐                           ┌──────────────┐    │
-│  │ Alice Wallet │                           │  Bob Wallet  │    │
-│  │   (Browser)  │                           │   (Browser)  │    │
-│  └──────┬───────┘                           └───────┬──────┘    │
-└─────────┼───────────────────────────────────────────┼───────────┘
-          │                                             │
-          └─────────────────┬───────────────────────────┘
-                            │ DIDComm v2
-                            ▼
+│                     ┌──────────────┐                             │
+│                     │ Alice Wallet │                             │
+│                     │   (Browser)  │                             │
+│                     └──────┬───────┘                             │
+└────────────────────────────┼──────────────────────────────────────┘
+                             │ DIDComm v2
+                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Mediator Layer                              │
 │                   ┌──────────────────┐                           │
@@ -117,10 +120,10 @@ A complete, production-ready implementation of Self-Sovereign Identity infrastru
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Cloud Agent Layer                             │
 │  ┌─────────────────────┐          ┌─────────────────────┐       │
-│  │ Top-Level Issuer    │          │   Main CA           │       │
-│  │   Cloud Agent       │──────────│   Cloud Agent       │       │
-│  │   (Port 8100)       │ issues   │   (Port 8000)       │       │
-│  └─────────┬───────────┘   to     └──────────┬──────────┘       │
+│  │   Enterprise        │          │   Main CA           │       │
+│  │   Cloud Agent       │          │   Cloud Agent       │       │
+│  │   (Port 8300)       │          │   (HTTPS Domain)    │       │
+│  └─────────┬───────────┘          └──────────┬──────────┘       │
 │            │                                   │                 │
 │            │                                   │                 │
 │  ┌─────────▼────────┐              ┌──────────▼─────────┐       │
@@ -141,19 +144,17 @@ A complete, production-ready implementation of Self-Sovereign Identity infrastru
 ### Trust Hierarchy
 
 ```
-Top-Level Issuer DID
-  │
-  ├─ Issues CA Credential
-  │
-  ▼
 Certification Authority DID
   │
   ├─ Issues Identity Credentials
   ├─ Issues Security Clearance Credentials
   ├─ Issues Employee Badge Credentials
+  ├─ Issues Company Identity Credentials
   │
   ▼
-End Users (Alice, Bob, etc.)
+End Users (Alice, etc.)
+  │
+  └─ Present credentials for authentication
 ```
 
 ### Service Dependencies
@@ -169,10 +170,11 @@ End Users (Alice, Bob, etc.)
    - Required by all wallets
 
 3. **Cloud Agents** (DIDComm + VC Issuance)
-   - Top-Level Issuer: Issues CA credentials
    - Main CA: Issues end-user credentials
+   - Enterprise: Internal department credentials
+   - Multitenancy: Inter-company credentials
 
-4. **Edge Wallets** (User Agents)
+4. **Edge Wallet** (User Agent)
    - Browser-based identity management
    - Credential storage and presentation
    - DIDComm messaging
@@ -188,11 +190,11 @@ End Users (Alice, Bob, etc.)
 
 ### 1. DIDComm Connection Establishment
 
-**Flow**: Alice creates invitation → Bob accepts → Both approve → Secure channel established
+**Flow**: Alice creates invitation → User accepts → Both approve → Secure channel established
 
 ```bash
 # Alice creates invitation in CA Portal
-# Bob pastes invitation URL in wallet
+# User pastes invitation URL in wallet
 # Both parties see connection request
 # Both approve → Connection status turns green
 ```
@@ -205,6 +207,7 @@ End Users (Alice, Bob, etc.)
 - **Identity Credential**: Name, email, profile photo
 - **Security Clearance**: Clearance level (PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED, TOP-SECRET)
 - **Employee Badge**: Employee ID, department, role
+- **Company Identity**: Company registration, jurisdiction, authorized issuer status
 
 **States**:
 - `OfferSent`: Waiting for user acceptance
@@ -257,24 +260,24 @@ POSTGRES_PASSWORD=your-postgres-password
 # Ports
 CA_PORT=3005
 ALICE_WALLET_PORT=3001
-BOB_WALLET_PORT=3002
 ```
 
 ### Service Ports
 
-| Service | Internal Port | External Port | Protocol |
-|---------|---------------|---------------|----------|
-| Cloud Agent (Main) | 8085 | 8000 | HTTP |
-| Cloud Agent DIDComm | 8090 | 8000/didcomm | HTTP |
-| Top-Level Issuer | 8085 | 8100 | HTTP |
-| Top-Level DIDComm | 8090 | 8190 | HTTP |
-| Mediator | 8080 | 8080 | WebSocket |
-| PRISM Node | 50053 | 50053 | gRPC |
-| PostgreSQL (Main) | 5432 | 5432 | TCP |
-| PostgreSQL (Top) | 5432 | 5433 | TCP |
-| CA Server | 3005 | 3005 | HTTP |
-| Alice Wallet | 3001 | 3001 | HTTP |
-| Bob Wallet | 3002 | 3002 | HTTP |
+| Service | Internal Port | External Access | Protocol |
+|---------|---------------|-----------------|----------|
+| Cloud Agent (Main) | 8085 | `https://identuslabel.cz/cloud-agent` | HTTPS |
+| Cloud Agent DIDComm | 8090 | `https://identuslabel.cz/didcomm` | HTTPS |
+| Enterprise Agent | 8085 | `https://identuslabel.cz/enterprise` | HTTPS |
+| Enterprise DIDComm | 8090 | `https://identuslabel.cz/enterprise/didcomm` | HTTPS |
+| Multitenancy Agent | 8085 | `http://91.99.4.54:8200` (internal) | HTTP |
+| Mediator | 8080 | `https://identuslabel.cz/mediator` | HTTPS |
+| PRISM Node | 50053 | `91.99.4.54:50053` | gRPC |
+| PostgreSQL (Main) | 5432 | Internal only | TCP |
+| PostgreSQL (Enterprise) | 5432 | Internal only | TCP |
+| CA Server | 3005 | `https://identuslabel.cz/ca` | HTTPS |
+| Alice Wallet | 3001 | `https://identuslabel.cz/alice` | HTTPS |
+| Company Admin Portal | 3010 | `https://identuslabel.cz/company-admin` | HTTPS |
 
 ---
 
@@ -309,7 +312,7 @@ docker-compose -f infrastructure/docker/cloud-agent-with-reverse-proxy.yml resta
 # Mediator
 docker-compose -f infrastructure/docker/identus-mediator/docker-compose.yml restart
 
-# Wallets
+# Alice Wallet
 cd services/edge-wallets/alice-wallet
 fuser -k 3001/tcp && yarn dev &
 ```
@@ -325,7 +328,7 @@ docker logs -f identus-mediator-identus-mediator-1
 # CA Server
 tail -f /tmp/ca.log
 
-# Wallets
+# Alice Wallet
 tail -f /tmp/alice.log
 ```
 
@@ -352,9 +355,17 @@ curl -s https://identuslabel.cz/ca/api/health | jq .
 # Mediator
 curl -I https://identuslabel.cz/mediator/
 
-# Wallets
+# Alice Wallet
 curl -I https://identuslabel.cz/alice/
-curl -I https://identuslabel.cz/bob/
+
+# Enterprise Cloud Agent
+curl -s https://identuslabel.cz/enterprise/_system/health | jq .
+
+# Company Admin Portal
+curl -s https://identuslabel.cz/company-admin/api/health | jq .
+
+# Multitenancy Cloud Agent (internal)
+curl -s http://91.99.4.54:8200/_system/health | jq .
 
 # PRISM Node
 grpcurl -plaintext 91.99.4.54:50053 list
@@ -380,7 +391,7 @@ grpcurl -plaintext 91.99.4.54:50053 list
    # Root workspace
    yarn install
 
-   # Edge wallets
+   # Edge wallet
    cd services/edge-wallets/sdk-ts
    yarn install
    yarn build
@@ -392,13 +403,13 @@ grpcurl -plaintext 91.99.4.54:50053 list
    cd services/certification-authority
    PORT=3005 node server.js
 
-   # Alice Wallet
+   # Alice Wallet (PRIMARY DEVELOPMENT WALLET)
    cd services/edge-wallets/alice-wallet
    yarn dev
 
-   # Bob Wallet
-   cd services/edge-wallets/bob-wallet
-   yarn dev
+   # Company Admin Portal
+   cd services/company-admin-portal
+   ./start.sh
    ```
 
 3. **SDK Development** (if modifying SDK):
@@ -407,14 +418,14 @@ grpcurl -plaintext 91.99.4.54:50053 list
    cd services/edge-wallets/sdk-ts
    yarn build
 
-   # Copy to wallets
+   # Copy to Alice wallet
    cp -r build/* alice-wallet/node_modules/@hyperledger/identus-edge-agent-sdk/build/
-   cp -r build/* bob-wallet/node_modules/@hyperledger/identus-edge-agent-sdk/build/
 
-   # Restart wallets
+   # Restart Alice wallet
    cd alice-wallet && rm -rf .next && yarn dev
-   cd bob-wallet && rm -rf .next && yarn dev
    ```
+
+**Note**: Bob Wallet was decommissioned November 9, 2025. All development should use Alice Wallet only.
 
 ### Testing
 
@@ -422,7 +433,7 @@ grpcurl -plaintext 91.99.4.54:50053 list
 ```bash
 # 1. Create DIDComm connection
 # Alice: Create invitation in CA Portal
-# Bob: Accept invitation in wallet
+# User: Accept invitation in Alice wallet
 
 # 2. Issue credential
 # CA: Send Identity Credential offer to Alice
@@ -430,11 +441,12 @@ grpcurl -plaintext 91.99.4.54:50053 list
 # CA: Approve credential in portal
 # Alice: Verify credential appears in wallet
 
-# 3. Test encrypted messaging
-# Alice: Send CONFIDENTIAL message to Bob
-# Bob: Verify message decrypts successfully
-# Bob: Reply to Alice
-# Alice: Verify reply decrypts successfully
+# 3. Test encrypted content portal
+# Alice: Submit Security Clearance VC to dashboard
+# Dashboard: Encrypts content with Alice's X25519 public key
+# Alice: Click "Decrypt with Wallet"
+# Wallet: Decrypts content locally
+# Dashboard: Displays decrypted content
 
 # 4. Test credential revocation
 # CA: Revoke Alice's credential
@@ -529,11 +541,20 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guid
 
 ## Documentation
 
-- **[CLAUDE.md](CLAUDE.md)**: Complete technical documentation and architectural details
+For complete technical documentation and architectural details, see:
+
+- **[CLAUDE.md](CLAUDE.md)**: Complete technical documentation and project instructions
 - **[CHANGELOG.md](CHANGELOG.md)**: Version history and updates
 - **[DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md)**: Detailed development timeline
 - **[SDK_MODIFICATIONS.md](services/edge-wallets/SDK_MODIFICATIONS.md)**: Custom SDK fixes
 - **[WORDPRESS_INTEGRATION.md](services/certification-authority/docs/WORDPRESS_INTEGRATION.md)**: CMS integration guide
+
+**Additional Documentation**:
+- **[/root/docs/](docs/)**: Complete documentation structure
+  - Architecture diagrams
+  - API references
+  - Deployment guides
+  - Security documentation
 
 ---
 
@@ -591,7 +612,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 **Current Version**: 4.0 (Phase 2 Client-Side Encryption - Production Ready)
 
-**Last Updated**: 2025-11-02
+**Last Updated**: 2025-11-15
 
 **Production Status**: Fully Operational
 
@@ -599,6 +620,14 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - Edge Agent SDK: 6.6.0 (with custom fixes)
 - Mediator: Latest stable
 - PRISM Node: Latest stable
+
+**Infrastructure Updates** (November 2025):
+- ✅ All services migrated to HTTPS domain access (`identuslabel.cz`)
+- ✅ Bob Wallet decommissioned (November 9, 2025)
+- ✅ Alice Wallet designated as primary development wallet
+- ✅ Enterprise multitenancy infrastructure operational
+- ✅ Company Admin Portal deployed
+- ✅ Phase 2 client-side encryption fully operational
 
 ---
 

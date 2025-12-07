@@ -1,0 +1,11 @@
+{
+  "schemaName": "CertificationAuthorityIdentity",
+  "schemaVersion": "1.0.0",
+  "schemaGUID": "8ab15fc1-ecba-385a-b0ab-a7ce489b0327",
+  "schemaId": "164769d2-534a-453e-b054-33eef313dfc3",
+  "longId": "did:prism:3a0db80b774bf7736058a518c31fcfdb17e531b772b4ff0676809847b02b58b8/164769d2-534a-453e-b054-33eef313dfc3?version=1.0.0",
+  "author": "did:prism:3a0db80b774bf7736058a518c31fcfdb17e531b772b4ff0676809847b02b58b8",
+  "cloudAgentEndpoint": "https://identuslabel.cz/top-level-issuer",
+  "registrationDate": "2025-11-04T17:27:42.687199Z",
+  "status": "registered"
+}

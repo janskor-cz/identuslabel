@@ -1,0 +1,81 @@
+version: '3.8'
+
+networks:
+  identus-network:
+    external: true
+    name: identus-network
+
+services:
+  # Reverse proxy for cloud agent + domain routing (identuslabel.cz)
+  cloud-agent-proxy:
+    image: caddy:2.7.6-alpine
+    container_name: identus-cloud-agent-proxy
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data  # Let's Encrypt SSL certificates
+      - caddy_config:/config  # Caddy configuration cache
+    network_mode: host  # Use host networking for direct access to all services
+    depends_on:
+      - cloud-agent
+    restart: always
+
+  # Cloud Agent following official Hyperledger Identus pattern
+  cloud-agent:
+    image: hyperledgeridentus/identus-cloud-agent:2.1.0
+    container_name: identus-cloud-agent-backend
+    # Publish ports to host for Caddy access (host networking mode)
+    ports:
+      - "8085:8085"  # REST API port
+      - "8090:8090"  # DIDComm port
+    # DNS resolution fix: Allow container to resolve identuslabel.cz to host
+    extra_hosts:
+      - "identuslabel.cz:91.99.4.54"
+    environment:
+      # Official configuration pattern
+      ADMIN_TOKEN: admin
+      API_KEY_ENABLED: 'false'
+      API_KEY_AUTO_PROVISIONING: 'false'
+      
+      # Single-tenant configuration with default wallet
+      DEFAULT_WALLET_ENABLED: 'true'
+      DEFAULT_WALLET_ID: simple-wallet
+      DEFAULT_WALLET_PASSPHRASE: simple-wallet-pass-2025
+      
+      # Database configuration (using postgres superuser for simplicity)
+      AGENT_DB_HOST: identus-postgres
+      AGENT_DB_NAME: agent
+      AGENT_DB_PASSWORD: postgres
+      AGENT_DB_PORT: '5432'
+      AGENT_DB_USER: postgres
+
+      CONNECT_DB_HOST: identus-postgres
+      CONNECT_DB_NAME: connect
+      CONNECT_DB_PASSWORD: postgres
+      CONNECT_DB_PORT: '5432'
+      CONNECT_DB_USER: postgres
+
+      POLLUX_DB_HOST: identus-postgres
+      POLLUX_DB_NAME: pollux
+      POLLUX_DB_PASSWORD: postgres
+      POLLUX_DB_PORT: '5432'
+      POLLUX_DB_USER: postgres
+      
+      # Local PRISM Node (in-memory ledger)
+      PRISM_NODE_HOST: local-prism-node
+      PRISM_NODE_PORT: '50053'
+      
+      # Service URLs - using HTTPS domain for edge wallet access
+      REST_SERVICE_URL: https://identuslabel.cz/cloud-agent
+      POLLUX_STATUS_LIST_REGISTRY_PUBLIC_URL: https://identuslabel.cz/cloud-agent
+      DIDCOMM_SERVICE_URL: https://identuslabel.cz/didcomm
+      
+      # Standard configuration
+      SECRET_STORAGE_BACKEND: postgres
+    restart: always
+    networks:
+      - identus-network
+volumes:
+  caddy_data:
+    name: identus-caddy-data
+  caddy_config:
+    name: identus-caddy-config

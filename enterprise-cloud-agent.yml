@@ -1,0 +1,138 @@
+version: '3.8'
+
+# Enterprise Cloud Agent Infrastructure
+# For internal company departments: HR, IT, Security
+# Security-hardened configuration with:
+# - Custom database user (identus_enterprise)
+# - NO external database port exposure
+# - Secure credentials
+# - Docker network isolation
+# - Multitenancy enabled for department separation
+
+networks:
+  identus-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+
+services:
+  # PostgreSQL Database - INTERNAL ONLY (NO external port)
+  enterprise-db:
+    container_name: enterprise-db
+    image: postgres:16
+    environment:
+      # SECURITY: Custom postgres password
+      POSTGRES_PASSWORD: "5P7b0cTd0pMSOfFcehB22l9hFbsMKk2S"
+      # Database initialization
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    volumes:
+      # Custom pg_hba.conf for Docker network trust authentication
+      - ./enterprise-pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      # Database initialization script with custom user
+      - ./init-enterprise-dbs.sql:/docker-entrypoint-initdb.d/init-dbs.sql:ro
+      # Persistent storage
+      - enterprise-db-data:/var/lib/postgresql/data
+    command: >
+      postgres
+      -c hba_file=/etc/postgresql/pg_hba.conf
+      -c listen_addresses='*'
+      -c max_connections=200
+      -c shared_buffers=256MB
+    networks:
+      - identus-network
+    # Port mapping for Company Admin Portal access (external Node.js server)
+    ports:
+      - "5434:5432"  # Map to 5434 to avoid conflict with other PostgreSQL instances
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U identus_enterprise -d pollux_enterprise"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Cloud Agent - Enterprise Multitenancy for Internal Departments
+  enterprise-cloud-agent:
+    container_name: enterprise-cloud-agent
+    image: hyperledgeridentus/identus-cloud-agent:2.1.0
+    environment:
+      # SECURITY: Secure admin token (32 chars random)
+      ADMIN_TOKEN: "3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu"
+
+      # Multitenancy Configuration
+      API_KEY_ENABLED: 'true'
+      API_KEY_AUTO_PROVISIONING: 'false'  # Manual tenant creation only
+      API_KEY_AUTHENTICATE_AS_DEFAULT_USER: 'false'
+      API_KEY_SALT: "24cf35cc510d5f7c846252502fb613ea0ea5ed98e80c4d44c126d923ff32d462"
+      DEFAULT_WALLET_ENABLED: 'false'  # No default wallet in multitenancy mode
+
+      # Service URLs
+      REST_SERVICE_URL: http://91.99.4.54:8300/cloud-agent
+      DIDCOMM_SERVICE_URL: https://identuslabel.cz/enterprise/didcomm
+
+      # Database Configuration - CUSTOM USER (NOT postgres)
+      POLLUX_DB_HOST: enterprise-db
+      POLLUX_DB_PORT: 5432
+      POLLUX_DB_NAME: pollux_enterprise
+      POLLUX_DB_USER: identus_enterprise
+      # NO DB_PASSWORD - using trust authentication from pg_hba.conf
+
+      CONNECT_DB_HOST: enterprise-db
+      CONNECT_DB_PORT: 5432
+      CONNECT_DB_NAME: connect_enterprise
+      CONNECT_DB_USER: identus_enterprise
+
+      AGENT_DB_HOST: enterprise-db
+      AGENT_DB_PORT: 5432
+      AGENT_DB_NAME: agent_enterprise
+      AGENT_DB_USER: identus_enterprise
+
+      WALLET_DB_HOST: enterprise-db
+      WALLET_DB_PORT: 5432
+      WALLET_DB_NAME: node_enterprise
+      WALLET_DB_USER: identus_enterprise
+
+      # Secrets Storage - PostgreSQL for testing (Vault for production)
+      SECRET_STORAGE_BACKEND: postgres
+
+      # PRISM Node Connection (shared with other infrastructure)
+      PRISM_NODE_HOST: 91.99.4.54
+      PRISM_NODE_PORT: 50053
+
+      # DIDComm Mediator (shared with other infrastructure)
+      DIDCOMM_SERVICE_ENDPOINT: http://91.99.4.54:8080
+
+      # Logging
+      LOG_LEVEL: INFO
+
+    ports:
+      # HTTP API - exposed on host port 8300
+      - "8300:8085"
+      # DIDComm endpoint - exposed on host port 8390
+      - "8390:8090"
+      # Admin interface - internal only
+      # - "8386:8086"  # Commented out - admin not exposed externally
+
+    networks:
+      - identus-network
+
+    # DNS Resolution - Allow container to resolve identuslabel.cz to host IP
+    extra_hosts:
+      - "identuslabel.cz:91.99.4.54"
+
+    depends_on:
+      enterprise-db:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/_system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    restart: unless-stopped
+
+volumes:
+  enterprise-db-data:
+    driver: local

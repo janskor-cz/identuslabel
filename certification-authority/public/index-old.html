@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certification Authority - Digital Certificate Issuance</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+        
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.95;
+        }
+        
+        .main {
+            padding: 40px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+        
+        .section {
+            padding: 30px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            background: #f9f9f9;
+        }
+        
+        .section.full-width {
+            grid-column: 1 / -1;
+        }
+        
+        .section h2 {
+            color: #c31432;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+            border-bottom: 2px solid #c31432;
+            padding-bottom: 10px;
+        }
+        
+        .certificate-types {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .cert-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            border: 2px solid #e0e0e0;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .cert-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+            border-color: #c31432;
+        }
+        
+        .cert-card .icon {
+            font-size: 3rem;
+            margin-bottom: 10px;
+        }
+        
+        .cert-card h3 {
+            color: #240b36;
+            margin-bottom: 5px;
+        }
+        
+        .cert-card p {
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            margin: 5px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(195, 20, 50, 0.3);
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .btn.secondary {
+            background: #6c757d;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        
+        .status.info {
+            background: #cce5ff;
+            border: 1px solid #b8daff;
+            color: #004085;
+        }
+        
+        .code {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            overflow-x: auto;
+            margin: 10px 0;
+            word-break: break-all;
+        }
+        
+        .connections-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .connection-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border: 1px solid #e0e0e0;
+        }
+        
+        .connection-card h4 {
+            color: #240b36;
+            margin-bottom: 10px;
+        }
+        
+        .connection-card .details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            font-size: 0.9rem;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            border: 2px solid #e0e0e0;
+        }
+        
+        .stat-card .number {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #c31432;
+        }
+        
+        .stat-card .label {
+            color: #666;
+            font-size: 0.9rem;
+            margin-top: 5px;
+        }
+        
+        .form-group {
+            margin: 20px 0;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #240b36;
+        }
+        
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 1rem;
+        }
+        
+        .form-group input:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #c31432;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin: 0 2px;
+        }
+        
+        .badge.active {
+            background: #28a745;
+            color: white;
+        }
+        
+        .badge.pending {
+            background: #ffc107;
+            color: #333;
+        }
+        
+        .badge.cert-type {
+            background: #c31432;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <span>🏛️</span>
+                <span>Certification Authority</span>
+            </h1>
+            <p>Official Digital Certificate Issuance Portal</p>
+            <p style="margin-top: 10px; font-size: 0.9rem; opacity: 0.8;">
+                Trusted Authority for Professional & Educational Certifications
+            </p>
+        </div>
+        
+        <div class="main">
+            <!-- Certificate Types Section -->
+            <div class="section full-width">
+                <h2>📜 Available Certificate Types</h2>
+                <div class="certificate-types">
+                    <div class="cert-card" onclick="selectCertificateType('professional')">
+                        <div class="icon">👔</div>
+                        <h3>Professional</h3>
+                        <p>Industry certifications</p>
+                    </div>
+                    <div class="cert-card" onclick="selectCertificateType('educational')">
+                        <div class="icon">🎓</div>
+                        <h3>Educational</h3>
+                        <p>Academic credentials</p>
+                    </div>
+                    <div class="cert-card" onclick="selectCertificateType('compliance')">
+                        <div class="icon">✅</div>
+                        <h3>Compliance</h3>
+                        <p>Regulatory compliance</p>
+                    </div>
+                    <div class="cert-card" onclick="window.location.href='/realperson'">
+                        <div class="icon">🆔</div>
+                        <h3>RealPerson ID</h3>
+                        <p>National ID-like credentials</p>
+                    </div>
+                    <div class="cert-card" onclick="window.location.href='/login'">
+                        <div class="icon">🔐</div>
+                        <h3>Secure Login</h3>
+                        <p>Credential-based authentication</p>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 20px; padding: 20px; background: linear-gradient(135deg, #fff3cd 0%, #f0f8ff 100%); border-radius: 10px; border: 2px solid #c31432; box-shadow: 0 4px 12px rgba(195,20,50,0.1);">
+                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <div>
+                            <h3 style="color: #c31432; margin: 0 0 8px 0; font-size: 1.2rem;">🔐 New: Secure Credential Login</h3>
+                            <p style="color: #333; margin: 0 0 10px 0; font-size: 0.95rem;">
+                                Access secured portal using your RealPerson credential
+                            </p>
+                            <small style="color: #666; font-size: 0.85rem;">
+                                • Zero-knowledge proof authentication • No passwords required • Privacy-preserving
+                            </small>
+                        </div>
+                        <div>
+                            <a href="/login" class="btn" style="background: linear-gradient(135deg, #c31432 0%, #240b36 100%); text-decoration: none; font-size: 1rem; padding: 12px 20px; white-space: nowrap;">
+                                🔓 Try Secure Login
+                            </a>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 20px; padding: 20px; background: linear-gradient(135deg, #e8f4fd 0%, #f0f8ff 100%); border-radius: 10px; border: 2px solid #0066cc; box-shadow: 0 4px 12px rgba(0,102,204,0.1);">
+                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <div>
+                            <h3 style="color: #0066cc; margin: 0 0 8px 0; font-size: 1.2rem;">🆔 RealPerson National ID Service</h3>
+                            <p style="color: #333; margin: 0 0 10px 0; font-size: 0.95rem;">
+                                Issue official identity credentials similar to national IDs for real persons
+                            </p>
+                            <small style="color: #666; font-size: 0.85rem;">
+                                • Complete identity verification • Government-grade security • W3C compliant credentials
+                            </small>
+                        </div>
+                        <div>
+                            <a href="/realperson" class="btn" style="background: linear-gradient(135deg, #0066cc 0%, #004499 100%); text-decoration: none; font-size: 1rem; padding: 12px 20px; white-space: nowrap;">
+                                🚀 Create RealPerson ID
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Statistics Dashboard -->
+            <div class="section full-width">
+                <h2>📊 Certificate Issuance Statistics</h2>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="number" id="totalCerts">0</div>
+                        <div class="label">Total Certificates</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="number" id="activeDids">0</div>
+                        <div class="label">Active DIDs</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="number" id="pendingRequests">0</div>
+                        <div class="label">Pending Requests</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="number" id="activeConnections">0</div>
+                        <div class="label">Active Connections</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- DID Management -->
+            <div class="section">
+                <h2>🆔 Authority DID Management</h2>
+                <p>Manage your Certification Authority's Decentralized Identifier</p>
+                <button class="btn" onclick="createAuthorityDID()">Create Authority DID</button>
+                <button class="btn" onclick="listAuthorityDIDs()">Refresh DIDs</button>
+                <div id="didResult"></div>
+            </div>
+            
+            <!-- Certificate Request Form -->
+            <div class="section">
+                <h2>📝 Issue New Certificate</h2>
+                <div class="form-group">
+                    <label for="applicantName">Applicant Name/Organization:</label>
+                    <input type="text" id="applicantName" placeholder="Enter applicant name">
+                </div>
+                <div class="form-group">
+                    <label for="certType">Certificate Type:</label>
+                    <input type="text" id="certType" placeholder="Select from available types" readonly>
+                </div>
+                <button class="btn" onclick="createCertificateInvitation()">
+                    Generate Certificate Invitation
+                </button>
+                <div id="invitationResult"></div>
+            </div>
+            
+            <!-- Accept Applications -->
+            <div class="section">
+                <h2>📥 Accept Certificate Application</h2>
+                <p><strong>Instructions:</strong> Paste the invitation you received from a certificate applicant. Supported formats:</p>
+                <ul style="margin: 10px 0; padding-left: 20px; font-size: 0.9rem; color: #666;">
+                    <li>📋 <strong>Base64 string</strong> (starts with "eyJ...") - Most common format</li>
+                    <li>🔗 <strong>Invitation URL</strong> (contains "?_oob=...") - Will extract Base64 automatically</li>
+                    <li>📄 <strong>JSON object</strong> - Raw invitation object</li>
+                </ul>
+                <div class="form-group">
+                    <label for="applicationInvitation">Application Invitation:</label>
+                    <textarea id="applicationInvitation" rows="6" style="font-family: monospace; font-size: 0.9rem;"
+                        placeholder="Paste the invitation from certificate applicant here...&#10;&#10;Example Base64: eyJpZCI6IjEyMy...&#10;Example URL: https://my.domain.com/path?_oob=eyJpZCI6IjEyMy...&#10;Example JSON: {&quot;id&quot;: &quot;123...&quot;, &quot;type&quot;: &quot;https://...&quot;}"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="applicantLabel">Your Label for this Applicant:</label>
+                    <input type="text" id="applicantLabel" placeholder="e.g., 'John Smith - Professional Cert', 'ABC Corp - Compliance', etc." 
+                           style="width: 100%;" maxlength="100">
+                    <small style="color: #666; display: block; margin-top: 5px; font-size: 0.85rem;">
+                        Add a label to identify who this applicant is (optional, max 100 chars)
+                    </small>
+                </div>
+                <button class="btn" onclick="acceptApplication()">
+                    ✅ Accept Application
+                </button>
+                <div id="acceptResult"></div>
+            </div>
+            
+            <!-- Active Connections -->
+            <div class="section">
+                <h2>🔗 Certificate Recipients</h2>
+                <p>Active connections with certificate holders</p>
+                <button class="btn" onclick="listConnections()">Refresh Connections</button>
+                <div id="connectionsResult" class="connections-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedCertType = '';
+        let authorityDIDs = [];
+        let connections = [];
+        let connectionLabels = {}; // Store custom labels for connections
+
+        // Initialize on load
+        window.addEventListener('load', async () => {
+            loadConnectionLabels();
+            await checkHealth();
+            await listAuthorityDIDs();
+            await listConnections();
+            updateStatistics();
+        });
+
+        function loadConnectionLabels() {
+            const stored = localStorage.getItem('ca_connectionLabels');
+            if (stored) {
+                connectionLabels = JSON.parse(stored);
+            }
+        }
+
+        function saveConnectionLabels() {
+            localStorage.setItem('ca_connectionLabels', JSON.stringify(connectionLabels));
+        }
+
+        async function checkHealth() {
+            try {
+                const response = await fetch('/api/health');
+                const data = await response.json();
+                console.log('Certification Authority Health:', data);
+            } catch (error) {
+                console.error('Health check failed:', error);
+            }
+        }
+
+        function selectCertificateType(type) {
+            selectedCertType = type;
+            document.getElementById('certType').value = type.charAt(0).toUpperCase() + type.slice(1);
+            
+            // Visual feedback
+            document.querySelectorAll('.cert-card').forEach(card => {
+                card.style.borderColor = '#e0e0e0';
+            });
+            event.currentTarget.style.borderColor = '#c31432';
+        }
+
+        async function createAuthorityDID() {
+            try {
+                const response = await fetch('/api/create-did', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('didResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ Authority DID Created Successfully!</strong><br>
+                            <div class="code">${data.did}</div>
+                            <strong>Status:</strong> ${data.status}<br>
+                            ${data.status === 'CREATED' ? 
+                                `<button class="btn" onclick="publishDID('${data.shortDid}')">
+                                    📤 Publish to PRISM Network
+                                </button>` : ''}
+                        </div>
+                    `;
+                    await listAuthorityDIDs();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('didResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to create DID:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function publishDID(didId) {
+            try {
+                const response = await fetch('/api/publish-did', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ didId })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('didResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ DID Published to PRISM Network!</strong><br>
+                            <strong>DID:</strong> ${data.didId}<br>
+                            <strong>Status:</strong> ${data.status}
+                        </div>
+                    `;
+                    await listAuthorityDIDs();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('didResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to publish DID:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function listAuthorityDIDs() {
+            try {
+                const response = await fetch('/api/dids');
+                const data = await response.json();
+                
+                if (data.success) {
+                    authorityDIDs = data.dids;
+                    
+                    if (data.dids.length === 0) {
+                        document.getElementById('didResult').innerHTML = `
+                            <div class="status info">
+                                <strong>📋 No Authority DIDs found</strong><br>
+                                Create your first Authority DID to start issuing certificates.
+                            </div>
+                        `;
+                    } else {
+                        const didList = data.dids.map(did => {
+                            let statusBadge = '';
+                            switch(did.status) {
+                                case 'CREATED':
+                                    statusBadge = '<span class="badge pending">Not Published</span>';
+                                    break;
+                                case 'PUBLISHED':
+                                    statusBadge = '<span class="badge active">Published</span>';
+                                    break;
+                                default:
+                                    statusBadge = `<span class="badge">${did.status}</span>`;
+                            }
+                            
+                            return `
+                            <div class="connection-card">
+                                <h4>Authority DID ${statusBadge}</h4>
+                                <div class="code">${did.did}</div>
+                                ${did.status === 'CREATED' ? 
+                                    `<button class="btn" onclick="publishDID('${did.did}')">
+                                        📤 Publish to PRISM
+                                    </button>` : ''}
+                            </div>
+                            `;
+                        }).join('');
+                        
+                        document.getElementById('didResult').innerHTML = didList;
+                    }
+                    updateStatistics();
+                }
+            } catch (error) {
+                console.error('Error fetching DIDs:', error);
+            }
+        }
+
+        async function createCertificateInvitation() {
+            const applicantName = document.getElementById('applicantName').value.trim();
+            
+            if (!applicantName) {
+                alert('Please enter applicant name');
+                return;
+            }
+            
+            if (!selectedCertType) {
+                alert('Please select a certificate type');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/connections/create-invitation', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        label: `Certificate: ${selectedCertType} - ${applicantName}`,
+                        certificateType: selectedCertType
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    const invitationUrl = data.invitation.invitationUrl;
+                    const base64Invitation = invitationUrl.split('_oob=')[1];
+                    
+                    document.getElementById('invitationResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ Certificate Invitation Created!</strong><br>
+                            <strong>Applicant:</strong> ${applicantName}<br>
+                            <strong>Type:</strong> <span class="badge cert-type">${selectedCertType}</span><br>
+                            <strong>Connection ID:</strong> ${data.connectionId}<br><br>
+                            
+                            <strong>📋 Share this invitation with ${applicantName}:</strong>
+                            <div class="code" style="cursor: pointer" 
+                                onclick="copyToClipboard('${base64Invitation}')" 
+                                title="Click to copy">
+                                ${base64Invitation}
+                            </div>
+                            <button class="btn" onclick="copyToClipboard('${base64Invitation}')">
+                                📋 Copy Invitation
+                            </button>
+                        </div>
+                    `;
+                    
+                    // Clear form
+                    document.getElementById('applicantName').value = '';
+                    document.getElementById('certType').value = '';
+                    selectedCertType = '';
+                    
+                    await listConnections();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('invitationResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to create invitation:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function acceptApplication() {
+            const invitation = document.getElementById('applicationInvitation').value.trim();
+            const label = document.getElementById('applicantLabel').value.trim();
+            
+            if (!invitation) {
+                alert('Please paste the application invitation');
+                return;
+            }
+            
+            try {
+                // Extract Base64 if it's a URL or JSON
+                let invitationString = invitation;
+                if (invitation.includes('_oob=')) {
+                    const urlParams = new URLSearchParams(invitation.split('?')[1]);
+                    invitationString = urlParams.get('_oob');
+                    if (!invitationString) {
+                        throw new Error('Invalid invitation URL. No _oob parameter found.');
+                    }
+                } else if (invitation.startsWith('eyJ')) {
+                    // Looks like Base64
+                    invitationString = invitation;
+                } else {
+                    try {
+                        // Try to parse as JSON and convert to Base64
+                        const invitationObj = JSON.parse(invitation);
+                        invitationString = btoa(JSON.stringify(invitationObj));
+                    } catch (e) {
+                        throw new Error('Invalid invitation format. Please provide valid JSON, Base64, or invitation URL.');
+                    }
+                }
+                
+                const response = await fetch('/api/connections/accept-invitation', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        invitation: invitationString,
+                        label: label || undefined
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Store custom label if provided
+                    if (label) {
+                        connectionLabels[data.connectionId] = label;
+                        saveConnectionLabels();
+                    }
+                    
+                    document.getElementById('acceptResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ Certificate Application Accepted!</strong><br>
+                            ${label ? `<strong>📋 Your Label:</strong> <span style="color: #c31432; font-weight: bold;">${label}</span><br>` : ''}
+                            <strong>Connection ID:</strong> ${data.connectionId}<br>
+                            <strong>Status:</strong> ${data.state}<br>
+                            <strong>Role:</strong> ${data.role}<br>
+                            <strong>My DID:</strong> <span style="font-family: monospace; font-size: 0.8rem;">${data.myDid}</span><br>
+                            <strong>Their DID:</strong> <span style="font-family: monospace; font-size: 0.8rem;">${data.theirDid}</span>
+                        </div>
+                    `;
+                    
+                    // Clear form
+                    document.getElementById('applicationInvitation').value = '';
+                    document.getElementById('applicantLabel').value = '';
+                    
+                    await listConnections();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('acceptResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to accept application:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function listConnections() {
+            try {
+                const response = await fetch('/api/connections');
+                const data = await response.json();
+                
+                if (data.success) {
+                    connections = data.connections.filter(conn => 
+                        conn.state !== 'InvitationExpired'
+                    );
+                    
+                    if (connections.length === 0) {
+                        document.getElementById('connectionsResult').innerHTML = `
+                            <div class="status info">
+                                <strong>🔗 No certificate recipients yet</strong><br>
+                                Create invitations or accept applications to establish connections.
+                            </div>
+                        `;
+                    } else {
+                        const connectionList = connections.map(conn => {
+                            const isActive = ['ConnectionResponseSent', 'ConnectionResponseReceived', 
+                                            'ConnectionCompleted', 'Active'].includes(conn.state);
+                            
+                            // Get custom label or fall back to connection label
+                            const customLabel = connectionLabels[conn.connectionId];
+                            const displayLabel = customLabel || conn.label || 'Certificate Recipient';
+                            
+                            return `
+                            <div class="connection-card">
+                                <h4>${displayLabel}</h4>
+                                <div class="details">
+                                    <div><strong>ID:</strong> ${conn.connectionId.substring(0, 8)}...</div>
+                                    <div><strong>Status:</strong> 
+                                        <span class="badge ${isActive ? 'active' : 'pending'}">
+                                            ${isActive ? '✅ Active' : '⏳ Pending'}
+                                        </span>
+                                    </div>
+                                    <div><strong>Role:</strong> ${conn.role}</div>
+                                    <div><strong>Created:</strong> ${new Date(conn.createdAt).toLocaleDateString()}</div>
+                                </div>
+                                <div style="margin-top: 10px;">
+                                    <button class="btn secondary" style="font-size: 0.8rem; padding: 6px 10px;" 
+                                        onclick="editConnectionLabel('${conn.connectionId}', '${(displayLabel || '').replace(/'/g, "\\'")}')">
+                                        ✏️ Edit Label
+                                    </button>
+                                    ${isActive ? `
+                                        <button class="btn" style="margin-left: 5px;" 
+                                            onclick="issueCertificate('${conn.connectionId}')">
+                                            📜 Issue Certificate
+                                        </button>
+                                    ` : ''}
+                                </div>
+                            </div>
+                            `;
+                        }).join('');
+                        
+                        document.getElementById('connectionsResult').innerHTML = connectionList;
+                    }
+                    updateStatistics();
+                }
+            } catch (error) {
+                console.error('Error fetching connections:', error);
+            }
+        }
+
+        function editConnectionLabel(connectionId, currentLabel) {
+            const newLabel = prompt('Enter a new label for this connection:', currentLabel);
+            if (newLabel !== null) { // User didn't cancel
+                if (newLabel.trim()) {
+                    connectionLabels[connectionId] = newLabel.trim();
+                } else {
+                    delete connectionLabels[connectionId]; // Remove label if empty
+                }
+                saveConnectionLabels();
+                listConnections(); // Refresh display
+            }
+        }
+
+        function issueCertificate(connectionId) {
+            alert(`Certificate issuance for connection ${connectionId} will be implemented with credential system`);
+        }
+
+        function updateStatistics() {
+            // Update stats based on current data
+            document.getElementById('activeDids').textContent = 
+                authorityDIDs.filter(d => d.status === 'PUBLISHED').length;
+            
+            const activeConns = connections.filter(c => 
+                ['ConnectionResponseSent', 'ConnectionResponseReceived', 
+                 'ConnectionCompleted', 'Active'].includes(c.state)
+            ).length;
+            
+            document.getElementById('activeConnections').textContent = activeConns;
+            document.getElementById('pendingRequests').textContent = 
+                connections.length - activeConns;
+            
+            // Simulated total certificates (would come from credential system)
+            document.getElementById('totalCerts').textContent = 
+                Math.floor(activeConns * 1.5);
+        }
+
+        function copyToClipboard(text) {
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText(text).then(() => {
+                    alert('✅ Copied to clipboard!');
+                }).catch(err => {
+                    console.error('Failed to copy:', err);
+                });
+            } else {
+                // Fallback
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                alert('✅ Copied to clipboard!');
+            }
+        }
+    </script>
+</body>
+</html>

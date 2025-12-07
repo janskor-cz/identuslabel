@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Portal - Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .dashboard-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        /* Header */
+        .dashboard-header {
+            background: white;
+            padding: 20px 30px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+        }
+
+        .header-left h1 {
+            color: #2d3748;
+            font-size: 24px;
+            margin-bottom: 5px;
+        }
+
+        .header-left .employee-name {
+            color: #667eea;
+            font-size: 16px;
+            font-weight: 500;
+        }
+
+        .header-right {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .logout-btn {
+            background: #e53e3e;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .logout-btn:hover {
+            background: #c53030;
+        }
+
+        /* Dashboard Grid */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        /* Card Styles */
+        .dashboard-card {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .card-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            margin-right: 15px;
+        }
+
+        .card-icon.profile {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        .card-icon.training {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        }
+
+        .card-icon.credentials {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        /* Profile Section */
+        .profile-field {
+            margin-bottom: 15px;
+        }
+
+        .profile-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #718096;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 5px;
+        }
+
+        .profile-value {
+            font-size: 14px;
+            color: #2d3748;
+            padding: 10px;
+            background: #f7fafc;
+            border-radius: 6px;
+            word-break: break-all;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .copy-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: background 0.2s;
+            flex-shrink: 0;
+            margin-left: 10px;
+        }
+
+        .copy-btn:hover {
+            background: #5568d3;
+        }
+
+        .copy-btn.copied {
+            background: #48bb78;
+        }
+
+        /* Training Status */
+        .training-status {
+            display: flex;
+            align-items: center;
+            padding: 20px;
+            background: #f7fafc;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .status-badge {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 30px;
+            margin-right: 20px;
+            flex-shrink: 0;
+        }
+
+        .status-badge.valid {
+            background: #c6f6d5;
+            border: 3px solid #48bb78;
+        }
+
+        .status-badge.expired {
+            background: #fed7d7;
+            border: 3px solid #e53e3e;
+        }
+
+        .status-info {
+            flex: 1;
+        }
+
+        .status-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 5px;
+        }
+
+        .status-title.valid {
+            color: #38a169;
+        }
+
+        .status-title.expired {
+            color: #e53e3e;
+        }
+
+        .status-detail {
+            font-size: 13px;
+            color: #718096;
+        }
+
+        .expiry-info {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px;
+            background: white;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .expiry-info-item {
+            text-align: center;
+        }
+
+        .expiry-label {
+            font-size: 11px;
+            color: #718096;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 5px;
+        }
+
+        .expiry-value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        .expiry-value.warning {
+            color: #ed8936;
+        }
+
+        .expiry-value.expired {
+            color: #e53e3e;
+        }
+
+        /* Credentials Section */
+        .credentials-placeholder {
+            text-align: center;
+            padding: 30px;
+            background: #f7fafc;
+            border-radius: 8px;
+        }
+
+        .credentials-placeholder-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+
+        .credentials-placeholder-text {
+            font-size: 14px;
+            color: #718096;
+            margin-bottom: 20px;
+        }
+
+        .view-credentials-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .view-credentials-btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .view-credentials-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Loading State */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .loading-spinner {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            text-align: center;
+        }
+
+        .spinner {
+            border: 4px solid #e2e8f0;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            color: #2d3748;
+            font-size: 14px;
+        }
+
+        /* Error State */
+        .error-banner {
+            background: #fed7d7;
+            border: 1px solid #fc8181;
+            color: #c53030;
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .error-banner.show {
+            display: block;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .dashboard-header {
+                flex-direction: column;
+                gap: 15px;
+                text-align: center;
+            }
+
+            .header-right {
+                width: 100%;
+                justify-content: center;
+            }
+
+            .expiry-info {
+                flex-direction: column;
+                gap: 10px;
+            }
+        }
+
+        /* Hidden class */
+        .hidden {
+            display: none;
+        }
+
+        /* Documents Section */
+        .card-icon.documents {
+            background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+        }
+
+        .documents-list {
+            display: grid;
+            gap: 15px;
+        }
+
+        .document-item {
+            background: #f7fafc;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.2s;
+        }
+
+        .document-item:hover {
+            transform: translateX(5px);
+            border-color: #667eea;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.1);
+        }
+
+        .document-info {
+            flex: 1;
+        }
+
+        .document-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 5px;
+        }
+
+        .document-meta {
+            display: flex;
+            gap: 15px;
+            font-size: 13px;
+            color: #718096;
+        }
+
+        .classification-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .classification-badge.UNCLASSIFIED {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+
+        .classification-badge.CONFIDENTIAL {
+            background: #feebc8;
+            color: #7c2d12;
+        }
+
+        .classification-badge.SECRET {
+            background: #fed7d7;
+            color: #742a2a;
+        }
+
+        .classification-badge.TOP_SECRET {
+            background: #e9d5ff;
+            color: #4c1d95;
+        }
+
+        .view-document-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .view-document-btn:hover {
+            background: #5568d3;
+        }
+
+        .empty-state, .loading-state, .error-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #718096;
+        }
+
+        .empty-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="loading-spinner">
+            <div class="spinner"></div>
+            <div class="loading-text">Loading dashboard...</div>
+        </div>
+    </div>
+
+    <div class="dashboard-container">
+        <!-- Error Banner -->
+        <div id="errorBanner" class="error-banner"></div>
+
+        <!-- Dashboard Header -->
+        <div class="dashboard-header">
+            <div class="header-left">
+                <h1>Employee Portal</h1>
+                <div class="employee-name" id="employeeName">Welcome back!</div>
+            </div>
+            <div class="header-right">
+                <button class="logout-btn" onclick="handleLogout()">
+                    Logout
+                </button>
+            </div>
+        </div>
+
+        <!-- Dashboard Grid -->
+        <div class="dashboard-grid">
+            <!-- Profile Card -->
+            <div class="dashboard-card">
+                <div class="card-header">
+                    <div class="card-icon profile">👤</div>
+                    <h2 class="card-title">My Profile</h2>
+                </div>
+
+                <div class="profile-field">
+                    <div class="profile-label">Employee ID</div>
+                    <div class="profile-value" id="employeeId">Loading...</div>
+                </div>
+
+                <div class="profile-field">
+                    <div class="profile-label">Full Name</div>
+                    <div class="profile-value" id="fullName">Loading...</div>
+                </div>
+
+                <div class="profile-field">
+                    <div class="profile-label">Department</div>
+                    <div class="profile-value" id="department">Loading...</div>
+                </div>
+
+                <div class="profile-field">
+                    <div class="profile-label">Role</div>
+                    <div class="profile-value" id="role">Loading...</div>
+                </div>
+
+                <div class="profile-field">
+                    <div class="profile-label">PRISM DID</div>
+                    <div class="profile-value">
+                        <span id="prismDid" style="flex: 1;">Loading...</span>
+                        <button class="copy-btn" onclick="copyToClipboard('prismDid', this)">Copy</button>
+                    </div>
+                </div>
+
+                <div class="profile-field">
+                    <div class="profile-label">Security Clearance</div>
+                    <div class="profile-value" id="clearanceContainer">
+                        <span id="clearanceLevel">Loading...</span>
+                        <button id="verifyClearanceBtn" class="copy-btn" onclick="openClearanceModal()" style="display: none; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                            Verify Clearance
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Clearance Verification Modal - DIDComm Flow -->
+                <div id="clearanceVerificationModal" class="hidden" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;">
+                    <div class="modal-content" style="background: white; padding: 30px; border-radius: 12px; max-width: 500px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.2);">
+                        <h3 style="margin: 0 0 20px; color: #2d3748; font-size: 20px;">Verify Security Clearance via DIDComm</h3>
+
+                        <div id="clearanceVerificationContent">
+                            <p style="color: #718096; margin-bottom: 20px;">
+                                TechCorp will send a proof request directly to your personal wallet via DIDComm to verify your Security Clearance.
+                            </p>
+
+                            <div style="background: #edf2f7; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+                                <strong style="color: #2d3748; display: block; margin-bottom: 10px;">How it works:</strong>
+                                <ol style="color: #718096; font-size: 14px; margin: 0; padding-left: 20px; line-height: 1.8;">
+                                    <li>Click "Start Verification" below</li>
+                                    <li>A proof request will be sent to your Alice Wallet</li>
+                                    <li>Open <a href="https://identuslabel.cz/alice" target="_blank" style="color: #667eea;">Alice Wallet</a> and approve the request</li>
+                                    <li>Your clearance level will be verified automatically</li>
+                                </ol>
+                            </div>
+
+                            <div style="background: #f0fff4; border: 1px solid #9ae6b4; border-radius: 8px; padding: 12px; margin-bottom: 15px;">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <span style="font-size: 18px;">🔒</span>
+                                    <span style="color: #276749; font-size: 13px;">
+                                        <strong>Secure:</strong> Your clearance is verified cryptographically via DIDComm - no manual input required.
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="clearanceVerificationLoading" class="hidden" style="text-align: center; padding: 20px;">
+                            <div class="spinner" style="margin: 0 auto 15px;"></div>
+                            <p style="color: #718096;" id="clearanceLoadingMessage">Sending proof request to your wallet...</p>
+                            <p style="color: #a0aec0; font-size: 13px; margin-top: 10px;" id="clearanceLoadingHint">Please check your Alice Wallet for incoming proof request</p>
+                        </div>
+
+                        <div id="clearanceVerificationSuccess" class="hidden" style="text-align: center; padding: 20px;">
+                            <div style="font-size: 48px; margin-bottom: 10px;">✓</div>
+                            <p style="color: #38a169; font-weight: 600;">Clearance Verified Successfully!</p>
+                            <p id="verifiedClearanceLevel" style="color: #2d3748; font-size: 18px; font-weight: 600;"></p>
+                        </div>
+
+                        <div id="clearanceVerificationError" class="hidden" style="text-align: center; padding: 20px;">
+                            <div style="font-size: 48px; margin-bottom: 10px;">✕</div>
+                            <p style="color: #e53e3e; font-weight: 600;">Verification Failed</p>
+                            <p id="clearanceErrorMessage" style="color: #718096;"></p>
+                        </div>
+
+                        <div id="clearanceVerificationButtons" style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                            <button onclick="closeClearanceModal()" style="background: #e2e8f0; color: #2d3748; border: none; padding: 10px 20px; border-radius: 8px; font-size: 14px; cursor: pointer;">
+                                Cancel
+                            </button>
+                            <button id="submitClearanceBtn" onclick="initiateClearanceVerification()" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 10px 20px; border-radius: 8px; font-size: 14px; cursor: pointer;">
+                                Start Verification
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Training Status Card -->
+            <div class="dashboard-card">
+                <div class="card-header">
+                    <div class="card-icon training">📚</div>
+                    <h2 class="card-title">Training Status</h2>
+                </div>
+
+                <div class="training-status" id="trainingStatus">
+                    <div class="status-badge valid" id="statusBadge">✓</div>
+                    <div class="status-info">
+                        <div class="status-title valid" id="statusTitle">CIS Training Valid</div>
+                        <div class="status-detail" id="statusDetail">Your training certification is up to date</div>
+                    </div>
+                </div>
+
+                <div class="expiry-info">
+                    <div class="expiry-info-item">
+                        <div class="expiry-label">Expiry Date</div>
+                        <div class="expiry-value" id="expiryDate">Loading...</div>
+                    </div>
+                    <div class="expiry-info-item">
+                        <div class="expiry-label">Days Until Expiry</div>
+                        <div class="expiry-value" id="daysUntilExpiry">-</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Credentials Card (Full Width) -->
+        <div class="dashboard-card">
+            <div class="card-header">
+                <div class="card-icon credentials">🎫</div>
+                <h2 class="card-title">My Credentials</h2>
+            </div>
+
+            <div class="credentials-placeholder">
+                <div class="credentials-placeholder-icon">🔐</div>
+                <div class="credentials-placeholder-text">
+                    View all your verifiable credentials including training certificates, security clearances, and more.
+                </div>
+                <button class="view-credentials-btn" onclick="viewCredentials()" disabled>
+                    View All Credentials (Coming Soon)
+                </button>
+            </div>
+        </div>
+
+        <!-- Available Documents Card (Full Width) -->
+        <div class="dashboard-card">
+            <div class="card-header">
+                <div class="card-icon documents">📄</div>
+                <h2 class="card-title">Available Documents</h2>
+            </div>
+
+            <div id="documentsContainer">
+                <div id="documentsLoading" class="loading-state">
+                    Loading documents...
+                </div>
+                <div id="documentsError" class="error-state hidden"></div>
+                <div id="documentsList" class="documents-list hidden"></div>
+                <div id="documentsEmpty" class="empty-state hidden">
+                    <div class="empty-icon">📭</div>
+                    <p>No documents available</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Create Document Card (Full Width) -->
+        <div class="dashboard-card" id="createDocumentCard">
+            <div class="card-header">
+                <div class="card-icon" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">📝</div>
+                <h2 class="card-title">Create New Document</h2>
+            </div>
+
+            <form id="createDocumentForm" onsubmit="handleCreateDocument(event)">
+                <div style="display: grid; gap: 20px;">
+                    <!-- Document Title -->
+                    <div>
+                        <label for="documentTitle" style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            Document Title
+                        </label>
+                        <input
+                            type="text"
+                            id="documentTitle"
+                            name="title"
+                            required
+                            placeholder="Enter document title (e.g., Q4 Financial Report)"
+                            style="width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; background: white;"
+                        />
+                    </div>
+
+                    <!-- Document Description -->
+                    <div>
+                        <label for="documentDescription" style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            Description
+                        </label>
+                        <textarea
+                            id="documentDescription"
+                            name="description"
+                            rows="3"
+                            placeholder="Brief description of the document contents..."
+                            style="width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; background: white; resize: vertical; font-family: inherit;"
+                        ></textarea>
+                    </div>
+
+                    <!-- File Upload -->
+                    <div>
+                        <label for="documentFile" style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            Document File (Optional)
+                        </label>
+                        <div style="background: #f7fafc; border: 2px dashed #e2e8f0; border-radius: 8px; padding: 20px; text-align: center; transition: all 0.2s;">
+                            <input
+                                type="file"
+                                id="documentFile"
+                                name="file"
+                                accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.png,.jpg,.jpeg"
+                                style="display: none;"
+                                onchange="updateFileDisplay(this)"
+                            />
+                            <label for="documentFile" style="cursor: pointer; display: block;">
+                                <div style="font-size: 32px; margin-bottom: 10px;">📎</div>
+                                <div id="fileDisplayText" style="color: #667eea; font-weight: 500; margin-bottom: 5px;">
+                                    Click to select file or drag and drop
+                                </div>
+                                <div style="font-size: 12px; color: #a0aec0;">
+                                    Supported: PDF, DOC, DOCX, XLS, XLSX, TXT, PNG, JPG (Max 40MB)
+                                </div>
+                            </label>
+                            <div id="selectedFileInfo" style="display: none; margin-top: 15px; padding: 10px; background: white; border-radius: 6px; border: 1px solid #e2e8f0;">
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <div style="display: flex; align-items: center; gap: 10px;">
+                                        <span style="font-size: 24px;">📄</span>
+                                        <div>
+                                            <div id="selectedFileName" style="font-weight: 500; color: #2d3748;"></div>
+                                            <div id="selectedFileSize" style="font-size: 12px; color: #718096;"></div>
+                                        </div>
+                                    </div>
+                                    <button type="button" onclick="clearFileSelection()" style="background: #fc8181; color: white; border: none; padding: 5px 10px; border-radius: 4px; font-size: 12px; cursor: pointer;">
+                                        Remove
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <p style="margin-top: 8px; font-size: 12px; color: #718096; font-style: italic;">
+                            Files are stored on Iagon decentralized storage with classification-based encryption
+                        </p>
+                    </div>
+
+                    <!-- Classification Level -->
+                    <div>
+                        <label for="classificationLevel" style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            Classification Level
+                        </label>
+                        <select
+                            id="classificationLevel"
+                            name="classificationLevel"
+                            required
+                            style="width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; background: white;"
+                        >
+                            <option value="">Select classification level...</option>
+                            <option value="UNCLASSIFIED">UNCLASSIFIED (No clearance required)</option>
+                            <option value="CONFIDENTIAL">CONFIDENTIAL (Requires clearance)</option>
+                            <option value="SECRET">SECRET (Requires clearance)</option>
+                            <option value="TOP_SECRET">TOP SECRET (Requires clearance)</option>
+                        </select>
+                    </div>
+
+                    <!-- Document Type -->
+                    <div>
+                        <label for="documentType" style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            Document Type
+                        </label>
+                        <select
+                            id="documentType"
+                            name="documentType"
+                            required
+                            style="width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; background: white;"
+                        >
+                            <option value="">Select document type...</option>
+                            <option value="Report">Report</option>
+                            <option value="Contract">Contract</option>
+                            <option value="Policy">Policy</option>
+                            <option value="Procedure">Procedure</option>
+                            <option value="Memo">Memo</option>
+                            <option value="Certificate">Certificate</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </div>
+
+                    <!-- Releasability -->
+                    <div>
+                        <label style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            Releasable To
+                        </label>
+                        <div style="background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px;">
+                            <div style="display: grid; gap: 10px;">
+                                <label style="display: flex; align-items: center; cursor: pointer;">
+                                    <input
+                                        type="checkbox"
+                                        name="releasableTo"
+                                        value="TechCorp Corporation"
+                                        style="width: 18px; height: 18px; margin-right: 10px; cursor: pointer;"
+                                    />
+                                    <span style="font-size: 14px; color: #2d3748;">TechCorp Corporation</span>
+                                </label>
+                                <label style="display: flex; align-items: center; cursor: pointer;">
+                                    <input
+                                        type="checkbox"
+                                        name="releasableTo"
+                                        value="ACME Corporation"
+                                        style="width: 18px; height: 18px; margin-right: 10px; cursor: pointer;"
+                                    />
+                                    <span style="font-size: 14px; color: #2d3748;">ACME Corporation</span>
+                                </label>
+                            </div>
+                            <p style="margin-top: 10px; font-size: 12px; color: #718096; font-style: italic;">
+                                Select which companies can discover this document (per requirements)
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 10px;">
+                        <button
+                            type="button"
+                            onclick="document.getElementById('createDocumentForm').reset()"
+                            style="background: #e2e8f0; color: #2d3748; border: none; padding: 12px 24px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; transition: background 0.2s;"
+                        >
+                            Reset Form
+                        </button>
+                        <button
+                            type="submit"
+                            id="createDocumentBtn"
+                            style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; transition: transform 0.2s;"
+                        >
+                            Create Document DID
+                        </button>
+                    </div>
+                </div>
+            </form>
+
+            <!-- Success Message -->
+            <div id="documentCreationSuccess" class="hidden" style="margin-top: 20px; padding: 15px; background: #c6f6d5; border: 1px solid #48bb78; border-radius: 8px; color: #22543d;">
+                <strong>✓ Success!</strong>
+                <span id="successMessage">Document DID created and registered successfully.</span>
+            </div>
+
+            <!-- Error Message -->
+            <div id="documentCreationError" class="hidden" style="margin-top: 20px; padding: 15px; background: #fed7d7; border: 1px solid #fc8181; border-radius: 8px; color: #c53030;">
+                <strong>✗ Error:</strong>
+                <span id="errorMessage">Failed to create document.</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="/company-admin/js/employee-portal-dashboard.js?v=20251206"></script>
+</body>
+</html>

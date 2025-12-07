@@ -1,0 +1,307 @@
+# Caddy Reverse Proxy Configuration for Identus SSI Infrastructure
+# Domain: identuslabel.cz with Let's Encrypt automatic HTTPS
+# IP Access: http://91.99.4.54:8000 for Cloud Agent (existing)
+
+# ============================================================================
+# DOMAIN CONFIGURATION - identuslabel.cz
+# ============================================================================
+
+identuslabel.cz {
+    # Global settings
+    encode gzip
+
+    # CORS headers for cross-origin requests
+    header {
+        Access-Control-Allow-Origin *
+        Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        Access-Control-Allow-Headers "DNT, User-Agent, X-Requested-With, If-Modified-Since, Cache-Control, Content-Type, Range, Authorization, apikey"
+        Access-Control-Max-Age "3600"
+    }
+
+    # Handle OPTIONS preflight requests
+    @options {
+        method OPTIONS
+    }
+    respond @options 204
+
+    # JSON Schemas for Verifiable Credentials (/schemas -> static files)
+    # Serve W3C VC JSON schemas for credential validation
+    handle_path /schemas* {
+        root * /var/www/schemas
+        file_server
+    }
+
+    # Company Admin Portal (/company-admin -> port 3010)
+    # Standalone multitenancy admin interface for company DID and employee management
+    handle_path /company-admin* {
+        reverse_proxy 127.0.0.1:3010 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Certification Authority (/ca -> port 3005)
+    # Note: Using rewrite to strip /ca prefix for CA server (expects requests at root)
+    handle /ca* {
+        uri strip_prefix /ca
+        reverse_proxy 127.0.0.1:3005 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Claude Code UI API endpoints (MUST be before CA /api handler)
+    # Proxy specific /api paths to claudecodeui on port 10001
+    @claudeui_api path /api/auth* /api/projects* /api/config /api/browse-filesystem /api/transcribe /api/git/* /api/cursor/* /api/taskmaster/* /api/mcp-utils/*
+    handle @claudeui_api {
+        reverse_proxy 127.0.0.1:10001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Claude Code UI static assets (rewrite /icons to /manage/icons)
+    handle_path /icons* {
+        # Strip /icons and proxy to /manage/icons on backend
+        rewrite * /manage/icons{uri}
+        reverse_proxy 127.0.0.1:10001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # CA API endpoints (proxy remaining /api* to port 3005 for CA API calls)
+    # These handle frontend JS requests from CA pages
+    # This must come AFTER Claude Code UI API matcher
+    handle /api* {
+        reverse_proxy 127.0.0.1:3005 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Alice Wallet (/alice -> port 3001)
+    # Note: Using 'handle' to preserve /alice prefix for Next.js basePath
+    handle /alice* {
+        reverse_proxy 127.0.0.1:3001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            # WebSocket support for Next.js
+            header_up Connection {>Connection}
+            header_up Upgrade {>Upgrade}
+        }
+    }
+
+    # Bob Wallet (/bob -> port 3002)
+    # Note: Using 'handle' instead of 'handle_path' to preserve /bob prefix for Next.js basePath
+    handle /bob* {
+        reverse_proxy 127.0.0.1:3002 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            # WebSocket support for Next.js
+            header_up Connection {>Connection}
+            header_up Upgrade {>Upgrade}
+        }
+    }
+
+    # Mediator (/mediator -> port 8080)
+    # Proxy to Identus Mediator for DIDComm message pickup
+    # Note: Using handle_path to strip /mediator prefix for mediator server
+    handle_path /mediator* {
+        reverse_proxy 127.0.0.1:8080 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            # WebSocket support for mediator
+            header_up Connection {>Connection}
+            header_up Upgrade {>Upgrade}
+        }
+    }
+
+    # Cloud Agent DIDComm (/didcomm -> port 8090)
+    # Proxy to Cloud Agent DIDComm endpoint for message exchange
+    handle_path /didcomm* {
+        reverse_proxy 127.0.0.1:8090 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # TechCorp Cloud Agent DIDComm (/techcorp/didcomm -> port 8290)
+    # Proxy to TechCorp multitenancy Cloud Agent DIDComm endpoint
+    handle_path /techcorp/didcomm* {
+        reverse_proxy 127.0.0.1:8290 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # TechCorp Cloud Agent API (/techcorp -> port 8200)
+    # Proxy to TechCorp multitenancy Cloud Agent REST API
+    handle_path /techcorp* {
+        reverse_proxy 127.0.0.1:8200 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Enterprise Cloud Agent DIDComm (/enterprise/didcomm -> port 8390)
+    # Proxy to Enterprise multitenancy Cloud Agent DIDComm endpoint (HR, IT, Security)
+    handle_path /enterprise/didcomm* {
+        reverse_proxy 127.0.0.1:8390 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Enterprise Cloud Agent API (/enterprise -> port 8300)
+    # Proxy to Enterprise multitenancy Cloud Agent REST API
+    handle_path /enterprise* {
+        reverse_proxy 127.0.0.1:8300 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Cloud Agent API (/cloud-agent -> port 8085)
+    # Proxy to Cloud Agent REST API for credential/connection management
+    handle_path /cloud-agent* {
+        reverse_proxy 127.0.0.1:8085 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Cloud Agent System Endpoints (/_system -> port 8085)
+    # Proxy to Cloud Agent health and system endpoints
+    handle /_system* {
+        reverse_proxy 127.0.0.1:8085 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Claude Code UI WebSocket endpoints
+    handle /ws* {
+        reverse_proxy 127.0.0.1:10001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            # WebSocket support
+            header_up Connection {http.request.header.Connection}
+            header_up Upgrade {http.request.header.Upgrade}
+        }
+    }
+
+    handle /shell* {
+        reverse_proxy 127.0.0.1:10001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            # WebSocket support
+            header_up Connection {>Connection}
+            header_up Upgrade {>Upgrade}
+        }
+    }
+
+    # Claude Code UI service worker (rewrite /sw.js to /manage/sw.js)
+    handle /sw.js {
+        rewrite * /manage/sw.js
+        reverse_proxy 127.0.0.1:10001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Claude Code UI (/manage -> port 10001)
+    # Web-based UI for managing Claude Code CLI instances
+    handle /manage* {
+        reverse_proxy 127.0.0.1:10001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            # WebSocket support for live updates
+            header_up Connection {>Connection}
+            header_up Upgrade {>Upgrade}
+        }
+    }
+
+    # Root path - redirect to CA
+    handle / {
+        redir /ca permanent
+    }
+
+    # Fallback
+    handle {
+        respond "Service not found" 404
+    }
+}
+
+# ============================================================================
+# IP-BASED ACCESS - Cloud Agent (existing functionality)
+# ============================================================================
+
+:8000 {
+    # Enable CORS for browser wallet access
+    @cors_preflight method OPTIONS
+    handle @cors_preflight {
+        header Access-Control-Allow-Origin "*"
+        header Access-Control-Allow-Methods "GET, POST, OPTIONS, PUT, DELETE"
+        header Access-Control-Allow-Headers "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+        header Access-Control-Max-Age "86400"
+        respond "" 204
+    }
+
+    handle_path /didcomm* {
+        header Access-Control-Allow-Origin "*"
+        header Access-Control-Allow-Methods "GET, POST, OPTIONS, PUT, DELETE"
+        header Access-Control-Allow-Headers "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+        reverse_proxy 127.0.0.1:8090
+    }
+    handle_path /cloud-agent* {
+        header Access-Control-Allow-Origin "*"
+        header Access-Control-Allow-Methods "GET, POST, OPTIONS, PUT, DELETE"
+        header Access-Control-Allow-Headers "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+        reverse_proxy 127.0.0.1:8085
+    }
+    handle {
+        header Access-Control-Allow-Origin "*"
+        header Access-Control-Allow-Methods "GET, POST, OPTIONS, PUT, DELETE"
+        header Access-Control-Allow-Headers "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+        reverse_proxy 127.0.0.1:8085
+    }
+}

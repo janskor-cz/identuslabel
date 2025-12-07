@@ -1,0 +1,86 @@
+{
+  "name": "SecurityClearanceLevel",
+  "version": "4.0.0",
+  "description": "W3C-compliant security clearance credential with flattened dual-key structure",
+  "type": "https://w3c-ccg.github.io/vc-json-schemas/schema/2.0/schema.json",
+  "author": "did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c",
+  "tags": ["security", "clearance", "authentication", "encryption", "dual-key", "flattened"],
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://identuslabel.cz/schemas/SecurityClearanceLevel/4.0.0",
+    "type": "object",
+    "properties": {
+      "credentialType": {
+        "type": "string",
+        "const": "SecurityClearance",
+        "description": "Auto-populated: Type identifier for wallet credential classification"
+      },
+      "clearanceLevel": {
+        "type": "string",
+        "enum": ["INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP-SECRET"],
+        "description": "User input: Security clearance level"
+      },
+      "holderName": {
+        "type": "string",
+        "description": "User input: Full name of the credential holder",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "holderUniqueId": {
+        "type": "string",
+        "description": "User input: Unique identifier for the credential holder",
+        "minLength": 1,
+        "maxLength": 50
+      },
+      "ed25519PublicKey": {
+        "type": "string",
+        "description": "User input: Ed25519 public key for digital signatures (base64url encoded, 32 bytes)",
+        "minLength": 1
+      },
+      "ed25519Fingerprint": {
+        "type": "string",
+        "description": "User input: SHA-256 fingerprint of Ed25519 public key (XX:XX:... format)",
+        "pattern": "^[A-Fa-f0-9]{2}(:[A-Fa-f0-9]{2}){31}$"
+      },
+      "x25519PublicKey": {
+        "type": "string",
+        "description": "User input: X25519 public key for encryption (base64url encoded, 32 bytes)",
+        "minLength": 1
+      },
+      "x25519Fingerprint": {
+        "type": "string",
+        "description": "User input: SHA-256 fingerprint of X25519 public key (XX:XX:... format)",
+        "pattern": "^[A-Fa-f0-9]{2}(:[A-Fa-f0-9]{2}){31}$"
+      },
+      "issuedDate": {
+        "type": "string",
+        "format": "date",
+        "description": "Auto-populated: Date when the clearance was issued (YYYY-MM-DD)"
+      },
+      "expiryDate": {
+        "type": "string",
+        "format": "date",
+        "description": "Auto-populated: Date when the clearance expires (YYYY-MM-DD)"
+      },
+      "clearanceId": {
+        "type": "string",
+        "description": "Auto-populated: Unique identifier for this clearance credential",
+        "minLength": 1
+      }
+    },
+    "required": [
+      "credentialType",
+      "clearanceLevel",
+      "holderName",
+      "holderUniqueId",
+      "ed25519PublicKey",
+      "ed25519Fingerprint",
+      "x25519PublicKey",
+      "x25519Fingerprint",
+      "issuedDate",
+      "expiryDate",
+      "clearanceId"
+    ],
+    "additionalProperties": false
+  }
+}

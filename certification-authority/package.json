@@ -1,0 +1,20 @@
+{
+  "name": "certification-authority",
+  "version": "1.0.0",
+  "description": "Certification Authority Portal for Digital Certificate Issuance",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "google-protobuf": "^4.0.1",
+    "libsodium-wrappers": "^0.7.15",
+    "node-fetch": "^2.7.0",
+    "pako": "^2.1.0",
+    "tweetnacl": "^1.0.3",
+    "tweetnacl-util": "^0.15.1",
+    "uuid": "^11.1.0"
+  }
+}

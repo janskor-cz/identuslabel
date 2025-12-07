@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  # Local PRISM Node with in-memory ledger
+  prism-node:
+    image: ghcr.io/input-output-hk/prism-node:2.3.0
+    container_name: local-prism-node
+    environment:
+      # In-memory ledger mode (no NODE_LEDGER = defaults to in-memory)
+      NODE_PSQL_DATABASE: node_db
+      NODE_PSQL_HOST: identus-postgres
+      NODE_PSQL_PORT: 5432
+      NODE_PSQL_USERNAME: postgres
+      NODE_PSQL_PASSWORD: postgres
+      # Optional: Enable debug logging
+      NODE_LOG_LEVEL: INFO
+    ports:
+      - "50053:50053"  # Local PRISM node gRPC port
+    networks:
+      - identus-network
+    restart: always
+    # Health check removed - nc command not available in container
+    # The service is functional despite showing unhealthy status
+
+networks:
+  identus-network:
+    external: true

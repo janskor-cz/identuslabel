@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Secure Information Portal - Identus SSI</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+
+    header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 30px;
+      text-align: center;
+    }
+
+    header h1 {
+      font-size: 32px;
+      margin-bottom: 10px;
+    }
+
+    .user-info {
+      background: rgba(255,255,255,0.2);
+      padding: 15px;
+      border-radius: 8px;
+      display: inline-block;
+      margin-top: 10px;
+    }
+
+    .clearance-badge {
+      display: inline-block;
+      padding: 5px 15px;
+      border-radius: 20px;
+      color: white;
+      font-weight: bold;
+      margin-left: 10px;
+      font-size: 14px;
+    }
+
+    main {
+      padding: 30px;
+    }
+
+    .clearance-prompt {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      color: white;
+      padding: 30px;
+      border-radius: 12px;
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .clearance-prompt h2 {
+      font-size: 24px;
+      margin-bottom: 15px;
+    }
+
+    .clearance-prompt p {
+      font-size: 16px;
+      margin-bottom: 20px;
+      opacity: 0.95;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 12px 30px;
+      border-radius: 6px;
+      text-decoration: none;
+      font-weight: bold;
+      font-size: 16px;
+      transition: all 0.3s;
+      border: none;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background: white;
+      color: #f5576c;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .section {
+      margin-bottom: 30px;
+      border: 2px solid #e0e0e0;
+      border-radius: 12px;
+      overflow: hidden;
+      transition: all 0.3s;
+      animation: fadeIn 0.5s ease-in;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .section:hover {
+      box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+      transform: translateY(-2px);
+    }
+
+    .section-header {
+      background: #fafafa;
+      padding: 20px;
+      border-bottom: 2px solid #e0e0e0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .section-title {
+      font-size: 20px;
+      font-weight: bold;
+      color: #333;
+    }
+
+    .section-badge {
+      padding: 6px 16px;
+      border-radius: 20px;
+      color: white;
+      font-weight: bold;
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .section-content {
+      padding: 25px;
+      line-height: 1.8;
+      color: #444;
+      white-space: pre-wrap;
+      font-size: 15px;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 60px;
+      color: #666;
+    }
+
+    .spinner {
+      border: 4px solid #f3f3f3;
+      border-top: 4px solid #667eea;
+      border-radius: 50%;
+      width: 50px;
+      height: 50px;
+      animation: spin 1s linear infinite;
+      margin: 20px auto;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .error {
+      background: #ffebee;
+      border: 2px solid #f44336;
+      color: #c62828;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+
+    .content-count {
+      text-align: center;
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 20px;
+      padding: 10px;
+      background: #f5f5f5;
+      border-radius: 6px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    /* Phase 2: Client-Side Decryption Styles */
+    .content.encrypted {
+      background: linear-gradient(135deg, #f5f5f5 0%, #e0e0e0 100%);
+      padding: 30px;
+      border-radius: 8px;
+      text-align: center;
+      color: #666;
+      font-style: italic;
+    }
+
+    .content.encrypted::before {
+      content: "🔒 ";
+      font-size: 32px;
+      display: block;
+      margin-bottom: 10px;
+    }
+
+    .decryption-loading {
+      display: inline-block;
+      margin-left: 10px;
+      animation: spin 1s linear infinite;
+    }
+
+    .section.decrypted {
+      animation: fadeInContent 0.5s ease-in;
+    }
+
+    @keyframes fadeInContent {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    #decryption-status {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 15px 25px;
+      border-radius: 8px;
+      font-weight: bold;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+      z-index: 10000;
+      transition: all 0.3s;
+      display: none;
+    }
+
+    #decryption-status.show {
+      display: block;
+    }
+
+    .decryption-success-indicator {
+      color: #4CAF50;
+      font-weight: bold;
+      margin-bottom: 10px;
+      display: block;
+      animation: fadeInContent 0.3s ease-in;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🔒 Secure Information Portal</h1>
+      <div class="user-info" id="user-info">
+        <strong>Guest User</strong>
+      </div>
+    </header>
+
+    <main>
+      <!-- Get Clearance Link (always visible) -->
+      <div style="text-align: center; margin-bottom: 20px; padding: 15px; background: #f5f5f5; border-radius: 8px;">
+        <p style="margin: 0; color: #666;">
+          📋 Need a Security Clearance credential?
+          <a href="/ca/security-clearance.html" style="color: #667eea; font-weight: bold; text-decoration: none;">
+            Get it here →
+          </a>
+        </p>
+      </div>
+
+      <!-- Request Clearance Button (visible for authenticated users without clearance) -->
+      <div id="request-clearance-prompt" class="clearance-prompt hidden" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+        <h2>🔐 Request Clearance Access</h2>
+        <p>Click below to submit your Security Clearance credential and unlock additional content.</p>
+        <button id="request-clearance-btn" class="btn btn-primary">
+          📤 Submit Security Clearance
+        </button>
+        <p id="request-status" style="margin-top: 15px; font-size: 14px; opacity: 0.9;"></p>
+      </div>
+
+      <!-- Open Wallet Prompt (visible when encrypted content loaded but wallet not connected) -->
+      <div id="open-wallet-prompt" class="clearance-prompt hidden" style="background: linear-gradient(135deg, #FA8BFF 0%, #2BD2FF 50%, #2BFF88 100%);">
+        <h2>🔐 Secure Content Available</h2>
+        <p>Your content is encrypted for privacy. Click below to decrypt with your wallet.</p>
+        <button id="open-wallet-btn" class="btn btn-primary">
+          🔓 Decrypt Content with Wallet
+        </button>
+        <p style="margin-top: 15px; font-size: 14px; opacity: 0.9;">
+          🔒 All decryption happens locally in your wallet - your private keys never leave your device.
+        </p>
+      </div>
+
+
+      <!-- Content Count -->
+      <div id="content-count" class="content-count hidden"></div>
+
+      <!-- Loading State -->
+      <div id="loading" class="loading">
+        <div class="spinner"></div>
+        <p>Loading content...</p>
+      </div>
+
+      <!-- Error State -->
+      <div id="error-container"></div>
+
+      <!-- Content Sections (populated dynamically) -->
+      <div id="content-container"></div>
+    </main>
+  </div>
+
+  <!-- Decryption Status Notification -->
+  <div id="decryption-status"></div>
+
+  <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+    // Configuration
+    const API_BASE = window.location.origin;
+
+    // State
+    let currentUser = null;
+    let currentSections = [];
+    let walletWindow = null; // Reference to wallet window
+    let walletDetected = false;
+    let decryptPendingRequests = new Map(); // Track pending decrypt requests
+
+    // Phase 2: Client-Side Decryption State
+    let totalEncryptedSections = 0;
+    let decryptedSectionsCount = 0;
+    let decryptionInProgress = false;
+
+    // Initialize on page load
+    document.addEventListener('DOMContentLoaded', initDashboard);
+
+    async function initDashboard() {
+      console.log('[Dashboard] Initializing...');
+
+      try {
+        // Initialize postMessage listener for wallet communication
+        initPostMessageListener();
+
+        // Detect if wallet is open
+        await detectWallet();
+
+        await loadDashboard();
+
+        // Set up request clearance button handler
+        const requestClearanceBtn = document.getElementById('request-clearance-btn');
+        if (requestClearanceBtn) {
+          requestClearanceBtn.addEventListener('click', handleRequestClearance);
+        }
+
+        // Set up open wallet button handler
+        const openWalletBtn = document.getElementById('open-wallet-btn');
+        if (openWalletBtn) {
+          openWalletBtn.addEventListener('click', openWalletWindow);
+        }
+      } catch (error) {
+        console.error('[Dashboard] Initialization error:', error);
+        showError('Failed to load dashboard. Please refresh the page.');
+      }
+    }
+
+    /**
+     * Initialize postMessage listener for wallet communication
+     * Zero network traffic - all decryption happens locally in browser
+     */
+    function initPostMessageListener() {
+      console.log('[postMessage] Initializing listener...');
+
+      // Set up message handler
+      window.addEventListener('message', (event) => {
+        // Validate origin for security
+        if (event.origin !== 'https://identuslabel.cz' && event.origin !== 'http://localhost:3001') {
+          return; // Ignore messages from unknown origins
+        }
+
+        const message = event.data;
+        console.log('[postMessage] Received message from wallet:', message.type);
+
+        switch (message.type) {
+          case 'PONG':
+            handleWalletPong(message);
+            break;
+
+          case 'WALLET_READY':
+            handleWalletReady(message);
+            break;
+
+          case 'DECRYPT_RESPONSE':
+            handleDecryptResponse(message);
+            break;
+
+          case 'DECRYPT_ERROR':
+            handleDecryptError(message);
+            break;
+
+          default:
+            console.warn('[postMessage] Unknown message type:', message.type);
+        }
+      });
+
+      console.log('[postMessage] Listener initialized successfully');
+    }
+
+    /**
+     * Handle wallet ready signal
+     */
+    function handleWalletReady(message) {
+      console.log('[Wallet] Ready signal received from:', message.walletId);
+      walletDetected = true;
+      updateWalletStatus(true);
+
+      // Show status notification
+      showDecryptionStatus('Wallet connected. Starting decryption...', 'success');
+
+      // If there are encrypted sections waiting, trigger decryption
+      if (currentSections.some(s => s.encryptedContent?.encrypted)) {
+        console.log('[Wallet] Encrypted content waiting - triggering decryption');
+
+        // Reset progress tracking
+        decryptedSectionsCount = 0;
+        totalEncryptedSections = currentSections.filter(s => s.encryptedContent?.encrypted).length;
+        decryptionInProgress = true;
+
+        console.log(`[Wallet] Starting decryption of ${totalEncryptedSections} sections`);
+
+        // Trigger decryption for all encrypted sections
+        currentSections.forEach(section => {
+          if (section.encryptedContent?.encrypted) {
+            requestDecryption(section.id, section.encryptedContent);
+          }
+        });
+      }
+    }
+
+    /**
+     * Open wallet window for decryption
+     */
+    function openWalletWindow() {
+      console.log('[Wallet] Opening wallet window...');
+
+      // Check if wallet already open and not closed
+      if (walletWindow && !walletWindow.closed) {
+        console.log('[Wallet] Wallet already open, focusing...');
+        walletWindow.focus();
+        showDecryptionStatus('Wallet window focused. Waiting for connection...', 'info');
+        return walletWindow;
+      }
+
+      // Show status
+      showDecryptionStatus('Opening wallet...', 'info');
+
+      // Open new wallet window (smaller size for decryption only)
+      const walletUrl = 'https://identuslabel.cz/alice';
+      walletWindow = window.open(walletUrl, 'identus-wallet-decrypt', 'width=450,height=650,menubar=no,toolbar=no,location=no');
+
+      if (!walletWindow) {
+        showError('Failed to open wallet. Please disable popup blocker and try again.');
+        showDecryptionStatus('Failed to open wallet - popup blocked?', 'error');
+        return null;
+      }
+
+      console.log('[Wallet] Wallet window opened, waiting for WALLET_READY signal...');
+      showDecryptionStatus('Wallet opened. Waiting for connection...', 'info');
+
+      // Hide "open wallet" button
+      updateWalletStatus(false); // Will show "connecting..."
+
+      // Start detection polling
+      setTimeout(() => detectWallet(), 1000);
+
+      // Set timeout for wallet ready signal
+      setTimeout(() => {
+        if (!walletDetected) {
+          console.error('[Wallet] Wallet ready timeout');
+          showDecryptionStatus('Wallet connection timeout. Please try again.', 'error');
+          if (walletWindow && !walletWindow.closed) {
+            walletWindow.close();
+            walletWindow = null;
+          }
+          updateWalletStatus(false);
+        }
+      }, 10000); // 10 second timeout
+
+      return walletWindow;
+    }
+
+    /**
+     * Detect if wallet is open and responsive
+     * Sends PING via postMessage, waits 2 seconds for PONG response
+     */
+    async function detectWallet() {
+      return new Promise((resolve) => {
+        console.log('[Wallet Detection] Sending PING...');
+
+        const timeout = setTimeout(() => {
+          console.log('[Wallet Detection] No response - wallet not detected');
+          walletDetected = false;
+          updateWalletStatus(false);
+          resolve(false);
+        }, 2000);
+
+        // Listen for PONG response
+        const handlePong = () => {
+          clearTimeout(timeout);
+          walletDetected = true;
+          updateWalletStatus(true);
+          console.log('[Wallet Detection] ✅ Wallet detected!');
+          resolve(true);
+        };
+
+        // Store handler temporarily
+        window._walletPongHandler = handlePong;
+
+        // Send PING via postMessage
+        if (walletWindow && !walletWindow.closed) {
+          try {
+            // DIAGNOSTIC: Log detailed postMessage info
+            console.log('[DIAGNOSTIC] Sending PING postMessage:', {
+              targetOrigin: 'https://identuslabel.cz',
+              dashboardOrigin: window.location.origin,
+              dashboardUrl: window.location.href,
+              walletWindowClosed: walletWindow.closed
+            });
+
+            walletWindow.postMessage({
+              type: 'PING',
+              source: 'secure-dashboard',
+              timestamp: Date.now()
+            }, 'https://identuslabel.cz');
+          } catch (error) {
+            console.error('[Wallet Detection] Error sending PING:', error);
+            clearTimeout(timeout);
+            resolve(false);
+          }
+        } else {
+          // No wallet window reference
+          clearTimeout(timeout);
+          walletDetected = false;
+          updateWalletStatus(false);
+          resolve(false);
+        }
+      });
+    }
+
+    function handleWalletPong(message) {
+      console.log('[Wallet Detection] PONG received from:', message.walletId);
+
+      if (window._walletPongHandler) {
+        window._walletPongHandler();
+        delete window._walletPongHandler;
+      }
+    }
+
+    /**
+     * Update wallet connection status UI
+     */
+    function updateWalletStatus(connected) {
+      const openWalletPrompt = document.getElementById('open-wallet-prompt');
+      if (!openWalletPrompt) return;
+
+      if (connected) {
+        // Wallet connected - hide prompt
+        openWalletPrompt.classList.add('hidden');
+      } else {
+        // Wallet not connected - show prompt if we have encrypted content
+        const hasEncryptedContent = currentSections.some(s => s.encryptedContent?.encrypted);
+        if (hasEncryptedContent) {
+          openWalletPrompt.classList.remove('hidden');
+        }
+      }
+    }
+
+    let pollingInterval = null;
+
+    async function handleRequestClearance() {
+      const statusEl = document.getElementById('request-status');
+      const btnEl = document.getElementById('request-clearance-btn');
+
+      console.log('[Dashboard] Clearance request triggered');
+
+      // Get session from URL
+      const urlParams = new URLSearchParams(window.location.search);
+      const sessionId = urlParams.get('session');
+
+      if (!sessionId) {
+        statusEl.textContent = '❌ No session found. Please authenticate first.';
+        statusEl.style.color = '#f44336';
+        return;
+      }
+
+      // Update button state
+      btnEl.disabled = true;
+      btnEl.textContent = '📤 Sending Request...';
+      statusEl.textContent = 'Sending proof request to your wallet...';
+      statusEl.style.color = 'white';
+
+      try {
+        // Trigger clearance proof request via API
+        const response = await fetch(`${API_BASE}/api/request-clearance`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ sessionId })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to send proof request');
+        }
+
+        console.log('[Dashboard] Proof request sent:', data);
+
+        // Check if already verified or already requested
+        if (data.alreadyVerified) {
+          statusEl.textContent = `✅ Clearance already verified: ${data.clearanceLevel}`;
+          statusEl.style.color = '#4CAF50';
+          await loadDashboard(); // Reload to show content
+          return;
+        }
+
+        if (data.alreadyRequested) {
+          statusEl.textContent = '⏳ Proof request already sent. Waiting for your wallet submission...';
+        } else {
+          statusEl.textContent = '✅ Proof request sent! Please check your wallet and submit your Security Clearance credential.';
+        }
+
+        statusEl.style.color = '#4CAF50';
+        btnEl.textContent = '⏳ Waiting for Submission...';
+
+        // Start polling for clearance updates
+        startClearancePolling(sessionId);
+
+      } catch (error) {
+        console.error('[Dashboard] Error requesting clearance:', error);
+        statusEl.textContent = `❌ Error: ${error.message}`;
+        statusEl.style.color = '#f44336';
+
+        // Re-enable button
+        btnEl.disabled = false;
+        btnEl.textContent = '📤 Submit Security Clearance';
+      }
+    }
+
+    function startClearancePolling(sessionId) {
+      console.log('[Dashboard] Starting clearance polling...');
+
+      const statusEl = document.getElementById('request-status');
+      let pollCount = 0;
+      const maxPolls = 60; // Poll for up to 2 minutes (60 * 2 seconds)
+
+      // Clear any existing polling
+      if (pollingInterval) {
+        clearInterval(pollingInterval);
+      }
+
+      pollingInterval = setInterval(async () => {
+        pollCount++;
+
+        try {
+          console.log(`[Dashboard] Polling attempt ${pollCount}/${maxPolls}...`);
+
+          // Reload dashboard content (will auto-check clearance)
+          await loadDashboard();
+
+          // Check if clearance was found
+          if (currentUser && currentUser.clearanceLevel) {
+            console.log('[Dashboard] Clearance detected!');
+            statusEl.textContent = `✅ Success! Clearance level ${currentUser.clearanceLevel} detected. Content expanded.`;
+            statusEl.style.color = '#4CAF50';
+
+            // Stop polling
+            clearInterval(pollingInterval);
+            pollingInterval = null;
+
+            // Hide the request button after success
+            setTimeout(() => {
+              document.getElementById('request-clearance-prompt').classList.add('hidden');
+            }, 2000);
+          } else {
+            // Update status with poll count
+            statusEl.textContent = `⏳ Waiting for wallet submission... (${pollCount}/${maxPolls})`;
+          }
+
+          // Stop after max polls
+          if (pollCount >= maxPolls) {
+            console.log('[Dashboard] Polling timeout reached');
+            clearInterval(pollingInterval);
+            pollingInterval = null;
+
+            statusEl.textContent = '⏱️ Timeout: Please click the button again to check for updates.';
+            statusEl.style.color = '#FFA726';
+
+            const btnEl = document.getElementById('request-clearance-btn');
+            btnEl.disabled = false;
+            btnEl.textContent = '🔄 Check Again';
+          }
+
+        } catch (error) {
+          console.error('[Dashboard] Polling error:', error);
+        }
+
+      }, 2000); // Poll every 2 seconds
+    }
+
+    async function loadDashboard() {
+      // Get session from URL (if authenticated)
+      const urlParams = new URLSearchParams(window.location.search);
+      const sessionId = urlParams.get('session');
+
+      console.log('[Dashboard] Session ID:', sessionId || 'none (public access)');
+
+      // NEW ARCHITECTURE: Always fetch PUBLIC, merge with encrypted sections for authenticated users
+      // Step 1: Always fetch PUBLIC content (pass session if available to get user info)
+      console.log('[Dashboard] Step 1: Fetching PUBLIC content...');
+      const publicUrl = sessionId
+        ? `${API_BASE}/api/dashboard/content?session=${sessionId}`
+        : `${API_BASE}/api/dashboard/content`;
+      const publicResponse = await fetch(publicUrl);
+
+      if (!publicResponse.ok) {
+        throw new Error(`Failed to fetch public content: ${publicResponse.status}`);
+      }
+
+      const publicData = await publicResponse.json();
+      console.log(`[Dashboard] ✅ Loaded ${publicData.sections.length} PUBLIC sections`);
+
+      // Start with public sections
+      let allSections = [...publicData.sections];
+      let userData = publicData.user;
+
+      // Step 2: If authenticated, fetch and merge encrypted sections
+      if (sessionId) {
+        console.log('[Dashboard] Step 2: Authenticated - fetching encrypted sections...');
+        const encryptedUrl = `${API_BASE}/api/dashboard/encrypted-content?session=${sessionId}`;
+        const encryptedResponse = await fetch(encryptedUrl);
+
+        if (encryptedResponse.ok) {
+          const encryptedData = await encryptedResponse.json();
+
+          if (encryptedData.success) {
+            console.log(`[Dashboard] ✅ Loaded ${encryptedData.sections.length} encrypted sections`);
+
+            // Merge: PUBLIC (plaintext) + HIGHER clearance (encrypted)
+            allSections = allSections.concat(encryptedData.sections);
+            userData = encryptedData.user; // Use authenticated user data
+
+            console.log(`[Dashboard] Merged sections: ${publicData.sections.length} public + ${encryptedData.sections.length} encrypted = ${allSections.length} total`);
+          } else {
+            console.error('[Dashboard] ❌ Encrypted endpoint returned error:', encryptedData.error);
+          }
+        } else if (encryptedResponse.status === 400 || encryptedResponse.status === 401) {
+          // User authenticated but no Security Clearance VC provided yet
+          // This is normal - they just haven't submitted their clearance credential
+          console.log('[Dashboard] ℹ️ No Security Clearance credential submitted yet');
+          // Continue with just PUBLIC sections - updateUserInfo will show "Submit Security Clearance" button
+        } else {
+          console.error(`[Dashboard] ❌ Encrypted endpoint failed: ${encryptedResponse.status}`);
+          // Continue with just PUBLIC sections
+        }
+      }
+
+      // Prepare final data object
+      const data = {
+        success: true,
+        user: userData,
+        sections: allSections
+      };
+      const isEncrypted = data.sections?.some(s => s.encryptedContent?.encrypted) || false;
+      console.log('[Dashboard] Received data:', isEncrypted ? 'encrypted' : 'plaintext', data.sections?.length || 0, 'sections');
+
+      // Hide loading
+      document.getElementById('loading').classList.add('hidden');
+
+      // Update user info
+      currentUser = data.user;
+      updateUserInfo(data.user);
+
+      // Store sections
+      currentSections = data.sections;
+
+      // Initialize encrypted sections counter
+      totalEncryptedSections = data.sections.filter(s => s.encryptedContent?.encrypted).length;
+      decryptedSectionsCount = 0;
+
+      console.log(`[Dashboard] Total sections: ${data.sections.length}, Encrypted: ${totalEncryptedSections}`);
+
+      // Show content count
+      showContentCount(data.sections.length, data.user.clearanceLevel || data.user.name);
+
+      // Render sections (will handle encrypted content automatically)
+      renderSections(data.sections);
+
+      // Update wallet status based on encrypted content
+      // Show decrypt button if we have encrypted sections
+      if (isEncrypted) {
+        updateWalletStatus(false); // Show "Decrypt with Wallet" button
+        console.log('[Dashboard] Encrypted sections detected - user must click decrypt button to proceed');
+      }
+    }
+
+    function updateUserInfo(user) {
+      const userInfoEl = document.getElementById('user-info');
+      const requestClearancePromptEl = document.getElementById('request-clearance-prompt');
+
+      if (user.authenticated) {
+        // Authenticated user
+        const clearanceLevel = user.clearanceLevel || 'NO CLEARANCE';
+
+        userInfoEl.innerHTML = `
+          <strong>${escapeHtml(user.name)}</strong>
+          <span class="clearance-badge" style="background: ${getClearanceBadgeColor(user.clearanceLevel)}">
+            ${escapeHtml(clearanceLevel)}
+          </span>
+        `;
+
+        // Show "Request Clearance" button if authenticated but no clearance
+        if (!user.clearanceLevel) {
+          requestClearancePromptEl.classList.remove('hidden');
+          console.log('[Dashboard] Authenticated without clearance - showing request button');
+        } else {
+          requestClearancePromptEl.classList.add('hidden');
+          console.log('[Dashboard] Authenticated as:', user.name, '-', user.clearanceLevel);
+        }
+      } else {
+        // Guest user
+        userInfoEl.innerHTML = '<strong>Guest User</strong>';
+        requestClearancePromptEl.classList.add('hidden');
+
+        console.log('[Dashboard] Guest access (public content only)');
+      }
+    }
+
+    function showContentCount(count, clearanceLevel) {
+      const countEl = document.getElementById('content-count');
+      const levelText = clearanceLevel || 'PUBLIC';
+
+      countEl.textContent = `Displaying ${count} section${count !== 1 ? 's' : ''} accessible at ${levelText} clearance level`;
+      countEl.classList.remove('hidden');
+    }
+
+    function renderSections(sections) {
+      const container = document.getElementById('content-container');
+      container.innerHTML = '';
+
+      if (sections.length === 0) {
+        container.innerHTML = '<p class="loading">No content available.</p>';
+        return;
+      }
+
+      sections.forEach((section, index) => {
+        const sectionEl = document.createElement('div');
+        sectionEl.className = 'section';
+        sectionEl.style.animationDelay = `${index * 0.1}s`;
+        sectionEl.dataset.sectionId = section.id;
+
+        // Check if content is encrypted
+        const isEncrypted = section.encryptedContent && section.encryptedContent.encrypted;
+
+        if (isEncrypted) {
+          // Encrypted content - show actual ciphertext as base64 string
+          // User sees the encrypted gibberish, knows content is there but unreadable
+          const ciphertext = section.encryptedContent.ciphertext || '';
+          const truncatedCiphertext = ciphertext.length > 200
+            ? ciphertext.substring(0, 200) + '...'
+            : ciphertext;
+
+          sectionEl.innerHTML = `
+            <div class="section-header">
+              <div class="section-title">${escapeHtml(section.title)}</div>
+              <div class="section-badge" style="background: ${section.badgeColor}">
+                ${escapeHtml(section.clearanceBadge)}
+              </div>
+            </div>
+            <div class="section-content encrypted" id="content-${section.id}">
+              <div style="color: #ff9800; font-weight: bold; margin-bottom: 10px;">
+                🔒 Encrypted - Click "Decrypt with Wallet" to Read
+              </div>
+              <div style="font-family: 'Courier New', monospace; font-size: 11px; color: #666; word-break: break-all; background: #f5f5f5; padding: 10px; border-radius: 4px;">
+                ${escapeHtml(truncatedCiphertext)}
+              </div>
+              ${ciphertext.length > 200 ? '<div style="color: #999; font-size: 12px; margin-top: 5px;">(truncated for display - full ciphertext will be decrypted)</div>' : ''}
+            </div>
+          `;
+        } else {
+          // Plaintext content - render directly
+          sectionEl.innerHTML = `
+            <div class="section-header">
+              <div class="section-title">${escapeHtml(section.title)}</div>
+              <div class="section-badge" style="background: ${section.badgeColor}">
+                ${escapeHtml(section.clearanceBadge)}
+              </div>
+            </div>
+            <div class="section-content">${escapeHtml(section.content)}</div>
+          `;
+        }
+
+        container.appendChild(sectionEl);
+      });
+
+      console.log('[Dashboard] Rendered', sections.length, 'sections',
+        `(${sections.filter(s => s.encryptedContent?.encrypted).length} encrypted)`);
+    }
+
+    /**
+     * Request decryption of encrypted content from wallet
+     * @param {string} sectionId - Unique section ID
+     * @param {object} encryptedContent - Encrypted message body from server
+     */
+    function requestDecryption(sectionId, encryptedContent) {
+      console.log(`[Decrypt Request] Requesting decryption for section: ${sectionId}`);
+
+      // Check if wallet window is available
+      if (!walletWindow || walletWindow.closed) {
+        console.warn('[Decrypt Request] Wallet window not available');
+        const contentEl = document.getElementById(`content-${sectionId}`);
+        if (contentEl) {
+          contentEl.innerHTML = '<p style="color: #f44336;">❌ Wallet not connected. Please open wallet to decrypt.</p>';
+        }
+        updateWalletStatus(false);
+        return;
+      }
+
+      const requestId = `${sectionId}-${Date.now()}`;
+
+      // Store pending request
+      decryptPendingRequests.set(requestId, {
+        sectionId,
+        timestamp: Date.now()
+      });
+
+      // Send decrypt request via postMessage
+      try {
+        // DIAGNOSTIC: Log detailed postMessage info
+        console.log('[DIAGNOSTIC] Sending DECRYPT_REQUEST postMessage:', {
+          targetOrigin: 'https://identuslabel.cz',
+          dashboardOrigin: window.location.origin,
+          dashboardUrl: window.location.href,
+          sectionId,
+          requestId,
+          walletWindowClosed: walletWindow.closed
+        });
+
+        walletWindow.postMessage({
+          type: 'DECRYPT_REQUEST',
+          requestId,
+          sectionId,
+          encryptedContent,
+          timestamp: Date.now()
+        }, 'https://identuslabel.cz');
+
+        console.log(`[Decrypt Request] Sent to wallet for section: ${sectionId}`);
+      } catch (error) {
+        console.error(`[Decrypt Request] Error sending message:`, error);
+        decryptPendingRequests.delete(requestId);
+
+        const contentEl = document.getElementById(`content-${sectionId}`);
+        if (contentEl) {
+          contentEl.innerHTML = `<p style="color: #f44336;">❌ Error communicating with wallet: ${error.message}</p>`;
+        }
+      }
+
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        if (decryptPendingRequests.has(requestId)) {
+          console.error(`[Decrypt Request] Timeout for section: ${sectionId}`);
+          decryptPendingRequests.delete(requestId);
+
+          const contentEl = document.getElementById(`content-${sectionId}`);
+          if (contentEl) {
+            contentEl.innerHTML = '<p style="color: #f44336;">⏱️ Decryption timeout. Please ensure wallet is open and try again.</p>';
+          }
+        }
+      }, 10000);
+    }
+
+    /**
+     * Handle decryption response from wallet
+     */
+    function handleDecryptResponse(message) {
+      const { requestId, sectionId, plaintext } = message;
+
+      console.log(`[Decrypt Response] Received for section: ${sectionId}`);
+
+      // Remove from pending requests
+      if (decryptPendingRequests.has(requestId)) {
+        const request = decryptPendingRequests.get(requestId);
+        const latency = Date.now() - request.timestamp;
+        console.log(`[Decrypt Response] Latency: ${latency}ms`);
+        decryptPendingRequests.delete(requestId);
+      }
+
+      // Increment decrypted counter
+      decryptedSectionsCount++;
+
+      // Update DOM with decrypted content
+      const contentEl = document.getElementById(`content-${sectionId}`);
+      if (contentEl) {
+        contentEl.innerHTML = `<span class="decryption-success-indicator">✅ Decrypted locally in wallet</span>${escapeHtml(plaintext)}`;
+        contentEl.classList.remove('encrypted');
+
+        // Mark section as decrypted with animation
+        const sectionEl = document.querySelector(`[data-section-id="${sectionId}"]`);
+        if (sectionEl) {
+          sectionEl.classList.add('decrypted');
+        }
+
+        console.log(`[Decrypt Response] ✅ Content updated for section: ${sectionId} (${decryptedSectionsCount}/${totalEncryptedSections})`);
+      } else {
+        console.error(`[Decrypt Response] Content element not found: content-${sectionId}`);
+      }
+
+      // Update progress notification
+      if (decryptionInProgress) {
+        const progress = `${decryptedSectionsCount}/${totalEncryptedSections}`;
+        showDecryptionStatus(`Decrypted ${progress} sections`, 'success');
+
+        // Check if all sections decrypted
+        if (decryptedSectionsCount >= totalEncryptedSections) {
+          handleAllSectionsDecrypted();
+        }
+      }
+    }
+
+    /**
+     * Handle completion of all section decryptions
+     */
+    function handleAllSectionsDecrypted() {
+      console.log('[Dashboard] ✅ All sections decrypted successfully');
+      decryptionInProgress = false;
+
+      showDecryptionStatus('All content decrypted successfully! 🎉', 'success');
+
+      // Auto-close wallet window after 2 seconds
+      setTimeout(() => {
+        if (walletWindow && !walletWindow.closed) {
+          console.log('[Dashboard] Auto-closing wallet window...');
+          walletWindow.close();
+          walletWindow = null;
+          walletDetected = false;
+
+          // Clear status notification after another 2 seconds
+          setTimeout(() => {
+            showDecryptionStatus('', 'success'); // Clear
+          }, 2000);
+        }
+      }, 2000);
+    }
+
+    /**
+     * Handle decryption error from wallet
+     */
+    function handleDecryptError(message) {
+      const { requestId, sectionId, error } = message;
+
+      console.error(`[Decrypt Error] Failed for section ${sectionId}:`, error);
+
+      // Remove from pending requests
+      if (decryptPendingRequests.has(requestId)) {
+        decryptPendingRequests.delete(requestId);
+      }
+
+      // Update DOM with error
+      const contentEl = document.getElementById(`content-${sectionId}`);
+      if (contentEl) {
+        contentEl.innerHTML = `<p style="color: #f44336;">❌ Decryption failed: ${escapeHtml(error)}</p>`;
+      }
+    }
+
+    function getClearanceBadgeColor(level) {
+      const colors = {
+        'PUBLIC': '#4CAF50',
+        'INTERNAL': '#2196F3',
+        'CONFIDENTIAL': '#FF9800',
+        'RESTRICTED': '#9C27B0',
+        'TOP-SECRET': '#F44336'
+      };
+      return colors[level] || '#9E9E9E';
+    }
+
+    function showError(message) {
+      const container = document.getElementById('error-container');
+      const errorEl = document.createElement('div');
+      errorEl.className = 'error';
+      errorEl.textContent = message;
+      container.appendChild(errorEl);
+
+      // Auto-remove after 10 seconds
+      setTimeout(() => errorEl.remove(), 10000);
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    /**
+     * Show decryption status notification
+     * @param {string} message - Status message to display
+     * @param {string} type - Notification type: 'info', 'success', 'error'
+     */
+    function showDecryptionStatus(message, type) {
+      let statusEl = document.getElementById('decryption-status');
+
+      if (!message) {
+        // Clear status
+        statusEl.classList.remove('show');
+        statusEl.textContent = '';
+        return;
+      }
+
+      // Set color based on type
+      const colors = {
+        info: { bg: '#2196F3', text: 'white' },
+        success: { bg: '#4CAF50', text: 'white' },
+        error: { bg: '#f44336', text: 'white' }
+      };
+
+      const color = colors[type] || colors.info;
+      statusEl.style.backgroundColor = color.bg;
+      statusEl.style.color = color.text;
+      statusEl.textContent = message;
+      statusEl.classList.add('show');
+
+      console.log(`[Status] ${message} (${type})`);
+    }
+  </script>
+</body>
+</html>

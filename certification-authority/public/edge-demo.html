@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CA - Edge SDK Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+            color: white;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .content {
+            padding: 2rem;
+        }
+
+        .demo-section {
+            background: #f8f9fa;
+            border-left: 4px solid #4caf50;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            border-radius: 8px;
+        }
+
+        .log-container {
+            background: #1a1a1a;
+            color: #00ff00;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            max-height: 500px;
+            overflow-y: auto;
+            margin: 1rem 0;
+            white-space: pre-wrap;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            margin: 0.5rem;
+            transition: transform 0.2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .btn.secondary {
+            background: #6c757d;
+        }
+
+        .comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            margin: 2rem 0;
+        }
+
+        .approach {
+            padding: 1.5rem;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .old-approach {
+            background: #ffebee;
+            border: 2px solid #f44336;
+        }
+
+        .new-approach {
+            background: #e8f5e8;
+            border: 2px solid #4caf50;
+        }
+
+        .feature-list {
+            text-align: left;
+            margin: 1rem 0;
+        }
+
+        .feature-list li {
+            margin: 0.5rem 0;
+            padding-left: 1rem;
+        }
+
+        .success-badge {
+            background: #4caf50;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            margin-left: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏛️ CA Edge SDK Integration Demo</h1>
+            <p>Demonstrating client-side DID operations with Hyperledger Identus Edge Agent SDK</p>
+            <p style="margin-top: 10px; font-size: 0.9rem; opacity: 0.9;">
+                <strong>Integration Status:</strong> 
+                <span class="success-badge">✅ Webpack Bundler Working</span>
+                <span class="success-badge">✅ Mediator Connected</span>
+            </p>
+        </div>
+
+        <div class="content">
+            <div class="demo-section">
+                <h2>🚀 Edge SDK vs Traditional Cloud Agent</h2>
+                <div class="comparison">
+                    <div class="approach old-approach">
+                        <h3>❌ Traditional Cloud Agent</h3>
+                        <ul class="feature-list">
+                            <li>Server-side DID creation</li>
+                            <li>Centralized key management</li>
+                            <li>Network-dependent operations</li>
+                            <li>Complex API integration</li>
+                            <li>Manual polyfills (400+ lines)</li>
+                        </ul>
+                    </div>
+                    <div class="approach new-approach">
+                        <h3>✅ Edge SDK Integration</h3>
+                        <ul class="feature-list">
+                            <li>Client-side DID operations</li>
+                            <li>Local key generation & storage</li>
+                            <li>Offline-capable functionality</li>
+                            <li>Native browser integration</li>
+                            <li>Webpack bundling (7.85KB)</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="demo-section">
+                <h3>🔧 SDK Operations Demo</h3>
+                <p>Click buttons below to demonstrate different Edge SDK capabilities:</p>
+                
+                <div style="margin: 1rem 0;">
+                    <button class="btn" onclick="simulateSDKInit()">🔄 Initialize Edge SDK</button>
+                    <button class="btn" onclick="simulateCreateDID()">🆔 Create DID (Client-side)</button>
+                    <button class="btn" onclick="simulateGenerateKeys()">🔑 Generate Keys</button>
+                    <button class="btn" onclick="simulateMediator()">🌐 Connect to Mediator</button>
+                    <button class="btn" onclick="simulateCredential()">📜 Create Credential</button>
+                    <button class="btn secondary" onclick="clearLog()">🧹 Clear Log</button>
+                </div>
+
+                <div class="log-container" id="demoLog">CA Edge SDK Demo Log:
+Ready to demonstrate client-side operations...
+
+🎯 Key Benefits:
+• All cryptographic operations happen in browser
+• Private keys never leave user's device  
+• Works with Identus Mediator for cross-network communication
+• Production-ready webpack bundling instead of manual polyfills
+• Seamless integration with existing CA infrastructure
+
+Click buttons above to see simulated SDK operations.
+                </div>
+            </div>
+
+            <div class="demo-section">
+                <h3>📊 Integration Architecture</h3>
+                <div style="background: white; padding: 1rem; border-radius: 8px; font-family: monospace; font-size: 0.9rem;">
+<pre>
+🏛️ Certification Authority (Port 3004)
+    ├── 🌐 Edge SDK Integration (Client-side)
+    │   ├── 🆔 DID Creation (Browser)
+    │   ├── 🔑 Key Generation (Local)
+    │   ├── 📜 Credential Operations
+    │   └── 🔒 Private Key Storage
+    │
+    ├── 🌉 Identus Mediator (91.99.4.54:7080)
+    │   ├── 📨 Cross-network DIDComm
+    │   ├── 🔗 WebSocket connectivity
+    │   └── 📡 Message relay services
+    │
+    └── ☁️ Cloud Agent Fallback (Port 8081)
+        ├── 🗄️ Schema management
+        ├── 📋 Credential definitions  
+        └── 🔄 Legacy API support
+</pre>
+                </div>
+            </div>
+
+            <div class="demo-section">
+                <h3>🔗 Related Resources</h3>
+                <div style="margin: 1rem 0;">
+                    <button class="btn" onclick="openWebpackDemo()">📦 View Webpack Bundle Demo</button>
+                    <button class="btn" onclick="openCAPortal()">🏛️ Return to CA Portal</button>
+                    <button class="btn" onclick="openLogin()">🔐 Test Credential Login</button>
+                    <button class="btn secondary" onclick="window.open('http://localhost:3010', '_blank')">👩‍💻 Alice's Edge Wallet</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+        let operationCount = 0;
+
+        function log(message) {
+            const logContainer = document.getElementById('demoLog');
+            const timestamp = new Date().toISOString().substring(11, 19);
+            logContainer.textContent += `\n[${timestamp}] ${message}`;
+            logContainer.scrollTop = logContainer.scrollHeight;
+            console.log(message);
+        }
+
+        function clearLog() {
+            document.getElementById('demoLog').textContent = 'CA Edge SDK Demo Log:\nLog cleared...\n';
+        }
+
+        async function simulateSDKInit() {
+            log('🔄 Initializing Hyperledger Identus Edge Agent SDK...');
+            log('📦 Loading bundled SDK components...');
+            await delay(800);
+            log('✅ Apollo (Crypto) module loaded');
+            await delay(400);
+            log('✅ Castor (DIDs) module loaded');
+            await delay(400);
+            log('✅ Pluto (Storage) module loaded');
+            await delay(400);
+            log('✅ Mercury (DIDComm) module loaded');
+            await delay(400);
+            log('✅ Pollux (Credentials) module loaded');
+            log('🎉 Edge SDK initialization complete!');
+            operationCount++;
+        }
+
+        async function simulateCreateDID() {
+            log('🔄 Creating DID using client-side Edge SDK...');
+            log('🔑 Generating SECP256K1 key pair locally...');
+            await delay(600);
+            
+            const mockDID = `did:peer:2.Ez6LSg${Math.random().toString(36).substring(2, 15)}`;
+            log(`✅ DID created: ${mockDID}`);
+            log('📋 DID is long-form and immediately usable');
+            log('🔒 Private key stored securely in browser');
+            log('💡 No network dependency for DID creation');
+            operationCount++;
+        }
+
+        async function simulateGenerateKeys() {
+            log('🔄 Generating cryptographic keys locally...');
+            log('🔑 Creating Ed25519 authentication key...');
+            await delay(500);
+            log('🔑 Creating X25519 key agreement key...');
+            await delay(500);
+            log('🔑 Creating SECP256K1 assertion key...');
+            await delay(500);
+            log('✅ All keys generated and stored in browser');
+            log('🛡️ Keys never transmitted over network');
+            operationCount++;
+        }
+
+        async function simulateMediator() {
+            log('🔄 Connecting to Identus Mediator...');
+            log('🌐 WebSocket connection to ws://91.99.4.54:7080/ws');
+            await delay(800);
+            log('🤝 Establishing DIDComm connection...');
+            await delay(600);
+            log('✅ Mediator connection established');
+            log('📡 Ready for cross-network communication');
+            log('🔗 Can now communicate with cloud wallets');
+            operationCount++;
+        }
+
+        async function simulateCredential() {
+            log('🔄 Simulating credential operations...');
+            log('📜 Creating credential definition...');
+            await delay(600);
+            log('🏗️ Building verifiable credential...');
+            await delay(800);
+            log('✍️ Signing credential with local keys...');
+            await delay(500);
+            log('✅ Credential created and signed locally');
+            log('📨 Ready to send via DIDComm...');
+            log('🎯 End-to-end credential lifecycle complete');
+            operationCount++;
+        }
+
+        function openWebpackDemo() {
+            log('🔄 Opening webpack bundler demo...');
+            window.open('http://localhost:3007/webpack-demo-fixed', '_blank');
+            log('✅ Webpack demo opened in new tab');
+        }
+
+        function openCAPortal() {
+            log('🔄 Returning to CA Portal...');
+            window.location.href = '/';
+        }
+
+        function openLogin() {
+            log('🔄 Opening credential-based login...');
+            window.open('/login', '_blank');
+            log('✅ Login page opened in new tab');
+        }
+
+        function delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        // Initialize demo
+        window.addEventListener('load', () => {
+            log('🎯 CA Edge SDK Demo loaded');
+            log('💡 This demonstrates the integration between:');
+            log('   • Traditional CA infrastructure (port 3004)');
+            log('   • Edge SDK client-side operations');
+            log('   • Identus Mediator connectivity');
+            log('   • Webpack bundling approach');
+            log('');
+            log('🚀 Ready for demonstration!');
+        });
+    </script>
+</body>
+</html>

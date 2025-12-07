@@ -1,0 +1,1256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RealPerson ID Issuance - Certification Authority</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            padding: 30px 40px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+        
+        .nav-links {
+            background: #f8f9fa;
+            padding: 15px 40px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .nav-links a {
+            color: #c31432;
+            text-decoration: none;
+            margin-right: 20px;
+            font-weight: 500;
+        }
+        
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+        
+        .main {
+            padding: 40px;
+            display: grid;
+            gap: 30px;
+        }
+        
+        .section {
+            padding: 30px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            background: #f9f9f9;
+        }
+        
+        .section h2 {
+            color: #c31432;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+            border-bottom: 2px solid #c31432;
+            padding-bottom: 10px;
+        }
+        
+        .two-column {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+        
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-group.full-width {
+            grid-column: 1 / -1;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #240b36;
+        }
+        
+        .form-group .required {
+            color: #dc3545;
+        }
+        
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+        
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #c31432;
+            box-shadow: 0 0 0 3px rgba(195, 20, 50, 0.1);
+        }
+        
+        .form-group .help-text {
+            font-size: 0.85rem;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin: 10px 10px 10px 0;
+        }
+        
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(195, 20, 50, 0.3);
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .btn.secondary {
+            background: #6c757d;
+        }
+        
+        .btn.success {
+            background: #28a745;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        
+        .status.info {
+            background: #cce5ff;
+            border: 1px solid #b8daff;
+            color: #004085;
+        }
+        
+        .status.warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+        }
+        
+        .id-preview {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        
+        .id-card {
+            background: white;
+            color: #333;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .id-header {
+            text-align: center;
+            border-bottom: 2px solid #c31432;
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .id-header h3 {
+            color: #c31432;
+            font-size: 1.2rem;
+        }
+        
+        .id-body {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+        }
+        
+        .id-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            font-size: 0.9rem;
+        }
+        
+        .id-info .field {
+            padding: 5px 0;
+        }
+        
+        .id-info .label {
+            font-weight: 600;
+            color: #240b36;
+        }
+        
+        .id-photo {
+            background: #f0f0f0;
+            border: 2px solid #c31432;
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 120px;
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        .connections-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .connection-item {
+            background: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .connection-item:hover {
+            border-color: #c31432;
+            box-shadow: 0 2px 8px rgba(195, 20, 50, 0.1);
+        }
+        
+        .connection-item.selected {
+            border-color: #c31432;
+            background: #fff5f5;
+        }
+        
+        .connection-item h4 {
+            color: #240b36;
+            margin-bottom: 5px;
+        }
+        
+        .connection-item p {
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin: 0 2px;
+        }
+        
+        .badge.active {
+            background: #28a745;
+            color: white;
+        }
+        
+        .badge.pending {
+            background: #ffc107;
+            color: #333;
+        }
+        
+        .step-indicator {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 30px;
+            padding: 0 20px;
+        }
+        
+        .step {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .step-number {
+            background: #e0e0e0;
+            color: #666;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        
+        .step.active .step-number {
+            background: #c31432;
+            color: white;
+        }
+        
+        .step.completed .step-number {
+            background: #28a745;
+            color: white;
+        }
+        
+        .step-text {
+            font-size: 0.9rem;
+            color: #666;
+        }
+        
+        .step.active .step-text {
+            color: #c31432;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <span>🆔</span>
+                <span>RealPerson Identity Credential Issuance</span>
+            </h1>
+            <p>Official National ID-like Digital Identity Verification & Issuance</p>
+        </div>
+        
+        <div class="nav-links">
+            <a href="/">← Back to Main Portal</a>
+            <a href="#" onclick="refreshSchemas()">Refresh Schemas</a>
+            <a href="#" onclick="viewIssuedCredentials()">View Issued Credentials</a>
+        </div>
+        
+        <div class="main">
+            <!-- Step Indicator -->
+            <div class="step-indicator">
+                <div class="step active" id="step1">
+                    <div class="step-number">1</div>
+                    <div class="step-text">Initialize Schema</div>
+                </div>
+                <div class="step" id="step2">
+                    <div class="step-number">2</div>
+                    <div class="step-text">Select Connection</div>
+                </div>
+                <div class="step" id="step3">
+                    <div class="step-number">3</div>
+                    <div class="step-text">Collect Information</div>
+                </div>
+                <div class="step" id="step4">
+                    <div class="step-number">4</div>
+                    <div class="step-text">Issue Credential</div>
+                </div>
+            </div>
+            
+            <!-- Schema Status -->
+            <div class="section">
+                <h2>📋 RealPerson Schema Status</h2>
+                <div id="schemaResult"></div>
+            </div>
+            
+            <!-- DID and Schema Selection -->
+            <div class="section">
+                <h2>⚙️ Credential Configuration</h2>
+                <div class="two-column">
+                    <div>
+                        <h3>🆔 Select Issuing DID</h3>
+                        <select id="didSelection" onchange="updateSelectedDID()" style="width: 100%; padding: 8px; margin: 10px 0;">
+                            <option value="">Loading DIDs...</option>
+                        </select>
+                        <div id="selectedDIDInfo" style="margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 4px; font-size: 0.9rem;"></div>
+                    </div>
+                    <div>
+                        <h3>📋 Select Schema Version</h3>
+                        <select id="schemaSelection" onchange="updateSelectedSchema()" style="width: 100%; padding: 8px; margin: 10px 0;">
+                            <option value="">Loading schemas...</option>
+                        </select>
+                        <div id="selectedSchemaInfo" style="margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 4px; font-size: 0.9rem;"></div>
+                    </div>
+                </div>
+                <button class="btn secondary" onclick="refreshConfiguration()" style="margin-top: 15px;">🔄 Refresh Configuration</button>
+            </div>
+            
+            <!-- Connection Selection -->
+            <div class="two-column">
+                <div class="section">
+                    <h2>🔗 Select Identity Applicant</h2>
+                    <p>Choose a connected individual to issue RealPerson credential</p>
+                    <div class="form-group">
+                        <label for="connectionFilter">🔍 Filter by Label/Name:</label>
+                        <input type="text" id="connectionFilter" placeholder="Type to filter connections..." 
+                               onkeyup="filterConnections()" style="width: 100%;">
+                        <div class="help-text">Search by connection label, name, or ID</div>
+                    </div>
+                    <button class="btn secondary" onclick="loadConnections()">🔄 Refresh Connections</button>
+                    <div id="connectionsResult" class="connections-list"></div>
+                    <div id="selectedConnection"></div>
+                    
+                    <!-- DIDComm Chat Section -->
+                    <div id="didcommChatSection" style="display: none; margin-top: 30px; padding: 20px; border: 2px solid #c31432; border-radius: 10px; background: #fff5f5;">
+                        <h3 style="color: #c31432; margin-bottom: 15px;">💬 Chat with Applicant</h3>
+                        <div id="chatMessages" style="max-height: 300px; overflow-y: auto; border: 1px solid #e0e0e0; padding: 10px; margin-bottom: 15px; background: white; border-radius: 5px;"></div>
+                        <div style="display: flex; gap: 10px;">
+                            <input type="text" id="chatMessageInput" placeholder="Type message to applicant..." style="flex: 1; padding: 10px; border: 1px solid #e0e0e0; border-radius: 5px;" onkeypress="handleChatKeyPress(event)">
+                            <button class="btn" onclick="sendChatMessage()">Send</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h2>ℹ️ Manual DID Entry</h2>
+                    <p>For testing: Enter DID or connection details manually</p>
+                    <div class="form-group">
+                        <label for="manualDid">Holder's DID <span class="required">*</span></label>
+                        <input type="text" id="manualDid" placeholder="did:prism:... or connection ID">
+                        <div class="help-text">Enter the DID or connection ID of the credential holder</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="holderName">Holder Name</label>
+                        <input type="text" id="holderName" placeholder="For identification purposes">
+                    </div>
+                    <button class="btn" onclick="useManualConnection()">Use Manual Entry</button>
+                </div>
+            </div>
+            
+            <!-- Identity Information Form -->
+            <div class="section" id="identityForm" style="display: none;">
+                <h2>📝 RealPerson Identity Information</h2>
+                <p>Enter all required information for the national ID-like credential</p>
+                
+                <form id="realPersonForm">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="firstName">First Name <span class="required">*</span></label>
+                            <input type="text" id="firstName" name="firstName" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="lastName">Last Name <span class="required">*</span></label>
+                            <input type="text" id="lastName" name="lastName" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="gender">Gender <span class="required">*</span></label>
+                            <select id="gender" name="gender" required>
+                                <option value="">Select Gender</option>
+                                <option value="Male">Male</option>
+                                <option value="Female">Female</option>
+                                <option value="Other">Other</option>
+                                <option value="Prefer not to say">Prefer not to say</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="dateOfBirth">Date of Birth <span class="required">*</span></label>
+                            <input type="date" id="dateOfBirth" name="dateOfBirth" required>
+                        </div>
+                        
+                        <div class="form-group full-width">
+                            <label for="uniqueIdNote">Unique ID</label>
+                            <div style="padding: 12px; background: #f8f9fa; border: 2px solid #e0e0e0; border-radius: 6px; color: #666;">
+                                <strong>Auto-generated by Certification Authority</strong><br>
+                                <small>A unique identifier will be automatically generated when the credential is issued</small>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-top: 30px;">
+                        <button type="button" class="btn" onclick="previewCredential()">Preview Credential</button>
+                        <button type="button" class="btn success" onclick="issueRealPersonCredential()">Issue RealPerson Credential</button>
+                        <button type="button" class="btn secondary" onclick="clearForm()">Clear Form</button>
+                    </div>
+                </form>
+                
+                <div id="credentialPreview"></div>
+                <div id="issuanceResult"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+        let selectedConnectionId = null;
+        let availableConnections = [];
+        let realPersonSchema = null;
+        let connectionLabels = {}; // Store custom labels
+        let filteredConnections = []; // Store filtered connections
+
+        // Initialize page
+        window.addEventListener('load', async () => {
+            loadConnectionLabels();
+            await ensureSchemaExists();
+            await loadConnections();
+            await loadDIDOptions();
+            await loadSchemaOptions();
+        });
+
+        function loadConnectionLabels() {
+            const stored = localStorage.getItem('ca_connectionLabels');
+            if (stored) {
+                connectionLabels = JSON.parse(stored);
+            }
+        }
+
+        function saveConnectionLabels() {
+            localStorage.setItem('ca_connectionLabels', JSON.stringify(connectionLabels));
+        }
+
+        // DID and Schema Management
+        let selectedDID = null;
+        let selectedSchema = null;
+        let availableDIDs = [];
+        let availableSchemas = [];
+
+        async function loadDIDOptions() {
+            try {
+                const response = await fetch(apiUrl('/api/dids'));
+                const data = await response.json();
+                
+                if (data.success) {
+                    availableDIDs = data.dids;
+                    const select = document.getElementById('didSelection');
+                    select.innerHTML = '<option value="">Select a DID...</option>';
+                    
+                    availableDIDs.forEach(did => {
+                        const option = document.createElement('option');
+                        option.value = did.did;
+                        option.textContent = `${did.did.substring(0, 30)}... (${did.status})`;
+                        option.dataset.status = did.status;
+                        option.dataset.fullDid = did.did;
+                        select.appendChild(option);
+                    });
+                    
+                    // Auto-select the working DID
+                    const workingDID = 'did:prism:976a9472646282e667c2536e1d202620cf3b78a06693d67c277b33d2afbcfca4';
+                    const workingOption = Array.from(select.options).find(opt => opt.value === workingDID);
+                    if (workingOption) {
+                        workingOption.selected = true;
+                        updateSelectedDID();
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading DIDs:', error);
+                document.getElementById('didSelection').innerHTML = '<option value="">Error loading DIDs</option>';
+            }
+        }
+
+        async function loadSchemaOptions() {
+            try {
+                const response = await fetch(apiUrl('/api/schemas'));
+                const data = await response.json();
+                
+                if (data.success) {
+                    availableSchemas = data.schemas.filter(schema => schema.name === 'RealPerson');
+                    const select = document.getElementById('schemaSelection');
+                    select.innerHTML = '<option value="">Select a schema...</option>';
+                    
+                    availableSchemas.forEach(schema => {
+                        const option = document.createElement('option');
+                        option.value = schema.guid;
+                        option.textContent = `${schema.name} v${schema.version}`;
+                        option.dataset.version = schema.version;
+                        option.dataset.guid = schema.guid;
+                        option.dataset.self = schema.self;
+                        select.appendChild(option);
+                    });
+                    
+                    // Auto-select version 2.0.0 if available
+                    const v2Schema = availableSchemas.find(schema => schema.version === '2.0.0');
+                    if (v2Schema) {
+                        const v2Option = Array.from(select.options).find(opt => opt.value === v2Schema.guid);
+                        if (v2Option) {
+                            v2Option.selected = true;
+                            updateSelectedSchema();
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading schemas:', error);
+                document.getElementById('schemaSelection').innerHTML = '<option value="">Error loading schemas</option>';
+            }
+        }
+
+        function updateSelectedDID() {
+            const select = document.getElementById('didSelection');
+            const selectedOption = select.options[select.selectedIndex];
+            
+            if (selectedOption && selectedOption.value) {
+                selectedDID = {
+                    did: selectedOption.value,
+                    status: selectedOption.dataset.status
+                };
+                
+                document.getElementById('selectedDIDInfo').innerHTML = `
+                    <strong>Selected DID:</strong><br>
+                    <code style="font-size: 0.8rem; word-break: break-all;">${selectedDID.did}</code><br>
+                    <strong>Status:</strong> <span style="color: ${selectedDID.status === 'PUBLISHED' ? 'green' : 'orange'};">${selectedDID.status}</span>
+                `;
+            } else {
+                selectedDID = null;
+                document.getElementById('selectedDIDInfo').innerHTML = '<em>No DID selected</em>';
+            }
+        }
+
+        function updateSelectedSchema() {
+            const select = document.getElementById('schemaSelection');
+            const selectedOption = select.options[select.selectedIndex];
+            
+            if (selectedOption && selectedOption.value) {
+                selectedSchema = {
+                    guid: selectedOption.value,
+                    version: selectedOption.dataset.version,
+                    self: selectedOption.dataset.self
+                };
+                
+                document.getElementById('selectedSchemaInfo').innerHTML = `
+                    <strong>Selected Schema:</strong> RealPerson v${selectedSchema.version}<br>
+                    <strong>GUID:</strong> <code style="font-size: 0.8rem;">${selectedSchema.guid}</code><br>
+                    <strong>Path:</strong> <code style="font-size: 0.8rem;">${selectedSchema.self}</code>
+                `;
+            } else {
+                selectedSchema = null;
+                document.getElementById('selectedSchemaInfo').innerHTML = '<em>No schema selected</em>';
+            }
+        }
+
+        async function refreshConfiguration() {
+            await loadDIDOptions();
+            await loadSchemaOptions();
+        }
+
+        async function createRealPersonSchema() {
+            try {
+                setStepActive(1);
+                const response = await fetch(apiUrl('/api/schemas/create-realperson'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('schemaResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ RealPerson Schema Created Successfully!</strong><br>
+                            <strong>Schema ID:</strong> ${data.schemaId}<br>
+                            <strong>Name:</strong> ${data.schemaData.name}<br>
+                            <strong>Version:</strong> ${data.schemaData.version}<br>
+                            <strong>Author:</strong> ${data.schemaData.author}
+                        </div>
+                    `;
+                    realPersonSchema = data.schemaData;
+                    setStepCompleted(1);
+                    setStepActive(2);
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('schemaResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to create schema:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function ensureSchemaExists() {
+            try {
+                const response = await fetch(apiUrl('/api/schemas'));
+                const data = await response.json();
+                
+                if (data.success) {
+                    const realPersonSchemas = data.schemas.filter(s => s.name === 'RealPerson');
+                    
+                    if (realPersonSchemas.length > 0) {
+                        realPersonSchema = realPersonSchemas[0];
+                        document.getElementById('schemaResult').innerHTML = `
+                            <div class="status success">
+                                <strong>✅ RealPerson Schema Ready</strong><br>
+                                <strong>Schema ID:</strong> ${realPersonSchema.guid}<br>
+                                <strong>Version:</strong> ${realPersonSchema.version}<br>
+                                <strong>Fields:</strong> firstName, lastName, gender, dateOfBirth, uniqueId<br>
+                                Schema is available and ready for credential issuance.
+                            </div>
+                        `;
+                        setStepCompleted(1);
+                        setStepActive(2);
+                    } else {
+                        // Auto-create schema if it doesn't exist
+                        await createRealPersonSchema();
+                    }
+                }
+            } catch (error) {
+                console.error('Error checking schemas:', error);
+                document.getElementById('schemaResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Error checking schema status</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function loadConnections() {
+            try {
+                const response = await fetch(apiUrl('/api/cloud-agent/connections'));
+                const data = await response.json();
+                
+                if (data.success) {
+                    availableConnections = data.connections.filter(conn => {
+                        const isActive = ['ConnectionResponseSent', 'ConnectionResponseReceived', 
+                                        'ConnectionCompleted', 'Active'].includes(conn.state);
+                        return isActive && conn.state !== 'InvitationExpired';
+                    });
+                    
+                    // Initially show all connections
+                    filteredConnections = availableConnections;
+                    displayConnections();
+                }
+            } catch (error) {
+                console.error('Error loading connections:', error);
+            }
+        }
+        
+        function filterConnections() {
+            const searchTerm = document.getElementById('connectionFilter').value.toLowerCase().trim();
+            
+            if (!searchTerm) {
+                filteredConnections = availableConnections;
+            } else {
+                filteredConnections = availableConnections.filter(conn => {
+                    // Get custom label or fall back to connection label
+                    const customLabel = connectionLabels[conn.connectionId];
+                    const displayLabel = customLabel || conn.label || '';
+                    
+                    // Search in label, custom label, and connection ID
+                    return displayLabel.toLowerCase().includes(searchTerm) ||
+                           conn.connectionId.toLowerCase().includes(searchTerm) ||
+                           (conn.label && conn.label.toLowerCase().includes(searchTerm));
+                });
+            }
+            
+            displayConnections();
+        }
+
+        function displayConnections() {
+            const connectionsToShow = filteredConnections.length > 0 ? filteredConnections : availableConnections;
+            
+            if (connectionsToShow.length === 0) {
+                const filterValue = document.getElementById('connectionFilter')?.value;
+                const message = filterValue ? 
+                    `No connections matching "${filterValue}"` : 
+                    'No Active Connections';
+                    
+                document.getElementById('connectionsResult').innerHTML = `
+                    <div class="status info">
+                        <strong>🔗 ${message}</strong><br>
+                        ${filterValue ? 'Try a different search term or clear the filter.' : 
+                         'Connect with individuals first, or use manual DID entry for testing.'}
+                    </div>
+                `;
+                return;
+            }
+            
+            const connectionList = connectionsToShow.map(conn => {
+                // Get custom label or fall back to connection label
+                const customLabel = connectionLabels[conn.connectionId];
+                const displayLabel = customLabel || conn.label || 'Connection';
+                const labelSource = customLabel ? '(Custom Label)' : conn.label ? '(Connection Label)' : '';
+                
+                return `
+                <div class="connection-item" onclick="selectConnection('${conn.connectionId}', '${displayLabel.replace(/'/g, "\\'")}')">  
+                    <h4>${displayLabel}</h4>
+                    <p style="font-size: 0.8rem; color: #666;">${labelSource}</p>
+                    <p><strong>ID:</strong> ${conn.connectionId.substring(0, 16)}...</p>
+                    <p><strong>Status:</strong> <span class="badge active">Active</span></p>
+                    <p><strong>Created:</strong> ${new Date(conn.createdAt).toLocaleDateString()}</p>
+                </div>
+                `;
+            }).join('');
+            
+            document.getElementById('connectionsResult').innerHTML = `
+                <div style="margin-bottom: 10px; color: #666; font-size: 0.9rem;">
+                    Showing ${connectionsToShow.length} of ${availableConnections.length} connections
+                </div>
+                ${connectionList}
+            `;
+        }
+
+        function selectConnection(connectionId, label) {
+            selectedConnectionId = connectionId;
+            
+            // Update visual selection
+            document.querySelectorAll('.connection-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            event.currentTarget.classList.add('selected');
+            
+            document.getElementById('selectedConnection').innerHTML = `
+                <div class="status success">
+                    <strong>✅ Selected Connection:</strong><br>
+                    <strong>Name:</strong> ${label}<br>
+                    <strong>ID:</strong> ${connectionId.substring(0, 16)}...
+                </div>
+            `;
+            
+            // Show DIDComm chat section
+            document.getElementById('didcommChatSection').style.display = 'block';
+            currentChatConnection = { 
+                id: connectionId, 
+                label: label, 
+                state: 'Active' 
+            };
+            loadChatMessages();
+            
+            document.getElementById('identityForm').style.display = 'block';
+            setStepCompleted(2);
+            setStepActive(3);
+        }
+
+        function useManualConnection() {
+            const manualDid = document.getElementById('manualDid').value.trim();
+            const holderName = document.getElementById('holderName').value.trim() || 'Manual Entry';
+            
+            if (!manualDid) {
+                alert('Please enter a DID or connection ID');
+                return;
+            }
+            
+            selectedConnectionId = manualDid;
+            
+            document.getElementById('selectedConnection').innerHTML = `
+                <div class="status success">
+                    <strong>✅ Manual Entry Selected:</strong><br>
+                    <strong>Holder:</strong> ${holderName}<br>
+                    <strong>DID/Connection:</strong> ${manualDid.substring(0, 30)}...
+                </div>
+            `;
+            
+            // Show DIDComm chat section for manual entry too
+            document.getElementById('didcommChatSection').style.display = 'block';
+            currentChatConnection = { 
+                id: manualDid, 
+                label: holderName, 
+                state: 'Manual' 
+            };
+            loadChatMessages();
+            
+            document.getElementById('identityForm').style.display = 'block';
+            setStepCompleted(2);
+            setStepActive(3);
+        }
+
+        function previewCredential() {
+            const formData = new FormData(document.getElementById('realPersonForm'));
+            const credentialData = {};
+            
+            for (let [key, value] of formData.entries()) {
+                credentialData[key] = value;
+            }
+            
+            // No address object needed for simplified schema
+            
+            const preview = `
+                <div class="id-preview">
+                    <h3>🆔 RealPerson Credential Preview</h3>
+                    <div class="id-card">
+                        <div class="id-header">
+                            <h3>🏛️ CERTIFICATION AUTHORITY</h3>
+                            <p>Official Identity Credential</p>
+                        </div>
+                        <div class="id-body">
+                            <div class="id-info">
+                                <div class="field">
+                                    <div class="label">Full Name:</div>
+                                    <div>${credentialData.firstName} ${credentialData.lastName}</div>
+                                </div>
+                                <div class="field">
+                                    <div class="label">Date of Birth:</div>
+                                    <div>${credentialData.dateOfBirth}</div>
+                                </div>
+                                <div class="field">
+                                    <div class="label">Gender:</div>
+                                    <div>${credentialData.gender}</div>
+                                </div>
+                                <div class="field">
+                                    <div class="label">Unique ID:</div>
+                                    <div>Auto-generated</div>
+                                </div>
+                            </div>
+                            <div class="id-photo">
+                                📷 CA Official
+                            </div>
+                        </div>
+                        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #e0e0e0; font-size: 0.8rem; color: #666;">
+                            <strong>Holder:</strong> ${selectedConnectionId.substring(0, 30)}...
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('credentialPreview').innerHTML = preview;
+        }
+
+        async function issueRealPersonCredential() {
+            if (!selectedConnectionId) {
+                alert('Please select a connection first');
+                return;
+            }
+            
+            if (!realPersonSchema) {
+                alert('Please initialize the RealPerson schema first');
+                return;
+            }
+            
+            try {
+                setStepActive(4);
+                
+                const formData = new FormData(document.getElementById('realPersonForm'));
+                const credentialData = {};
+                
+                // Extract form data
+                for (let [key, value] of formData.entries()) {
+                    if (value.trim()) {
+                        credentialData[key] = value.trim();
+                    }
+                }
+                
+                // No address object needed for simplified schema
+                
+                // Validate required fields
+                const required = ['firstName', 'lastName', 'gender', 'dateOfBirth'];
+                for (let field of required) {
+                    if (!credentialData[field]) {
+                        throw new Error(`${field} is required`);
+                    }
+                }
+                
+                // No validity years in simplified schema
+                
+                // Remove any validityYears reference that might cause error
+                
+                // Validate selections
+                if (!selectedDID) {
+                    alert('❌ Please select a DID for credential issuance');
+                    return;
+                }
+                
+                if (!selectedSchema) {
+                    alert('❌ Please select a schema version for the credential');
+                    return;
+                }
+                
+                const response = await fetch(apiUrl('/api/credentials/issue-realperson'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        connectionId: selectedConnectionId,
+                        credentialData: credentialData,
+                        selectedDID: selectedDID.did,
+                        selectedSchemaGuid: selectedSchema.guid
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('issuanceResult').innerHTML = `
+                        <div class="status success">
+                            <strong>🎉 RealPerson Credential Issued Successfully!</strong><br>
+                            <strong>Record ID:</strong> ${data.recordId}<br>
+                            <strong>Thread ID:</strong> ${data.thid}<br>
+                            <strong>Holder:</strong> ${credentialData.firstName} ${credentialData.lastName}<br>
+                            <strong>Valid Until:</strong> ${new Date(data.credentialData.expiryDate).toLocaleDateString()}<br><br>
+                            The credential has been sent to the holder's wallet.
+                        </div>
+                    `;
+                    setStepCompleted(4);
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('issuanceResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to issue credential:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        function clearForm() {
+            document.getElementById('realPersonForm').reset();
+            document.getElementById('credentialPreview').innerHTML = '';
+            document.getElementById('issuanceResult').innerHTML = '';
+            selectedConnectionId = null;
+            document.getElementById('selectedConnection').innerHTML = '';
+            document.querySelectorAll('.connection-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            document.getElementById('identityForm').style.display = 'none';
+            setStepActive(2);
+        }
+
+        async function refreshSchemas() {
+            await listSchemas();
+        }
+
+        async function viewIssuedCredentials() {
+            try {
+                const response = await fetch(apiUrl('/api/credentials/issued'));
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Filter for RealPerson credentials specifically
+                    const realPersonCreds = data.credentials.filter(c => {
+                        // Check if it's a RealPerson credential by looking at claims
+                        const hasRealPersonFields = c.claims && (
+                            c.claims.firstName || c.claims.lastName || c.claims.uniqueId || c.claims.gender
+                        );
+                        // Also check protocol state
+                        const isCredentialSent = c.protocolState === 'CredentialSent';
+                        
+                        return hasRealPersonFields && isCredentialSent && c.credentialFormat === 'JWT';
+                    });
+                    
+                    // Display detailed information
+                    let credentialHtml = `<div class="status success">
+                        <h3>📋 RealPerson Credentials Issued: ${realPersonCreds.length}</h3>
+                        <div style="max-height: 400px; overflow-y: auto; margin-top: 15px;">`;
+                    
+                    realPersonCreds.forEach((cred, index) => {
+                        const claims = cred.claims || {};
+                        const name = `${claims.firstName || ''} ${claims.lastName || ''}`.trim() || 'Unknown';
+                        const dateIssued = new Date(cred.createdAt).toLocaleString();
+                        
+                        credentialHtml += `
+                            <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 15px; margin: 10px 0;">
+                                <h4 style="color: #495057; margin-bottom: 10px;">🆔 Credential #${index + 1}</h4>
+                                <p><strong>👤 Name:</strong> ${name}</p>
+                                <p><strong>🎂 Date of Birth:</strong> ${claims.dateOfBirth || 'Not specified'}</p>
+                                <p><strong>⚧ Gender:</strong> ${claims.gender || 'Not specified'}</p>
+                                <p><strong>🔢 Unique ID:</strong> ${claims.uniqueId || 'Not specified'}</p>
+                                <p><strong>📅 Issued:</strong> ${dateIssued}</p>
+                                <p><strong>🔗 Record ID:</strong> ${cred.recordId}</p>
+                                <p><strong>📊 Status:</strong> <span style="color: #28a745;">${cred.protocolState}</span></p>
+                            </div>
+                        `;
+                    });
+                    
+                    credentialHtml += `</div></div>`;
+                    
+                    document.getElementById('issuanceResult').innerHTML = credentialHtml;
+                    console.log('RealPerson credentials:', realPersonCreds);
+                } else {
+                    throw new Error(data.error || 'Failed to fetch credentials');
+                }
+            } catch (error) {
+                console.error('Error fetching issued credentials:', error);
+                document.getElementById('issuanceResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to fetch issued credentials:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        function updateStateOptions() {
+            // Could add state-specific options based on country
+            console.log('Country changed to:', document.getElementById('country').value);
+        }
+
+        // Step management
+        function setStepActive(stepNum) {
+            document.querySelectorAll('.step').forEach(step => {
+                step.classList.remove('active');
+            });
+            document.getElementById(`step${stepNum}`).classList.add('active');
+        }
+
+        function setStepCompleted(stepNum) {
+            document.getElementById(`step${stepNum}`).classList.add('completed');
+            document.getElementById(`step${stepNum}`).classList.remove('active');
+        }
+
+        // DIDComm Chat Functionality
+        let currentChatConnection = null;
+        let chatMessages = [];
+
+        async function loadChatMessages() {
+            if (!currentChatConnection) return;
+            
+            try {
+                const response = await fetch(apiUrl('/api/didcomm-messages'));
+                if (response.ok) {
+                    const data = await response.json();
+                    chatMessages = data.messages || [];
+                    displayChatMessages();
+                }
+            } catch (error) {
+                console.log('Could not load chat messages:', error);
+                chatMessages = [];
+                displayChatMessages();
+            }
+        }
+
+        function displayChatMessages() {
+            const messagesContainer = document.getElementById('chatMessages');
+            
+            if (chatMessages.length === 0) {
+                messagesContainer.innerHTML = '<p style="color: #666; font-style: italic; text-align: center;">No messages yet. Start a conversation with the applicant.</p>';
+                return;
+            }
+            
+            const messageHTML = chatMessages.map(msg => {
+                const isFromCA = msg.sender === 'Certification Authority' || msg.direction === 'sent';
+                const timestamp = new Date(msg.timestamp).toLocaleTimeString();
+                
+                return `
+                    <div style="margin-bottom: 10px; padding: 8px; border-radius: 5px; ${isFromCA ? 'background: #e3f2fd; text-align: right;' : 'background: #f5f5f5; text-align: left;'}">
+                        <div style="font-size: 0.8rem; color: #666; margin-bottom: 2px;">
+                            <strong>${isFromCA ? 'You' : msg.sender}</strong> - ${timestamp}
+                        </div>
+                        <div>${msg.content}</div>
+                    </div>
+                `;
+            }).join('');
+            
+            messagesContainer.innerHTML = messageHTML;
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        async function sendChatMessage() {
+            const messageInput = document.getElementById('chatMessageInput');
+            const messageText = messageInput.value.trim();
+            
+            if (!messageText || !currentChatConnection) return;
+            
+            const message = {
+                id: `ca-msg-${Date.now()}`,
+                type: 'https://didcomm.org/basicmessage/2.0/message',
+                body: {
+                    content: messageText
+                },
+                created_time: new Date().toISOString(),
+                from: 'Certification Authority'
+            };
+            
+            try {
+                const response = await fetch(apiUrl('/api/send-didcomm-message'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        connectionId: currentChatConnection.id,
+                        message: message,
+                        recipient: currentChatConnection.label
+                    })
+                });
+                
+                if (response.ok) {
+                    // Add message to local display
+                    chatMessages.push({
+                        id: message.id,
+                        timestamp: new Date().toISOString(),
+                        direction: 'sent',
+                        content: messageText,
+                        sender: 'Certification Authority',
+                        recipient: currentChatConnection.label
+                    });
+                    
+                    displayChatMessages();
+                    messageInput.value = '';
+                }
+            } catch (error) {
+                console.error('Error sending message:', error);
+                alert('Failed to send message');
+            }
+        }
+
+        function handleChatKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendChatMessage();
+            }
+        }
+
+        // Poll for new messages every 3 seconds when chat is open
+        setInterval(() => {
+            if (currentChatConnection) {
+                loadChatMessages();
+            }
+        }, 3000);
+    </script>
+</body>
+</html>

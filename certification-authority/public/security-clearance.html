@@ -1,0 +1,1152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Security Clearance Request - Certification Authority</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .container-custom {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 2rem;
+            margin-top: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        .security-header {
+            text-align: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid #e9ecef;
+        }
+
+        .security-icon {
+            font-size: 3rem;
+            color: #28a745;
+            margin-bottom: 1rem;
+        }
+
+        .form-container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-label {
+            font-weight: 600;
+            color: #495057;
+            margin-bottom: 0.5rem;
+        }
+
+        .form-control {
+            border-radius: 10px;
+            border: 2px solid #e9ecef;
+            padding: 0.75rem 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .form-control:focus {
+            border-color: #28a745;
+            box-shadow: 0 0 0 0.2rem rgba(40, 167, 69, 0.25);
+        }
+
+        .btn-security {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            border: none;
+            border-radius: 50px;
+            padding: 0.75rem 2rem;
+            font-weight: 600;
+            color: white;
+            transition: all 0.3s ease;
+            width: 100%;
+        }
+
+        .btn-security:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(40, 167, 69, 0.3);
+            color: white;
+        }
+
+        .btn-security:disabled {
+            background: #6c757d;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .clearance-level-card {
+            border: 2px solid #e9ecef;
+            border-radius: 15px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .clearance-level-card:hover {
+            border-color: #28a745;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .clearance-level-card.selected {
+            border-color: #28a745;
+            background-color: rgba(40, 167, 69, 0.1);
+        }
+
+        .clearance-level-title {
+            font-weight: 600;
+            color: #495057;
+            margin-bottom: 0.5rem;
+        }
+
+        .clearance-level-desc {
+            color: #6c757d;
+            font-size: 0.9rem;
+        }
+
+        .key-input-container {
+            position: relative;
+        }
+
+        .key-validate-icon {
+            position: absolute;
+            right: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 1.2rem;
+        }
+
+        .key-valid {
+            color: #28a745;
+        }
+
+        .key-invalid {
+            color: #dc3545;
+        }
+
+        .status-message {
+            padding: 1rem;
+            border-radius: 10px;
+            margin-bottom: 1rem;
+            font-weight: 500;
+        }
+
+        .status-success {
+            background-color: rgba(40, 167, 69, 0.1);
+            border: 2px solid #28a745;
+            color: #155724;
+        }
+
+        .status-error {
+            background-color: rgba(220, 53, 69, 0.1);
+            border: 2px solid #dc3545;
+            color: #721c24;
+        }
+
+        .status-info {
+            background-color: rgba(23, 162, 184, 0.1);
+            border: 2px solid #17a2b8;
+            color: #0c5460;
+        }
+
+        .loading-spinner {
+            display: none;
+            margin-right: 0.5rem;
+        }
+
+        .user-info-card {
+            background: rgba(40, 167, 69, 0.1);
+            border: 2px solid #28a745;
+            border-radius: 15px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .user-info-title {
+            color: #155724;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+        }
+
+        .user-info-title i {
+            margin-right: 0.5rem;
+        }
+
+        .user-info-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .user-info-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid rgba(40, 167, 69, 0.2);
+        }
+
+        .user-info-label {
+            font-weight: 600;
+            color: #155724;
+        }
+
+        .user-info-value {
+            color: #495057;
+        }
+
+        .format-section {
+            border: 2px dashed #ccc;
+            border-radius: 15px;
+            padding: 20px;
+            margin: 15px 0;
+            transition: all 0.3s ease;
+            background-color: #fafafa;
+        }
+
+        .format-section.active {
+            border-color: #28a745;
+            background-color: #f1f8f4;
+            border-style: solid;
+            box-shadow: 0 3px 10px rgba(40, 167, 69, 0.15);
+        }
+
+        .format-section.disabled {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        .format-title {
+            font-weight: 600;
+            color: #495057;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+        }
+
+        .format-title .badge {
+            margin-left: 10px;
+            font-size: 0.7rem;
+        }
+
+        .help-text {
+            color: #666;
+            font-size: 0.9em;
+            margin: 15px 0;
+            padding: 12px 15px;
+            background-color: #e7f3ff;
+            border-left: 4px solid #2196F3;
+            border-radius: 5px;
+            line-height: 1.6;
+        }
+
+        .help-text strong {
+            color: #0c5460;
+        }
+
+        .format-indicator {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+
+        .format-indicator.legacy {
+            background-color: #ffc107;
+            color: #856404;
+        }
+
+        .format-indicator.dual-key {
+            background-color: #28a745;
+            color: #fff;
+        }
+
+        .format-indicator.none {
+            background-color: #6c757d;
+            color: #fff;
+        }
+
+        .access-denied {
+            text-align: center;
+            padding: 3rem;
+        }
+
+        .access-denied i {
+            font-size: 4rem;
+            color: #dc3545;
+            margin-bottom: 1rem;
+        }
+
+        .access-denied h3 {
+            color: #dc3545;
+            margin-bottom: 1rem;
+        }
+
+        .access-denied p {
+            color: #6c757d;
+            margin-bottom: 2rem;
+        }
+
+        .btn-login {
+            background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);
+            border: none;
+            border-radius: 50px;
+            padding: 0.75rem 2rem;
+            font-weight: 600;
+            color: white;
+            text-decoration: none;
+            transition: all 0.3s ease;
+        }
+
+        .btn-login:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0, 123, 255, 0.3);
+            color: white;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="container-custom">
+            <!-- Access Denied Section -->
+            <div id="accessDenied" class="access-denied" style="display: none;">
+                <i class="fas fa-shield-exclamation"></i>
+                <h3>Access Denied</h3>
+                <p>You must be authenticated with a valid RealPerson credential to request security clearance.</p>
+                <a href="/login" class="btn-login">
+                    <i class="fas fa-sign-in-alt me-2"></i>
+                    Authenticate with RealPerson VC
+                </a>
+            </div>
+
+            <!-- Authenticated Content -->
+            <div id="authenticatedContent" style="display: none;">
+                <!-- Header -->
+                <div class="security-header">
+                    <i class="fas fa-shield-check security-icon"></i>
+                    <h2>Security Clearance Request</h2>
+                    <p class="text-muted">Request a security clearance credential with cryptographic key verification</p>
+                </div>
+
+                <!-- User Information -->
+                <div id="userInfoCard" class="user-info-card">
+                    <div class="user-info-title">
+                        <i class="fas fa-user-check"></i>
+                        Authenticated User Information
+                    </div>
+                    <div id="userInfoDetails" class="user-info-details">
+                        <!-- User details will be populated by JavaScript -->
+                    </div>
+                </div>
+
+                <!-- Security Clearance Form -->
+                <div class="form-container">
+                    <form id="securityClearanceForm">
+                        <!-- Clearance Level Selection -->
+                        <div class="form-group">
+                            <label class="form-label">
+                                <i class="fas fa-layer-group me-2"></i>
+                                Select Security Clearance Level
+                            </label>
+                            <div id="clearanceLevels">
+                                <div class="clearance-level-card" data-level="internal">
+                                    <div class="clearance-level-title">
+                                        <i class="fas fa-building me-2"></i>
+                                        Internal
+                                    </div>
+                                    <div class="clearance-level-desc">
+                                        Basic internal access for organizational resources and systems
+                                    </div>
+                                </div>
+                                <div class="clearance-level-card" data-level="confidential">
+                                    <div class="clearance-level-title">
+                                        <i class="fas fa-lock me-2"></i>
+                                        Confidential
+                                    </div>
+                                    <div class="clearance-level-desc">
+                                        Access to confidential information and secure systems
+                                    </div>
+                                </div>
+                                <div class="clearance-level-card" data-level="restricted">
+                                    <div class="clearance-level-title">
+                                        <i class="fas fa-shield-alt me-2"></i>
+                                        Restricted
+                                    </div>
+                                    <div class="clearance-level-desc">
+                                        Access to restricted materials and high-security environments
+                                    </div>
+                                </div>
+                                <div class="clearance-level-card" data-level="top-secret">
+                                    <div class="clearance-level-title">
+                                        <i class="fas fa-user-secret me-2"></i>
+                                        Top Secret
+                                    </div>
+                                    <div class="clearance-level-desc">
+                                        Highest level clearance for classified and sensitive operations
+                                    </div>
+                                </div>
+                            </div>
+                            <input type="hidden" id="selectedClearanceLevel" name="clearanceLevel" required>
+                        </div>
+
+                        <!-- Connection Info -->
+                        <div class="form-group">
+                            <div class="alert alert-info" style="border-radius: 10px;">
+                                <i class="fas fa-info-circle me-2"></i>
+                                <strong>Automatic Delivery</strong><br>
+                                Your security clearance credential will be delivered to the same wallet you used for authentication.
+                                No additional connection setup is required.
+                            </div>
+                        </div>
+
+                        <!-- Key Source Selection -->
+                        <div class="form-group">
+                            <label class="form-label">
+                                <i class="fas fa-key me-2"></i>
+                                Key Source
+                            </label>
+                            <div id="keySourceOptions">
+                                <!-- Auto-extract option (shown when PRISM DID available) -->
+                                <div id="prismDIDKeyOption" class="clearance-level-card" data-source="prism-did" style="display: none;">
+                                    <div class="clearance-level-title">
+                                        <i class="fas fa-magic me-2" style="color: #28a745;"></i>
+                                        Auto-Extract from PRISM DID
+                                        <span class="badge bg-success ms-2">Recommended</span>
+                                    </div>
+                                    <div class="clearance-level-desc">
+                                        Automatically extract encryption keys from your authenticated PRISM DID. No manual input required.
+                                    </div>
+                                    <div id="prismDIDPreview" style="margin-top: 10px; font-family: monospace; font-size: 0.75rem; color: #666; word-break: break-all;"></div>
+                                </div>
+                                <!-- Manual key entry option -->
+                                <div id="manualKeyOption" class="clearance-level-card selected" data-source="manual">
+                                    <div class="clearance-level-title">
+                                        <i class="fas fa-keyboard me-2"></i>
+                                        Enter Keys Manually
+                                    </div>
+                                    <div class="clearance-level-desc">
+                                        Paste your Ed25519 and X25519 public keys from your wallet's key manager.
+                                    </div>
+                                </div>
+                            </div>
+                            <input type="hidden" id="selectedKeySource" name="keySource" value="manual">
+                        </div>
+
+                        <!-- Key Format Requirement (shown only for manual entry) -->
+                        <div id="keyFormatHelp" class="help-text">
+                            <strong><i class="fas fa-shield-alt me-2"></i>Encryption Keys Required</strong><br>
+                            Security Clearance credentials require <strong>BOTH</strong> encryption keys for end-to-end security:<br>
+                            • <strong>Ed25519 Public Key</strong>: For digital signatures and authentication<br>
+                            • <strong>X25519 Public Key</strong>: For content encryption (REQUIRED)<br>
+                            <span style="color: #28a745;"><i class="fas fa-lock"></i> <strong>Secure:</strong> Your clearance-restricted content will be encrypted and can only be decrypted by your wallet</span>
+                        </div>
+
+                        <!-- Encryption Keys (REQUIRED) - shown only for manual entry -->
+                        <div id="dualKeyFormatSection" class="format-section active">
+                            <div class="format-title">
+                                <i class="fas fa-key me-2"></i>
+                                Encryption Keys (v3.0.0/v4.0.0)
+                                <span class="badge bg-success">Required for Security</span>
+                            </div>
+                            <div class="form-group">
+                                <label for="ed25519PublicKey" class="form-label">
+                                    Ed25519 Public Key (Signing)
+                                </label>
+                                <div class="key-input-container">
+                                    <input type="text" class="form-control" id="ed25519PublicKey" name="ed25519PublicKey"
+                                           placeholder="Enter your Ed25519 signing key in base64url format">
+                                    <i id="ed25519ValidationIcon" class="key-validate-icon" style="display: none;"></i>
+                                </div>
+                                <div class="form-text">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Ed25519 signing key (32 bytes, 43 characters in base64url)
+                                </div>
+                            </div>
+
+                            <div class="form-group" style="margin-top: 15px;">
+                                <label for="x25519PublicKey" class="form-label">
+                                    X25519 Public Key (Encryption)
+                                </label>
+                                <div class="key-input-container">
+                                    <input type="text" class="form-control" id="x25519PublicKey" name="x25519PublicKey"
+                                           placeholder="Enter your X25519 encryption key in base64url format">
+                                    <i id="x25519ValidationIcon" class="key-validate-icon" style="display: none;"></i>
+                                </div>
+                                <div class="form-text">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    X25519 encryption key (32 bytes, 43 characters in base64url)
+                                </div>
+                            </div>
+
+                            <div id="dualKeyFingerprints" style="display: none; margin-top: 1rem; padding: 10px; background-color: rgba(40, 167, 69, 0.1); border-radius: 8px;">
+                                <small class="text-muted">
+                                    <strong><i class="fas fa-fingerprint me-1"></i>Key Fingerprints:</strong><br>
+                                    Ed25519: <span id="ed25519FingerprintValue">N/A</span><br>
+                                    X25519: <span id="x25519FingerprintValue">N/A</span>
+                                </small>
+                            </div>
+                        </div>
+
+                        <!-- Status Messages -->
+                        <div id="statusMessage" style="display: none;"></div>
+
+                        <!-- Submit Button -->
+                        <button type="submit" class="btn btn-security" id="submitButton">
+                            <span class="loading-spinner">
+                                <i class="fas fa-spinner fa-spin"></i>
+                            </span>
+                            <i class="fas fa-shield-check me-2"></i>
+                            Request Security Clearance
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/js-sha256@0.11.0/build/sha256.min.js"></script>
+    <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+        let selectedClearanceLevel = null;
+        let selectedKeySource = 'manual';  // 'manual' or 'prism-did'
+        let holderPrismDID = null;
+        let canAutoExtractKeys = false;
+        let authData = null;
+
+        // Check authentication on page load
+        window.addEventListener('load', () => {
+            checkAuthentication();
+        });
+
+        function checkAuthentication() {
+            const authDataRaw = sessionStorage.getItem('ca_auth');
+
+            if (!authDataRaw) {
+                // Not authenticated - show access denied
+                document.getElementById('accessDenied').style.display = 'block';
+                return;
+            }
+
+            try {
+                authData = JSON.parse(authDataRaw);
+
+                // Check if authentication is recent (within 1 hour)
+                const loginTime = new Date(authData.loginTime);
+                const now = new Date();
+                const hoursSinceLogin = (now - loginTime) / (1000 * 60 * 60);
+
+                if (hoursSinceLogin > 1) {
+                    // Authentication expired
+                    sessionStorage.removeItem('ca_auth');
+                    alert('Your session has expired. Please login again.');
+                    window.location.href = '/login';
+                    return;
+                }
+
+                // Valid authentication - bridge session to server and show security clearance form
+                bridgeSessionToServer();
+
+            } catch (error) {
+                console.error('Error parsing authentication data:', error);
+                sessionStorage.removeItem('ca_auth');
+                document.getElementById('accessDenied').style.display = 'block';
+            }
+        }
+
+        async function bridgeSessionToServer() {
+            try {
+                console.log('🌉 Bridging session to server...');
+
+                // Prepare session data for bridge API
+                const sessionBridgeData = {
+                    sessionId: authData.sessionId,
+                    userData: authData.userData || authData.personalInfo || {},
+                    authenticatedAt: authData.loginTime,
+                    createdAt: authData.createdAt || authData.loginTime
+                };
+
+                console.log('🌉 Session bridge data:', sessionBridgeData);
+
+                // Call session bridge API
+                const response = await fetch(apiUrl('/api/session/bridge'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(sessionBridgeData)
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || `HTTP ${response.status}`);
+                }
+
+                const bridgeResult = await response.json();
+                console.log('✅ Session bridge successful:', bridgeResult);
+
+                // Store bridge result for later use (connection info, etc.)
+                authData.bridgeResult = bridgeResult;
+                // Also store the sessionId directly for easy access
+                authData.sessionId = bridgeResult.sessionId;
+                sessionStorage.setItem('ca_auth', JSON.stringify(authData));
+
+                // Store PRISM DID info for automatic key extraction
+                if (bridgeResult.holderPrismDID) {
+                    holderPrismDID = bridgeResult.holderPrismDID;
+                    canAutoExtractKeys = bridgeResult.canAutoExtractKeys || false;
+                    console.log('🔑 Holder PRISM DID available:', holderPrismDID.substring(0, 50) + '...');
+                    console.log('   Can auto-extract keys:', canAutoExtractKeys);
+                }
+
+                // Now display the security clearance form
+                displaySecurityClearanceForm();
+
+            } catch (error) {
+                console.error('❌ Session bridge failed:', error);
+
+                // Show error message to user
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'alert alert-warning mt-3';
+                errorDiv.innerHTML = `
+                    <h5><i class="fas fa-exclamation-triangle"></i> Session Bridge Issue</h5>
+                    <p>There was an issue connecting your browser session to the server.
+                    You may need to establish a DIDComm connection with the Certification Authority first.</p>
+                    <p><strong>Error:</strong> ${error.message}</p>
+                    <p>You can still use the Security Clearance form, but you may need to enter additional information.</p>
+                `;
+
+                const container = document.querySelector('.container-custom');
+                container.appendChild(errorDiv);
+
+                // Continue to show the form even if bridge fails
+                displaySecurityClearanceForm();
+            }
+        }
+
+        function displaySecurityClearanceForm() {
+            // Hide access denied and show authenticated content
+            document.getElementById('accessDenied').style.display = 'none';
+            document.getElementById('authenticatedContent').style.display = 'block';
+
+            // Populate user information
+            populateUserInfo();
+
+            // Set up event listeners
+            setupEventListeners();
+        }
+
+        function populateUserInfo() {
+            const userInfoDetails = document.getElementById('userInfoDetails');
+            const userData = authData.userData || authData.personalInfo || {};
+
+            const userInfoHTML = `
+                <div class="user-info-item">
+                    <span class="user-info-label">Full Name:</span>
+                    <span class="user-info-value">${userData.firstName || 'N/A'} ${userData.lastName || 'N/A'}</span>
+                </div>
+                <div class="user-info-item">
+                    <span class="user-info-label">Unique ID:</span>
+                    <span class="user-info-value">${userData.uniqueId || 'N/A'}</span>
+                </div>
+                <div class="user-info-item">
+                    <span class="user-info-label">Date of Birth:</span>
+                    <span class="user-info-value">${userData.dateOfBirth || 'N/A'}</span>
+                </div>
+                <div class="user-info-item">
+                    <span class="user-info-label">Gender:</span>
+                    <span class="user-info-value">${userData.gender || 'N/A'}</span>
+                </div>
+                <div class="user-info-item">
+                    <span class="user-info-label">Session ID:</span>
+                    <span class="user-info-value">${authData.sessionId ? authData.sessionId.substring(0, 12) + '...' : 'N/A'}</span>
+                </div>
+                <div class="user-info-item">
+                    <span class="user-info-label">Authenticated:</span>
+                    <span class="user-info-value">${new Date(authData.loginTime).toLocaleString()}</span>
+                </div>
+            `;
+
+            userInfoDetails.innerHTML = userInfoHTML;
+        }
+
+        function setupEventListeners() {
+            // Clearance level selection
+            const clearanceLevelCards = document.querySelectorAll('#clearanceLevels .clearance-level-card');
+            clearanceLevelCards.forEach(card => {
+                card.addEventListener('click', () => {
+                    // Remove selected class from all clearance cards
+                    clearanceLevelCards.forEach(c => c.classList.remove('selected'));
+
+                    // Add selected class to clicked card
+                    card.classList.add('selected');
+
+                    // Set selected clearance level
+                    selectedClearanceLevel = card.dataset.level;
+                    document.getElementById('selectedClearanceLevel').value = selectedClearanceLevel;
+                });
+            });
+
+            // Key source selection (PRISM DID vs Manual)
+            setupKeySourceSelection();
+
+            // ✅ Dual-key format validation (MANDATORY)
+            const ed25519PublicKeyInput = document.getElementById('ed25519PublicKey');
+            const x25519PublicKeyInput = document.getElementById('x25519PublicKey');
+
+            ed25519PublicKeyInput.addEventListener('input', () => {
+                validateEd25519Key();
+            });
+
+            x25519PublicKeyInput.addEventListener('input', () => {
+                validateX25519Key();
+            });
+
+            // Form submission
+            const form = document.getElementById('securityClearanceForm');
+            form.addEventListener('submit', handleFormSubmission);
+        }
+
+        function setupKeySourceSelection() {
+            const prismDIDOption = document.getElementById('prismDIDKeyOption');
+            const manualOption = document.getElementById('manualKeyOption');
+            const keyFormatHelp = document.getElementById('keyFormatHelp');
+            const dualKeySection = document.getElementById('dualKeyFormatSection');
+            const prismDIDPreview = document.getElementById('prismDIDPreview');
+
+            // Show PRISM DID option if available and can extract keys
+            if (canAutoExtractKeys && holderPrismDID) {
+                prismDIDOption.style.display = 'block';
+                // Show truncated PRISM DID
+                prismDIDPreview.textContent = holderPrismDID.substring(0, 60) + '...';
+
+                // Auto-select PRISM DID option since it's recommended
+                selectKeySource('prism-did');
+            }
+
+            // Key source card click handlers
+            prismDIDOption.addEventListener('click', () => {
+                selectKeySource('prism-did');
+            });
+
+            manualOption.addEventListener('click', () => {
+                selectKeySource('manual');
+            });
+        }
+
+        function selectKeySource(source) {
+            const prismDIDOption = document.getElementById('prismDIDKeyOption');
+            const manualOption = document.getElementById('manualKeyOption');
+            const keyFormatHelp = document.getElementById('keyFormatHelp');
+            const dualKeySection = document.getElementById('dualKeyFormatSection');
+
+            // Update selected state
+            selectedKeySource = source;
+            document.getElementById('selectedKeySource').value = source;
+
+            // Update card selection states
+            prismDIDOption.classList.remove('selected');
+            manualOption.classList.remove('selected');
+
+            if (source === 'prism-did') {
+                prismDIDOption.classList.add('selected');
+                // Hide manual key entry sections
+                keyFormatHelp.style.display = 'none';
+                dualKeySection.style.display = 'none';
+                console.log('🔑 Key source: PRISM DID (auto-extract)');
+            } else {
+                manualOption.classList.add('selected');
+                // Show manual key entry sections
+                keyFormatHelp.style.display = 'block';
+                dualKeySection.style.display = 'block';
+                console.log('🔑 Key source: Manual entry');
+            }
+        }
+
+        function detectKeyFormat() {
+            const ed25519Key = document.getElementById('ed25519PublicKey').value.trim();
+            const x25519Key = document.getElementById('x25519PublicKey').value.trim();
+
+            const formatIndicator = document.getElementById('formatIndicator');
+
+            // Check if both dual keys are provided
+            const isDualKeyFormat = ed25519Key && x25519Key;
+
+            // Update format indicator
+            if (isDualKeyFormat) {
+                if (formatIndicator) {
+                    formatIndicator.innerHTML = '<span class="format-indicator dual-key"><i class="fas fa-check-circle me-1"></i>Dual-Key Format (v4.0.0) Detected</span>';
+                }
+                console.log('✅ Dual-key format (v4.0.0) detected');
+            } else {
+                if (formatIndicator) {
+                    formatIndicator.innerHTML = '<span class="format-indicator none"><i class="fas fa-circle-notch me-1"></i>No keys entered yet</span>';
+                }
+            }
+        }
+
+        function validatePublicKey() {
+            const publicKeyInput = document.getElementById('publicKey');
+            const keyValidationIcon = document.getElementById('keyValidationIcon');
+            const keyFingerprint = document.getElementById('keyFingerprint');
+            const fingerprintValue = document.getElementById('fingerprintValue');
+
+            const publicKey = publicKeyInput.value.trim();
+
+            if (!publicKey) {
+                keyValidationIcon.style.display = 'none';
+                keyFingerprint.style.display = 'none';
+                return false;
+            }
+
+            // Validate Ed25519 public key format
+            try {
+                // Check length (should be 43 characters for 32-byte key in base64url)
+                if (publicKey.length !== 43) {
+                    throw new Error('Invalid length');
+                }
+
+                // Check if it's valid base64url (no padding, URL-safe characters)
+                const base64urlRegex = /^[A-Za-z0-9_-]+$/;
+                if (!base64urlRegex.test(publicKey)) {
+                    throw new Error('Invalid base64url format');
+                }
+
+                // Try to decode and check if it's exactly 32 bytes
+                const binaryString = atob(publicKey.replace(/_/g, '/').replace(/-/g, '+'));
+                if (binaryString.length !== 32) {
+                    throw new Error('Invalid key size');
+                }
+
+                // Valid key - show success icon and generate fingerprint
+                keyValidationIcon.className = 'key-validate-icon fas fa-check-circle key-valid';
+                keyValidationIcon.style.display = 'block';
+
+                // Generate SHA256 fingerprint
+                generateFingerprint(publicKey).then(fingerprint => {
+                    fingerprintValue.textContent = fingerprint;
+                    keyFingerprint.style.display = 'block';
+                });
+
+                return true;
+
+            } catch (error) {
+                // Invalid key - show error icon
+                keyValidationIcon.className = 'key-validate-icon fas fa-times-circle key-invalid';
+                keyValidationIcon.style.display = 'block';
+                keyFingerprint.style.display = 'none';
+                return false;
+            }
+        }
+
+        function validateEd25519Key() {
+            const ed25519Input = document.getElementById('ed25519PublicKey');
+            const validationIcon = document.getElementById('ed25519ValidationIcon');
+            const fingerprintsDiv = document.getElementById('dualKeyFingerprints');
+            const fingerprintValue = document.getElementById('ed25519FingerprintValue');
+
+            const key = ed25519Input.value.trim();
+
+            if (!key) {
+                validationIcon.style.display = 'none';
+                fingerprintsDiv.style.display = 'none';
+                return false;
+            }
+
+            try {
+                if (key.length !== 43) throw new Error('Invalid length');
+                const base64urlRegex = /^[A-Za-z0-9_-]+$/;
+                if (!base64urlRegex.test(key)) throw new Error('Invalid base64url format');
+                const binaryString = atob(key.replace(/_/g, '/').replace(/-/g, '+'));
+                if (binaryString.length !== 32) throw new Error('Invalid key size');
+
+                validationIcon.className = 'key-validate-icon fas fa-check-circle key-valid';
+                validationIcon.style.display = 'block';
+
+                // Generate fingerprint synchronously (js-sha256 returns string directly)
+                const fingerprint = generateFingerprint(key);
+                fingerprintValue.textContent = fingerprint.substring(0, 47) + '...';
+                const x25519Key = document.getElementById('x25519PublicKey').value.trim();
+                if (x25519Key) fingerprintsDiv.style.display = 'block';
+
+                return true;
+            } catch (error) {
+                validationIcon.className = 'key-validate-icon fas fa-times-circle key-invalid';
+                validationIcon.style.display = 'block';
+                return false;
+            }
+        }
+
+        function validateX25519Key() {
+            const x25519Input = document.getElementById('x25519PublicKey');
+            const validationIcon = document.getElementById('x25519ValidationIcon');
+            const fingerprintsDiv = document.getElementById('dualKeyFingerprints');
+            const fingerprintValue = document.getElementById('x25519FingerprintValue');
+
+            const key = x25519Input.value.trim();
+
+            if (!key) {
+                validationIcon.style.display = 'none';
+                fingerprintsDiv.style.display = 'none';
+                return false;
+            }
+
+            try {
+                if (key.length !== 43) throw new Error('Invalid length');
+                const base64urlRegex = /^[A-Za-z0-9_-]+$/;
+                if (!base64urlRegex.test(key)) throw new Error('Invalid base64url format');
+                const binaryString = atob(key.replace(/_/g, '/').replace(/-/g, '+'));
+                if (binaryString.length !== 32) throw new Error('Invalid key size');
+
+                validationIcon.className = 'key-validate-icon fas fa-check-circle key-valid';
+                validationIcon.style.display = 'block';
+
+                // Generate fingerprint synchronously (js-sha256 returns string directly)
+                const fingerprint = generateFingerprint(key);
+                fingerprintValue.textContent = fingerprint.substring(0, 47) + '...';
+                const ed25519Key = document.getElementById('ed25519PublicKey').value.trim();
+                if (ed25519Key) fingerprintsDiv.style.display = 'block';
+
+                return true;
+            } catch (error) {
+                validationIcon.className = 'key-validate-icon fas fa-times-circle key-invalid';
+                validationIcon.style.display = 'block';
+                return false;
+            }
+        }
+
+        function generateFingerprint(base64urlKey) {
+            try {
+                // Convert base64url to binary using base64url decoding
+                const binaryString = atob(base64urlKey.replace(/_/g, '/').replace(/-/g, '+'));
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+
+                // Generate SHA256 hash using js-sha256 library (works on HTTP and HTTPS)
+                const hashHex = sha256(bytes);  // Returns hex string (64 characters)
+
+                // Convert hex string to XX:XX:XX format
+                const fingerprint = hashHex.match(/.{2}/g).join(':').toUpperCase();
+
+                console.log('✅ Generated fingerprint using js-sha256:', fingerprint.substring(0, 50) + '...');
+                return fingerprint;
+            } catch (error) {
+                console.error('❌ Error generating fingerprint:', error);
+                return 'FINGERPRINT-ERROR';
+            }
+        }
+
+        function showStatusMessage(message, type) {
+            const statusMessage = document.getElementById('statusMessage');
+            statusMessage.className = `status-message status-${type}`;
+            statusMessage.innerHTML = message;
+            statusMessage.style.display = 'block';
+        }
+
+        function hideStatusMessage() {
+            const statusMessage = document.getElementById('statusMessage');
+            statusMessage.style.display = 'none';
+        }
+
+        async function handleFormSubmission(event) {
+            event.preventDefault();
+
+            hideStatusMessage();
+
+            // Validate form
+            if (!selectedClearanceLevel) {
+                showStatusMessage('<i class="fas fa-exclamation-triangle me-2"></i>Please select a clearance level.', 'error');
+                return;
+            }
+
+            // Check key source selection
+            const usePrismDID = selectedKeySource === 'prism-did';
+
+            // For PRISM DID key source, validate PRISM DID is available
+            if (usePrismDID) {
+                if (!holderPrismDID || !canAutoExtractKeys) {
+                    showStatusMessage(
+                        '<i class="fas fa-exclamation-triangle me-2"></i>' +
+                        '<strong>PRISM DID not available.</strong><br>' +
+                        'Please use manual key entry instead.',
+                        'error'
+                    );
+                    return;
+                }
+            } else {
+                // For manual entry, validate keys are provided
+                const ed25519Key = document.getElementById('ed25519PublicKey').value.trim();
+                const x25519Key = document.getElementById('x25519PublicKey').value.trim();
+
+                // Validate that both keys are provided
+                if (!ed25519Key || !x25519Key) {
+                    showStatusMessage(
+                        '<i class="fas fa-exclamation-triangle me-2"></i>' +
+                        '<strong>Both keys required.</strong><br>' +
+                        'Please provide both Ed25519 (signing) and X25519 (encryption) public keys.',
+                        'error'
+                    );
+                    return;
+                }
+
+                // Validate key lengths (32 bytes = 43 characters in base64url)
+                if (ed25519Key.length !== 43 || x25519Key.length !== 43) {
+                    showStatusMessage('<i class="fas fa-exclamation-triangle me-2"></i>Both keys must be exactly 43 characters (32 bytes in base64url).', 'error');
+                    return;
+                }
+
+                // Validate key formats
+                if (!validateEd25519Key() || !validateX25519Key()) {
+                    showStatusMessage('<i class="fas fa-exclamation-triangle me-2"></i>Invalid key format. Please check both Ed25519 and X25519 keys.', 'error');
+                    return;
+                }
+            }
+
+            // Show loading state
+            const submitButton = document.getElementById('submitButton');
+            const loadingSpinner = document.querySelector('.loading-spinner');
+
+            submitButton.disabled = true;
+            loadingSpinner.style.display = 'inline-block';
+
+            try {
+                // Get sessionId with fallback options
+                const sessionId = authData.sessionId ||
+                                 (authData.bridgeResult && authData.bridgeResult.sessionId) ||
+                                 null;
+
+                if (!sessionId) {
+                    throw new Error('No session ID available. Please authenticate again.');
+                }
+
+                // Extract connectionId from session bridge result (with URL parameter fallback)
+                const urlParams = new URLSearchParams(window.location.search);
+                const connectionId = (authData.bridgeResult && authData.bridgeResult.connectionId) ||
+                                   urlParams.get('connectionId');
+
+                // Prepare request payload based on key source
+                let requestPayload;
+
+                if (usePrismDID) {
+                    // PRISM DID key extraction - server will extract keys automatically
+                    requestPayload = {
+                        sessionId: sessionId,
+                        clearanceLevel: selectedClearanceLevel,
+                        connectionId: connectionId,
+                        holderPrismDID: holderPrismDID  // Server extracts Ed25519 + X25519 from this
+                    };
+                    console.log('✅ Submitting with PRISM DID (auto-extract keys)');
+                    showStatusMessage('<i class="fas fa-magic me-2"></i>Submitting security clearance request with PRISM DID key auto-extraction...', 'info');
+                } else {
+                    // Manual key entry
+                    const ed25519Key = document.getElementById('ed25519PublicKey').value.trim();
+                    const x25519Key = document.getElementById('x25519PublicKey').value.trim();
+
+                    requestPayload = {
+                        sessionId: sessionId,
+                        clearanceLevel: selectedClearanceLevel,
+                        connectionId: connectionId,
+                        ed25519PublicKey: ed25519Key,
+                        x25519PublicKey: x25519Key
+                    };
+                    console.log('✅ Submitting dual-key format (v4.0.0)');
+                    showStatusMessage('<i class="fas fa-info-circle me-2"></i>Submitting security clearance request with dual-key format (v4.0.0)...', 'info');
+                }
+
+                console.log('🔗 Using connectionId:', connectionId, '(from session bridge or URL parameter)');
+
+                // Submit to CA API
+                const response = await fetch(apiUrl('/api/credentials/issue-security-clearance'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify(requestPayload)
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.success) {
+                    // Success
+                    const formatBadge = usePrismDID
+                        ? '<span class="badge bg-primary">PRISM DID Keys</span>'
+                        : '<span class="badge bg-success">v4.0.0 Dual-Key</span>';
+
+                    const keySourceInfo = usePrismDID
+                        ? 'Key Source: PRISM DID (auto-extracted)'
+                        : 'Schema Version: v4.0.0 (Dual-Key)';
+
+                    const successMessage = `
+                        <i class="fas fa-check-circle me-2"></i>
+                        <strong>Security Clearance Issued Successfully!</strong> ${formatBadge}<br>
+                        <small>
+                            Clearance ID: ${result.clearanceId}<br>
+                            Record ID: ${result.recordId}<br>
+                            Valid until: ${result.validUntil}<br>
+                            ${result.keyFingerprint ? 'Key Fingerprint: ' + result.keyFingerprint + '<br>' : ''}
+                            ${keySourceInfo}
+                        </small>
+                    `;
+                    showStatusMessage(successMessage, 'success');
+
+                    // Clear form
+                    document.getElementById('securityClearanceForm').reset();
+                    selectedClearanceLevel = null;
+                    document.querySelectorAll('#clearanceLevels .clearance-level-card').forEach(card => {
+                        card.classList.remove('selected');
+                    });
+
+                    // Reset key source if PRISM DID available
+                    if (canAutoExtractKeys && holderPrismDID) {
+                        selectKeySource('prism-did');
+                    }
+
+                    // Reset format detection
+                    detectKeyFormat();
+
+                } else {
+                    // Error
+                    const errorMessage = result.error || 'Failed to issue security clearance';
+                    showStatusMessage(`<i class="fas fa-exclamation-triangle me-2"></i>${errorMessage}`, 'error');
+                }
+
+            } catch (error) {
+                console.error('Error submitting security clearance request:', error);
+                showStatusMessage('<i class="fas fa-exclamation-triangle me-2"></i>Network error. Please try again.', 'error');
+            } finally {
+                // Hide loading state
+                submitButton.disabled = false;
+                loadingSpinner.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>

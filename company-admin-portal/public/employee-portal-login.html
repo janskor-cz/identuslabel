@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Portal - Login</title>
+    <link rel="stylesheet" href="/company-admin/styles.css">
+</head>
+<body>
+    <!-- Login Screen -->
+    <div class="login-screen">
+        <div class="login-container">
+            <div class="login-header">
+                <h1>👤 Employee Portal</h1>
+                <p class="subtitle">Secure Authentication with Your Wallet</p>
+            </div>
+
+            <!-- Login Form -->
+            <div id="login-form-section">
+                <div class="section-body">
+                    <form id="employee-login-form" onsubmit="employeeLogin.handleLoginSubmit(event)">
+                        <div class="form-group">
+                            <label for="employee-email">Work Email Address</label>
+                            <input
+                                type="email"
+                                id="employee-email"
+                                name="email"
+                                required
+                                placeholder="alice@techcorp.com"
+                                autocomplete="email">
+                            <p class="help-text" style="margin-top: 8px; font-size: 0.9em; color: #666;">
+                                Enter your company email address to begin authentication
+                            </p>
+                        </div>
+
+                        <div class="form-actions" style="justify-content: center; margin-top: 32px;">
+                            <button type="submit" class="btn btn-primary" style="padding: 16px 48px; font-size: 1.1em;">
+                                🔐 Login with Wallet
+                            </button>
+                        </div>
+                    </form>
+
+                    <div class="login-footer" style="margin-top: 32px;">
+                        <p style="text-align: center; color: #666; font-size: 0.9em;">
+                            You will be prompted to approve a proof request in your Cloud Agent wallet
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Waiting Section (Hidden Initially) -->
+            <div id="waiting-section" class="section-body hidden" style="text-align: center;">
+                <div class="loading-spinner" style="margin: 0 auto 24px;"></div>
+
+                <h2 id="waiting-title" style="margin-bottom: 16px; color: #333;">
+                    Waiting for wallet response...
+                </h2>
+
+                <p id="waiting-message" style="color: #666; font-size: 1em; line-height: 1.6; margin-bottom: 24px;">
+                    Please approve the proof request in your Cloud Agent wallet
+                </p>
+
+                <div id="status-info" style="
+                    background: #f8f9fa;
+                    border-radius: 8px;
+                    padding: 16px;
+                    margin: 24px 0;
+                    text-align: left;
+                ">
+                    <p style="margin: 0; color: #666; font-size: 0.9em;">
+                        <strong>Status:</strong> <span id="auth-status">Initializing...</span>
+                    </p>
+                    <p style="margin: 8px 0 0 0; color: #666; font-size: 0.9em;">
+                        <strong>Email:</strong> <span id="auth-email">-</span>
+                    </p>
+                </div>
+
+                <button
+                    class="btn btn-secondary"
+                    onclick="employeeLogin.cancelLogin()"
+                    style="margin-top: 16px;">
+                    Cancel Login
+                </button>
+            </div>
+
+            <!-- Error Section (Hidden Initially) -->
+            <div id="error-section" class="section-body hidden" style="text-align: center;">
+                <div style="
+                    background: #fee;
+                    color: #c33;
+                    padding: 20px;
+                    border-radius: 8px;
+                    margin-bottom: 24px;
+                    border: 2px solid #fcc;
+                ">
+                    <h3 style="margin: 0 0 12px 0;">❌ Authentication Failed</h3>
+                    <p id="error-message" style="margin: 0; font-size: 1em;">
+                        An error occurred during authentication
+                    </p>
+                </div>
+
+                <button
+                    class="btn btn-primary"
+                    onclick="employeeLogin.resetForm()"
+                    style="margin-right: 12px;">
+                    Try Again
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="notification-toast" class="notification-toast hidden">
+        <span id="notification-message"></span>
+    </div>
+
+    <script src="/company-admin/js/employee-portal-login.js?v=20251121b"></script>
+</body>
+</html>

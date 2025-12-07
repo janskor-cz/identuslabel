@@ -1,0 +1,76 @@
+{
+  "name": "RealPerson",
+  "version": "3.0.0",
+  "description": "W3C-compliant identity credential with auto-populated metadata fields",
+  "type": "https://w3c-ccg.github.io/vc-json-schemas/schema/2.0/schema.json",
+  "author": "did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c",
+  "tags": ["identity", "w3c", "official", "realperson"],
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://certification-authority.org/schemas/RealPerson/3.0.0",
+    "type": "object",
+    "properties": {
+      "credentialType": {
+        "type": "string",
+        "const": "RealPersonIdentity",
+        "description": "Auto-populated: Type identifier for wallet credential classification"
+      },
+      "firstName": {
+        "type": "string",
+        "description": "User input: Legal first name of the person",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "lastName": {
+        "type": "string",
+        "description": "User input: Legal last name of the person",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "uniqueId": {
+        "type": "string",
+        "description": "User input: Unique identifier for the person (e.g., national ID, SSN)",
+        "minLength": 1,
+        "maxLength": 50
+      },
+      "dateOfBirth": {
+        "type": "string",
+        "format": "date",
+        "description": "User input: Date of birth in YYYY-MM-DD format"
+      },
+      "gender": {
+        "type": "string",
+        "description": "User input: Gender of the person",
+        "minLength": 1,
+        "maxLength": 50
+      },
+      "issuedDate": {
+        "type": "string",
+        "format": "date",
+        "description": "Auto-populated: Date when the credential was issued (YYYY-MM-DD)"
+      },
+      "expiryDate": {
+        "type": "string",
+        "format": "date",
+        "description": "Auto-populated: Date when the credential expires (YYYY-MM-DD)"
+      },
+      "credentialId": {
+        "type": "string",
+        "description": "Auto-populated: Unique identifier for this credential instance",
+        "pattern": "^REALPERSON-[0-9]+-[A-Z0-9]+$"
+      }
+    },
+    "required": [
+      "credentialType",
+      "firstName",
+      "lastName",
+      "uniqueId",
+      "dateOfBirth",
+      "gender",
+      "issuedDate",
+      "expiryDate",
+      "credentialId"
+    ],
+    "additionalProperties": false
+  }
+}

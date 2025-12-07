@@ -1,0 +1,88 @@
+{
+  "name": "CertificationAuthorityIdentity",
+  "version": "1.0.0",
+  "description": "Self-issued organizational identity and authority credential for root Certification Authority. Combines organizational identity, authority accreditation, and service metadata to establish the CA as a self-sovereign trust anchor.",
+  "type": "https://w3c-ccg.github.io/vc-json-schemas/schema/2.0/schema.json",
+  "author": "did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c",
+  "authored": "2025-11-04T00:00:00Z",
+  "tags": ["organization", "authority", "root-ca", "trust-anchor"],
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://certification-authority.org/schemas/CertificationAuthorityIdentity/1.0.0",
+    "type": "object",
+    "properties": {
+      "credentialType": {
+        "type": "string"
+      },
+      "organizationName": {
+        "type": "string"
+      },
+      "organizationType": {
+        "type": "string"
+      },
+      "jurisdiction": {
+        "type": "string"
+      },
+      "registrationNumber": {
+        "type": "string"
+      },
+      "establishedDate": {
+        "type": "string",
+        "format": "date"
+      },
+      "website": {
+        "type": "string",
+        "format": "uri"
+      },
+      "authorityLevel": {
+        "type": "string"
+      },
+      "authorizationScope": {
+        "type": "string"
+      },
+      "accreditationDate": {
+        "type": "string",
+        "format": "date"
+      },
+      "accreditingBody": {
+        "type": "string"
+      },
+      "cloudAgentEndpoint": {
+        "type": "string",
+        "format": "uri"
+      },
+      "didcommEndpoint": {
+        "type": "string",
+        "format": "uri"
+      },
+      "mediatorEndpoint": {
+        "type": "string",
+        "format": "uri"
+      },
+      "supportedProtocols": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "issuedDate": {
+        "type": "string",
+        "format": "date"
+      },
+      "credentialId": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "credentialType",
+      "organizationName",
+      "organizationType",
+      "jurisdiction",
+      "authorityLevel",
+      "authorizationScope",
+      "issuedDate",
+      "credentialId"
+    ],
+    "additionalProperties": false
+  }
+}
