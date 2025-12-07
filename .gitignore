@@ -96,3 +96,8 @@ company-admin-portal/data/
 # Sensitive credentials (keep these templates only)
 # NOTE: multitenancy-test-credentials.txt is included for documentation purposes
 # as this is a test/development environment
+
+# Test files (removed from repo Dec 7, 2025)
+certification-authority/public/test-*.html
+certification-authority/test-*.js
+test-enterprise-wallet-manual.md
