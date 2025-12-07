@@ -1,0 +1,103 @@
+{
+  "name": "SecurityClearanceLevel",
+  "version": "3.0.0",
+  "description": "Dual-key Security Clearance credential with Ed25519 (signing) and X25519 (encryption) public keys",
+  "type": "https://w3c-ccg.github.io/vc-json-schemas/schema/2.0/schema.json",
+  "author": "did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c",
+  "tags": ["security", "clearance", "authentication", "encryption", "dual-key"],
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://identuslabel.cz/schemas/SecurityClearanceLevel/3.0.0",
+    "type": "object",
+    "properties": {
+      "clearanceLevel": {
+        "type": "string",
+        "description": "Security clearance level (internal, confidential, restricted, top-secret)"
+      },
+      "holderName": {
+        "type": "string",
+        "description": "Full name of the credential holder"
+      },
+      "holderUniqueId": {
+        "type": "string",
+        "description": "Unique identifier for the credential holder"
+      },
+      "cryptographicKeys": {
+        "type": "object",
+        "description": "Dual cryptographic key pair for signing and encryption",
+        "properties": {
+          "ed25519PublicKey": {
+            "type": "string",
+            "description": "Ed25519 public key for digital signatures (base64url encoded, 32 bytes)"
+          },
+          "ed25519Fingerprint": {
+            "type": "string",
+            "description": "SHA-256 fingerprint of Ed25519 public key (XX:XX:... format)"
+          },
+          "x25519PublicKey": {
+            "type": "string",
+            "description": "X25519 public key for encryption (base64url encoded, 32 bytes)"
+          },
+          "x25519Fingerprint": {
+            "type": "string",
+            "description": "SHA-256 fingerprint of X25519 public key (XX:XX:... format)"
+          },
+          "keyDerivationRelationship": {
+            "type": "string",
+            "description": "Describes relationship between keys (e.g., 'derived-from-same-seed', 'independent')"
+          }
+        },
+        "required": [
+          "ed25519PublicKey",
+          "ed25519Fingerprint",
+          "x25519PublicKey",
+          "x25519Fingerprint",
+          "keyDerivationRelationship"
+        ]
+      },
+      "issuedDate": {
+        "type": "string",
+        "format": "date",
+        "description": "Date when the clearance was issued (YYYY-MM-DD)"
+      },
+      "expiryDate": {
+        "type": "string",
+        "format": "date",
+        "description": "Date when the clearance expires (YYYY-MM-DD)"
+      },
+      "clearanceId": {
+        "type": "string",
+        "description": "Unique identifier for this clearance credential"
+      },
+      "issuingAuthority": {
+        "type": "string",
+        "description": "Name of the authority that issued this clearance"
+      },
+      "requiresMultiFactorAuth": {
+        "type": "boolean",
+        "description": "Whether multi-factor authentication is required for this clearance level"
+      },
+      "allowsDigitalSigning": {
+        "type": "boolean",
+        "description": "Whether this clearance allows digital document signing"
+      },
+      "allowsEncryption": {
+        "type": "boolean",
+        "description": "Whether this clearance allows encrypted communications"
+      }
+    },
+    "required": [
+      "clearanceLevel",
+      "holderName",
+      "holderUniqueId",
+      "cryptographicKeys",
+      "issuedDate",
+      "expiryDate",
+      "clearanceId",
+      "issuingAuthority",
+      "requiresMultiFactorAuth",
+      "allowsDigitalSigning",
+      "allowsEncryption"
+    ]
+  }
+}

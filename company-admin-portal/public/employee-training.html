@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Corporate Information Security Training - TechCorp</title>
+    <link rel="stylesheet" href="/company-admin/styles.css">
+    <style>
+        .training-container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        .training-header {
+            background: white;
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 32px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+
+        .training-header h1 {
+            font-size: 2em;
+            margin-bottom: 12px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .training-header .subtitle {
+            color: #666;
+            font-size: 1.1em;
+            margin-bottom: 8px;
+        }
+
+        .training-header .requirement {
+            color: #999;
+            font-size: 0.95em;
+            font-style: italic;
+        }
+
+        .training-module {
+            background: white;
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
+        .module-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            gap: 12px;
+        }
+
+        .module-number {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.3em;
+            font-weight: bold;
+            flex-shrink: 0;
+        }
+
+        .module-header h2 {
+            font-size: 1.4em;
+            color: #333;
+            margin: 0;
+        }
+
+        .module-content {
+            color: #555;
+            line-height: 1.8;
+        }
+
+        .module-content h3 {
+            color: #667eea;
+            font-size: 1.1em;
+            margin-top: 20px;
+            margin-bottom: 12px;
+        }
+
+        .module-content ul {
+            margin-left: 20px;
+            margin-bottom: 16px;
+        }
+
+        .module-content li {
+            margin-bottom: 8px;
+        }
+
+        .key-points {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 16px 20px;
+            border-radius: 4px;
+            margin-top: 16px;
+        }
+
+        .key-points h4 {
+            margin: 0 0 12px 0;
+            color: #333;
+            font-size: 1em;
+        }
+
+        .completion-section {
+            background: white;
+            border-radius: 12px;
+            padding: 32px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            margin-top: 32px;
+        }
+
+        .completion-checkbox {
+            display: flex;
+            align-items: start;
+            gap: 12px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 24px;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+
+        .completion-checkbox:hover {
+            background: #e9ecef;
+        }
+
+        .completion-checkbox input[type="checkbox"] {
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            margin-top: 2px;
+            flex-shrink: 0;
+        }
+
+        .completion-checkbox label {
+            font-size: 1.05em;
+            color: #333;
+            cursor: pointer;
+            line-height: 1.6;
+        }
+
+        .submit-button {
+            width: 100%;
+            padding: 16px 32px;
+            font-size: 1.1em;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .submit-button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .submit-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status-message {
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 500;
+        }
+
+        .status-loading {
+            background: #e3f2fd;
+            color: #1976d2;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+
+        .status-success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(25, 118, 210, 0.3);
+            border-top-color: #1976d2;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .progress-steps {
+            margin-top: 16px;
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .progress-steps div {
+            margin-bottom: 4px;
+        }
+
+        .step-complete {
+            color: #28a745;
+        }
+
+        .step-current {
+            color: #1976d2;
+            font-weight: 600;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="training-container">
+        <!-- Header -->
+        <div class="training-header">
+            <h1>Corporate Information Security Training</h1>
+            <p class="subtitle">Required for all TechCorp employees</p>
+            <p class="requirement">Please read all training modules carefully before completing</p>
+        </div>
+
+        <!-- Module 1: Data Protection & Privacy -->
+        <div class="training-module">
+            <div class="module-header">
+                <div class="module-number">1</div>
+                <h2>Data Protection & Privacy</h2>
+            </div>
+            <div class="module-content">
+                <p>
+                    At TechCorp, protecting customer and company data is our highest priority.
+                    As an employee, you are responsible for understanding and following our data protection policies.
+                </p>
+
+                <h3>Understanding GDPR</h3>
+                <ul>
+                    <li>The General Data Protection Regulation (GDPR) governs how we collect, store, and process personal data</li>
+                    <li>Personal data includes names, email addresses, IP addresses, and any information that can identify an individual</li>
+                    <li>Always obtain consent before collecting personal data</li>
+                    <li>Individuals have the right to access, correct, or delete their data</li>
+                </ul>
+
+                <h3>Data Classification</h3>
+                <ul>
+                    <li><strong>Public:</strong> Information intended for public consumption (marketing materials, public website content)</li>
+                    <li><strong>Internal:</strong> Information for internal use only (employee directories, internal policies)</li>
+                    <li><strong>Confidential:</strong> Sensitive business information (financial data, customer contracts)</li>
+                    <li><strong>Restricted:</strong> Highly sensitive data requiring special handling (passwords, personal health information)</li>
+                </ul>
+
+                <div class="key-points">
+                    <h4>Key Takeaways:</h4>
+                    <ul>
+                        <li>Only access data necessary for your role</li>
+                        <li>Never share confidential data outside approved channels</li>
+                        <li>Report data breaches immediately to the Security Team</li>
+                        <li>Use encryption when transmitting sensitive data</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Module 2: Phishing & Social Engineering -->
+        <div class="training-module">
+            <div class="module-header">
+                <div class="module-number">2</div>
+                <h2>Phishing & Social Engineering</h2>
+            </div>
+            <div class="module-content">
+                <p>
+                    Phishing attacks are the most common method cybercriminals use to gain unauthorized access to systems.
+                    Learning to recognize and report phishing attempts is critical to keeping TechCorp secure.
+                </p>
+
+                <h3>Recognizing Phishing Emails</h3>
+                <ul>
+                    <li><strong>Suspicious sender:</strong> Check the email address carefully - phishers often use domains that look similar to legitimate ones</li>
+                    <li><strong>Urgent language:</strong> Phrases like "immediate action required" or "account will be suspended" create pressure</li>
+                    <li><strong>Generic greetings:</strong> "Dear customer" instead of using your name</li>
+                    <li><strong>Unexpected attachments:</strong> Files you weren't expecting, especially .exe, .zip, or .doc files</li>
+                    <li><strong>Suspicious links:</strong> Hover over links to see the real destination before clicking</li>
+                </ul>
+
+                <h3>Social Engineering Tactics</h3>
+                <ul>
+                    <li><strong>Pretexting:</strong> Creating a fake scenario to trick you into sharing information</li>
+                    <li><strong>Baiting:</strong> Offering something desirable (free software, prize) to lure you into a trap</li>
+                    <li><strong>Tailgating:</strong> Following you through a secure door without proper authorization</li>
+                    <li><strong>Impersonation:</strong> Pretending to be IT support, executives, or vendors to gain trust</li>
+                </ul>
+
+                <div class="key-points">
+                    <h4>Key Takeaways:</h4>
+                    <ul>
+                        <li>When in doubt, don't click - verify the sender through alternative channels</li>
+                        <li>Never share passwords or security codes via email or phone</li>
+                        <li>Report suspicious emails to security@techcorp.com</li>
+                        <li>Trust your instincts - if something feels wrong, investigate before acting</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Module 3: Password Security -->
+        <div class="training-module">
+            <div class="module-header">
+                <div class="module-number">3</div>
+                <h2>Password Security & Authentication</h2>
+            </div>
+            <div class="module-content">
+                <p>
+                    Strong passwords are your first line of defense against unauthorized access.
+                    Following password best practices protects both your account and company systems.
+                </p>
+
+                <h3>Creating Strong Passwords</h3>
+                <ul>
+                    <li>Use at least 12 characters (longer is better)</li>
+                    <li>Include uppercase letters, lowercase letters, numbers, and symbols</li>
+                    <li>Avoid common words, phrases, or patterns (123456, password, qwerty)</li>
+                    <li>Don't use personal information (birthdays, names, addresses)</li>
+                    <li>Never reuse passwords across multiple accounts</li>
+                </ul>
+
+                <h3>Password Managers</h3>
+                <p>
+                    TechCorp provides <strong>1Password</strong> for all employees. Password managers:
+                </p>
+                <ul>
+                    <li>Generate strong, unique passwords for each account</li>
+                    <li>Store passwords securely with encryption</li>
+                    <li>Auto-fill credentials to protect against keyloggers</li>
+                    <li>Alert you to compromised or weak passwords</li>
+                </ul>
+
+                <h3>Multi-Factor Authentication (MFA)</h3>
+                <ul>
+                    <li><strong>Required</strong> for all TechCorp systems</li>
+                    <li>Adds a second verification step (SMS code, authenticator app, hardware key)</li>
+                    <li>Protects accounts even if password is compromised</li>
+                    <li>Use authenticator apps (Google Authenticator, Authy) instead of SMS when possible</li>
+                </ul>
+
+                <div class="key-points">
+                    <h4>Key Takeaways:</h4>
+                    <ul>
+                        <li>Use a password manager for all work accounts</li>
+                        <li>Enable MFA on all accounts that support it</li>
+                        <li>Never share passwords with anyone, including IT staff</li>
+                        <li>Change passwords immediately if you suspect compromise</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Module 4: Incident Reporting -->
+        <div class="training-module">
+            <div class="module-header">
+                <div class="module-number">4</div>
+                <h2>Security Incident Reporting</h2>
+            </div>
+            <div class="module-content">
+                <p>
+                    Quick reporting of security incidents minimizes damage and helps protect the entire organization.
+                    Every employee plays a critical role in maintaining security.
+                </p>
+
+                <h3>What Constitutes a Security Incident?</h3>
+                <ul>
+                    <li>Suspected phishing emails or social engineering attempts</li>
+                    <li>Lost or stolen devices (laptops, phones, access cards)</li>
+                    <li>Unauthorized access to systems or data</li>
+                    <li>Malware infections or suspicious system behavior</li>
+                    <li>Data breaches or unauthorized data disclosure</li>
+                    <li>Suspicious network activity</li>
+                    <li>Physical security breaches (unauthorized persons in secure areas)</li>
+                </ul>
+
+                <h3>How to Report an Incident</h3>
+                <ol>
+                    <li><strong>Immediate reporting:</strong> Don't wait - report as soon as you notice something suspicious</li>
+                    <li><strong>Contact Security Team:</strong>
+                        <ul>
+                            <li>Email: security@techcorp.com</li>
+                            <li>Phone: +1 (555) 123-4567 (24/7 hotline)</li>
+                            <li>Internal Chat: #security-incidents channel</li>
+                        </ul>
+                    </li>
+                    <li><strong>Preserve evidence:</strong> Don't delete suspicious emails or files - forward them to security</li>
+                    <li><strong>Document details:</strong> Note time, what you observed, and actions you took</li>
+                </ol>
+
+                <h3>What NOT to Do</h3>
+                <ul>
+                    <li>Don't attempt to investigate on your own</li>
+                    <li>Don't confront suspected threat actors</li>
+                    <li>Don't share incident details publicly or on social media</li>
+                    <li>Don't assume someone else will report it</li>
+                </ul>
+
+                <div class="key-points">
+                    <h4>Key Takeaways:</h4>
+                    <ul>
+                        <li>When in doubt, report it - false alarms are better than missed incidents</li>
+                        <li>Quick reporting limits damage and enables faster response</li>
+                        <li>You won't be penalized for reporting in good faith</li>
+                        <li>Security is everyone's responsibility</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Completion Section -->
+        <div class="completion-section">
+            <h2 style="margin-bottom: 24px;">Training Completion</h2>
+
+            <!-- Debug Info -->
+            <div style="background: #f0f0f0; padding: 10px; border-radius: 4px; margin-bottom: 20px; font-size: 12px; color: #666;">
+                <strong>Debug Mode:</strong> Page Version 20251121g | Check browser console (F12) for detailed logs
+            </div>
+
+            <!-- Status Messages -->
+            <div id="statusMessage" class="hidden"></div>
+
+            <!-- Completion Checkbox -->
+            <div class="completion-checkbox">
+                <input type="checkbox" id="completionCheck" onclick="event.stopPropagation()">
+                <label for="completionCheck">
+                    I have read and understood all four training modules above.
+                    I acknowledge my responsibility to protect TechCorp data, recognize security threats,
+                    use strong authentication, and report security incidents promptly.
+                </label>
+            </div>
+
+            <!-- Submit Button -->
+            <button id="submitButton" class="submit-button" disabled>
+                Complete Training & Receive Certificate
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // Cache busting with version number
+        const script = document.createElement('script');
+        script.src = '/company-admin/js/employee-training.js?v=20251121g';
+        script.onload = () => console.log('%c[Page] JavaScript v20251121g loaded successfully', 'color: green; font-weight: bold');
+        script.onerror = () => console.error('[Page] ❌ Failed to load JavaScript');
+        document.body.appendChild(script);
+    </script>
+</body>
+</html>

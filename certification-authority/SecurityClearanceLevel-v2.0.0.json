@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://certification-authority.org/schemas/SecurityClearanceLevel/2.0.0",
+  "title": "SecurityClearanceLevel",
+  "description": "Unified security clearance credential schema with Ed25519 cryptographic support for all clearance levels",
+  "type": "object",
+  "properties": {
+    "clearanceLevel": {
+      "type": "string",
+      "enum": ["internal", "confidential", "restricted", "top-secret"],
+      "description": "The security clearance level granted to the holder"
+    },
+    "holderName": {
+      "type": "string",
+      "description": "Full name of the clearance holder"
+    },
+    "holderUniqueId": {
+      "type": "string",
+      "description": "Unique identifier for the clearance holder"
+    },
+    "publicKey": {
+      "type": "string",
+      "description": "Ed25519 public key in base64url format (32 bytes)"
+    },
+    "keyAlgorithm": {
+      "type": "string",
+      "enum": ["Ed25519"],
+      "description": "Cryptographic algorithm used for the keypair"
+    },
+    "keyFingerprint": {
+      "type": "string",
+      "description": "SHA256 fingerprint of the public key in XX:XX:XX format"
+    },
+    "issuedDate": {
+      "type": "string",
+      "format": "date",
+      "description": "Date when the clearance was issued"
+    },
+    "expiryDate": {
+      "type": "string",
+      "format": "date",
+      "description": "Date when the clearance expires"
+    },
+    "clearanceId": {
+      "type": "string",
+      "description": "Unique identifier for this specific clearance"
+    },
+    "issuingAuthority": {
+      "type": "string",
+      "description": "Name of the certification authority that issued this clearance"
+    },
+    "securityFeatures": {
+      "type": "object",
+      "properties": {
+        "requiresMultiFactorAuth": {
+          "type": "boolean",
+          "description": "Whether this clearance requires multi-factor authentication"
+        },
+        "allowsDigitalSigning": {
+          "type": "boolean",
+          "description": "Whether this clearance permits digital document signing"
+        },
+        "allowsEncryption": {
+          "type": "boolean",
+          "description": "Whether this clearance permits data encryption operations"
+        }
+      },
+      "required": ["requiresMultiFactorAuth", "allowsDigitalSigning", "allowsEncryption"]
+    }
+  },
+  "required": [
+    "clearanceLevel",
+    "holderName",
+    "holderUniqueId",
+    "publicKey",
+    "keyAlgorithm",
+    "keyFingerprint",
+    "issuedDate",
+    "expiryDate",
+    "clearanceId",
+    "issuingAuthority",
+    "securityFeatures"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>postMessage Test - Secure Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 20px;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+    header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 30px;
+      text-align: center;
+    }
+    main { padding: 30px; }
+    h2 { margin-bottom: 20px; color: #333; }
+    .test-section {
+      background: #f5f5f5;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .test-section h3 {
+      color: #667eea;
+      margin-bottom: 15px;
+    }
+    button {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: bold;
+      margin-right: 10px;
+      margin-bottom: 10px;
+      transition: transform 0.2s;
+    }
+    button:hover { transform: translateY(-2px); }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .log-area {
+      background: #1e1e1e;
+      color: #00ff00;
+      padding: 15px;
+      border-radius: 6px;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      max-height: 400px;
+      overflow-y: auto;
+      margin-top: 15px;
+    }
+    .log-entry {
+      margin-bottom: 5px;
+      line-height: 1.6;
+    }
+    .log-entry.info { color: #00ffff; }
+    .log-entry.success { color: #00ff00; }
+    .log-entry.error { color: #ff0000; }
+    .log-entry.warning { color: #ffff00; }
+    .status {
+      display: inline-block;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: bold;
+      margin-left: 10px;
+    }
+    .status.connected { background: #4caf50; color: white; }
+    .status.disconnected { background: #f44336; color: white; }
+    .status.waiting { background: #ff9800; color: white; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🔐 postMessage Test Suite</h1>
+      <p>Test cross-origin communication with wallet SecureDashboardBridge</p>
+    </header>
+
+    <main>
+      <!-- Wallet Status -->
+      <div class="test-section">
+        <h3>📡 Wallet Connection Status</h3>
+        <p>
+          Alice Wallet: <span class="status disconnected" id="alice-status">Not Open</span>
+          <button onclick="openWallet('alice')">Open Alice Wallet</button>
+        </p>
+        <p style="margin-top: 10px;">
+          Bob Wallet: <span class="status disconnected" id="bob-status">Not Open</span>
+          <button onclick="openWallet('bob')">Open Bob Wallet</button>
+        </p>
+      </div>
+
+      <!-- Test 1: PING/PONG -->
+      <div class="test-section">
+        <h3>Test 1: PING/PONG Detection</h3>
+        <p style="margin-bottom: 15px;">Send PING message to detect wallet with postMessage listener</p>
+        <button onclick="sendPing()">Send PING</button>
+        <button onclick="clearLogs('ping')">Clear Log</button>
+        <div class="log-area" id="ping-log"></div>
+      </div>
+
+      <!-- Test 2: Mock Decryption Request -->
+      <div class="test-section">
+        <h3>Test 2: Mock Decryption Request</h3>
+        <p style="margin-bottom: 15px;">Send mock encrypted content to wallet for decryption</p>
+        <button onclick="sendMockDecryptRequest()">Send Decrypt Request</button>
+        <button onclick="clearLogs('decrypt')">Clear Log</button>
+        <div class="log-area" id="decrypt-log"></div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+    // Wallet window references
+    let walletWindows = {
+      alice: null,
+      bob: null
+    };
+
+    // Wallet status
+    let walletStatus = {
+      alice: false,
+      bob: false
+    };
+
+    // Pending requests
+    let pendingRequests = new Map();
+
+    // Allowed wallet origins
+    const WALLET_ORIGINS = {
+      alice: 'https://identuslabel.cz/alice',
+      bob: 'https://identuslabel.cz/bob'
+    };
+
+    // Initialize postMessage listener
+    function initPostMessage() {
+      window.addEventListener('message', (event) => {
+        // Validate origin
+        const walletId = Object.keys(WALLET_ORIGINS).find(id => WALLET_ORIGINS[id] === event.origin);
+
+        if (!walletId) {
+          console.warn('Rejected message from unauthorized origin:', event.origin);
+          return;
+        }
+
+        const message = event.data;
+        console.log('[postMessage] Received:', message);
+
+        switch (message.type) {
+          case 'WALLET_READY':
+            handleWalletReady(message);
+            break;
+          case 'PONG':
+            handlePong(message);
+            break;
+          case 'DECRYPT_RESPONSE':
+            handleDecryptResponse(message);
+            break;
+          case 'DECRYPT_ERROR':
+            handleDecryptError(message);
+            break;
+        }
+      });
+
+      log('ping', '✅ postMessage listener initialized', 'success');
+    }
+
+    // Open wallet window
+    function openWallet(walletId) {
+      const url = WALLET_ORIGINS[walletId];
+
+      // Check if already open
+      if (walletWindows[walletId] && !walletWindows[walletId].closed) {
+        log('ping', `⚠️ ${walletId} wallet already open, focusing...`, 'warning');
+        walletWindows[walletId].focus();
+        return;
+      }
+
+      log('ping', `🚀 Opening ${walletId} wallet...`, 'info');
+
+      // Open in new window
+      walletWindows[walletId] = window.open(url, `wallet-${walletId}`, 'width=1200,height=800');
+
+      if (!walletWindows[walletId]) {
+        log('ping', `❌ Failed to open wallet - popup blocked?`, 'error');
+        return;
+      }
+
+      log('ping', `✅ ${walletId} wallet window opened`, 'success');
+
+      // Update status
+      const statusEl = document.getElementById(`${walletId}-status`);
+      statusEl.textContent = 'Opening...';
+      statusEl.className = 'status waiting';
+    }
+
+    // Handle WALLET_READY message
+    function handleWalletReady(message) {
+      const walletId = message.walletId;
+      walletStatus[walletId] = true;
+
+      log('ping', `✅ ${walletId} wallet ready signal received`, 'success');
+
+      // Update status
+      const statusEl = document.getElementById(`${walletId}-status`);
+      statusEl.textContent = 'Connected';
+      statusEl.className = 'status connected';
+    }
+
+    // Send PING
+    function sendPing() {
+      log('ping', '📤 Sending PING to all wallets...', 'info');
+
+      let sentCount = 0;
+
+      for (const [walletId, walletWindow] of Object.entries(walletWindows)) {
+        if (walletWindow && !walletWindow.closed) {
+          try {
+            walletWindow.postMessage({
+              type: 'PING',
+              source: 'test-page',
+              timestamp: Date.now()
+            }, WALLET_ORIGINS[walletId]);
+
+            sentCount++;
+            log('ping', `  → PING sent to ${walletId}`, 'info');
+          } catch (error) {
+            log('ping', `  ❌ Failed to send to ${walletId}: ${error.message}`, 'error');
+          }
+        }
+      }
+
+      if (sentCount === 0) {
+        log('ping', '⚠️ No wallets open. Click "Open Alice Wallet" or "Open Bob Wallet" first.', 'warning');
+      }
+
+      // Set timeout
+      setTimeout(() => {
+        if (!walletStatus.alice && !walletStatus.bob) {
+          log('ping', '⚠️ No PONG received after 3s', 'warning');
+        }
+      }, 3000);
+    }
+
+    // Handle PONG
+    function handlePong(message) {
+      const walletId = message.walletId;
+      walletStatus[walletId] = true;
+
+      log('ping', `✅ PONG received from ${walletId} wallet`, 'success');
+      log('ping', `   Latency: ${Date.now() - message.timestamp}ms`, 'info');
+
+      // Update status
+      const statusEl = document.getElementById(`${walletId}-status`);
+      statusEl.textContent = 'Connected';
+      statusEl.className = 'status connected';
+    }
+
+    // Send mock decrypt request
+    function sendMockDecryptRequest() {
+      // Find first connected wallet
+      const connectedWalletId = Object.keys(walletStatus).find(id => walletStatus[id]);
+
+      if (!connectedWalletId) {
+        log('decrypt', '⚠️ No wallet connected - send PING first or open a wallet', 'warning');
+        return;
+      }
+
+      const walletWindow = walletWindows[connectedWalletId];
+
+      if (!walletWindow || walletWindow.closed) {
+        log('decrypt', `❌ ${connectedWalletId} wallet window closed`, 'error');
+        return;
+      }
+
+      const requestId = `test-${Date.now()}`;
+      const sectionId = 'confidential-001';
+
+      log('decrypt', `📤 Sending decrypt request to ${connectedWalletId}: ${requestId}`, 'info');
+
+      // Mock encrypted content
+      const mockEncryptedContent = {
+        encrypted: true,
+        algorithm: 'XSalsa20-Poly1305',
+        version: '2.0',
+        ciphertext: 'MOCK_CIPHERTEXT_BASE64URL',
+        nonce: 'MOCK_NONCE_BASE64URL',
+        senderPublicKey: 'MOCK_SENDER_KEY_BASE64URL',
+        recipientPublicKey: 'MOCK_RECIPIENT_KEY_BASE64URL'
+      };
+
+      pendingRequests.set(requestId, {
+        sectionId,
+        sentAt: Date.now()
+      });
+
+      try {
+        walletWindow.postMessage({
+          type: 'DECRYPT_REQUEST',
+          requestId,
+          sectionId,
+          encryptedContent: mockEncryptedContent,
+          timestamp: Date.now()
+        }, WALLET_ORIGINS[connectedWalletId]);
+
+        log('decrypt', '   Waiting for wallet response...', 'info');
+      } catch (error) {
+        log('decrypt', `❌ Failed to send request: ${error.message}`, 'error');
+      }
+
+      // Timeout
+      setTimeout(() => {
+        if (pendingRequests.has(requestId)) {
+          log('decrypt', `⚠️ Request ${requestId} timed out`, 'warning');
+          pendingRequests.delete(requestId);
+        }
+      }, 10000);
+    }
+
+    // Handle decrypt response
+    function handleDecryptResponse(message) {
+      const { requestId, sectionId, plaintext } = message;
+
+      if (!pendingRequests.has(requestId)) {
+        log('decrypt', `⚠️ Received response for unknown request: ${requestId}`, 'warning');
+        return;
+      }
+
+      const request = pendingRequests.get(requestId);
+      const latency = Date.now() - request.sentAt;
+
+      log('decrypt', `✅ Decryption successful for ${sectionId}`, 'success');
+      log('decrypt', `   Request ID: ${requestId}`, 'info');
+      log('decrypt', `   Latency: ${latency}ms`, 'info');
+      log('decrypt', `   Plaintext: "${plaintext}"`, 'success');
+
+      pendingRequests.delete(requestId);
+    }
+
+    // Handle decrypt error
+    function handleDecryptError(message) {
+      const { requestId, error } = message;
+
+      if (!pendingRequests.has(requestId)) {
+        log('decrypt', `⚠️ Received error for unknown request: ${requestId}`, 'warning');
+        return;
+      }
+
+      log('decrypt', `❌ Decryption failed for ${requestId}`, 'error');
+      log('decrypt', `   Error: ${error}`, 'error');
+
+      pendingRequests.delete(requestId);
+    }
+
+    // Log helper
+    function log(area, message, type = 'info') {
+      const logArea = document.getElementById(`${area}-log`);
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      const timestamp = new Date().toLocaleTimeString();
+      entry.textContent = `[${timestamp}] ${message}`;
+      logArea.appendChild(entry);
+      logArea.scrollTop = logArea.scrollHeight;
+    }
+
+    // Clear logs
+    function clearLogs(area) {
+      document.getElementById(`${area}-log`).innerHTML = '';
+    }
+
+    // Initialize on page load
+    document.addEventListener('DOMContentLoaded', () => {
+      initPostMessage();
+    });
+  </script>
+</body>
+</html>

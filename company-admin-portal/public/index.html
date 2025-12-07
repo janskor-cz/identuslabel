@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Company Admin Portal - Hyperledger Identus</title>
     <link rel="stylesheet" href="/company-admin/styles.css">
-    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <!-- QRCode library for invitation QR generation -->
+    <script src="https://unpkg.com/qrcode@1.5.3/build/qrcode.js"></script>
 </head>
 <body>
     <!-- Loading Screen -->
@@ -89,6 +90,61 @@
                             </ul>
                         </div>
                     </div>
+                </div>
+            </section>
+
+            <!-- Company Identity Credentials Section -->
+            <section id="company-credentials-section" class="section" style="display: none;">
+                <div class="section-header">
+                    <h2>📜 Company Identity Credentials</h2>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" onclick="loadCompanyCredentials()">
+                            <span class="btn-icon">🔄</span>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <div class="credential-filters">
+                    <button class="filter-btn active" data-filter="all" onclick="filterCredentials('all')">
+                        All (<span id="count-all">0</span>)
+                    </button>
+                    <button class="filter-btn" data-filter="active" onclick="filterCredentials('active')">
+                        Active (<span id="count-active">0</span>)
+                    </button>
+                    <button class="filter-btn" data-filter="revoked" onclick="filterCredentials('revoked')">
+                        Revoked (<span id="count-revoked">0</span>)
+                    </button>
+                    <button class="filter-btn" data-filter="expired" onclick="filterCredentials('expired')">
+                        Expired (<span id="count-expired">0</span>)
+                    </button>
+                </div>
+
+                <div id="credentials-empty-state" class="empty-state" style="display: none;">
+                    <div class="empty-icon">📜</div>
+                    <h3>No Company Credentials Yet</h3>
+                    <p>Your company hasn't received any Company Identity credentials from the Certification Authority.</p>
+                </div>
+
+                <div class="table-container" id="credentials-table-container" style="display: none;">
+                    <table id="credentials-table">
+                        <thead>
+                            <tr>
+                                <th>Credential ID</th>
+                                <th>Company Name</th>
+                                <th>Registration Number</th>
+                                <th>Issued Date</th>
+                                <th>Expiry Date</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="credentials-tbody">
+                            <tr>
+                                <td colspan="7" style="text-align: center; padding: 20px;">Loading credentials...</td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
             </section>
 
@@ -213,6 +269,22 @@
                             Invite Another
                         </button>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Credential Details Modal -->
+    <div id="credential-details-modal" class="modal hidden">
+        <div class="modal-overlay" onclick="closeCredentialDetailsModal()"></div>
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3>📜 Company Identity Credential Details</h3>
+                <button class="modal-close" onclick="closeCredentialDetailsModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="credential-details-content">
+                    <!-- Content will be populated by JavaScript -->
                 </div>
             </div>
         </div>

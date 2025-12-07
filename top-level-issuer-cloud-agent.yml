@@ -1,0 +1,92 @@
+version: '3.8'
+
+networks:
+  identus-network:
+    external: true
+    name: identus-network
+
+services:
+  # Top-Level Issuer Cloud Agent (separate instance for issuing CA credentials)
+  top-level-issuer:
+    image: hyperledgeridentus/identus-cloud-agent:2.1.0
+    container_name: top-level-issuer-cloud-agent
+    ports:
+      - "8100:8085"  # REST API port: host 8100 -> container 8085 (Cloud Agent default)
+      - "8190:8090"  # DIDComm port: host 8190 -> container 8090 (Cloud Agent default)
+    environment:
+      # Official configuration pattern
+      ADMIN_TOKEN: admin
+      API_KEY_ENABLED: 'true'
+      API_KEY_AUTO_PROVISIONING: 'true'
+      API_KEY_AUTHENTICATE_AS_DEFAULT_USER: 'true'
+
+      # Single-tenant configuration with default wallet
+      DEFAULT_WALLET_ENABLED: 'true'
+      DEFAULT_WALLET_ID: top-level-issuer-wallet
+      DEFAULT_WALLET_PASSPHRASE: top-level-issuer-pass-2025
+
+      # Database configuration (separate database)
+      AGENT_DB_HOST: top-level-issuer-postgres
+      AGENT_DB_NAME: agent
+      AGENT_DB_PASSWORD: postgres
+      AGENT_DB_PORT: '5432'
+      AGENT_DB_USER: postgres
+
+      CONNECT_DB_HOST: top-level-issuer-postgres
+      CONNECT_DB_NAME: connect
+      CONNECT_DB_PASSWORD: postgres
+      CONNECT_DB_PORT: '5432'
+      CONNECT_DB_USER: postgres
+
+      POLLUX_DB_HOST: top-level-issuer-postgres
+      POLLUX_DB_NAME: pollux
+      POLLUX_DB_PASSWORD: postgres
+      POLLUX_DB_PORT: '5432'
+      POLLUX_DB_USER: postgres
+
+      # Local PRISM Node (shared with main CA agent)
+      PRISM_NODE_HOST: local-prism-node
+      PRISM_NODE_PORT: '50053'
+
+      # Service URLs (using IP addresses for top-level issuer)
+      REST_SERVICE_URL: http://91.99.4.54:8100
+      POLLUX_STATUS_LIST_REGISTRY_PUBLIC_URL: http://91.99.4.54:8100
+      DIDCOMM_SERVICE_URL: http://91.99.4.54:8190
+
+      # Standard configuration
+      SECRET_STORAGE_BACKEND: postgres
+    restart: always
+    networks:
+      - identus-network
+    depends_on:
+      top-level-issuer-postgres:
+        condition: service_healthy
+
+  # Dedicated PostgreSQL database for top-level issuer
+  top-level-issuer-postgres:
+    image: postgres:16.3
+    container_name: top-level-issuer-postgres
+    # ❌ SECURITY: NO EXPOSED PORTS - internal network only
+    # ports:
+    #   - "5433:5432"  # REMOVED - was exposing database to internet
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - top_level_issuer_pg_data:/var/lib/postgresql/data
+      - ./init-top-level-issuer-dbs.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./top-level-issuer-pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    command: postgres -c hba_file=/etc/postgresql/pg_hba.conf
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    networks:
+      - identus-network
+
+volumes:
+  top_level_issuer_pg_data:
+    name: top-level-issuer-postgres-data

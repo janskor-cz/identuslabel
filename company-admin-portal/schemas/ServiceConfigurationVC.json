@@ -1,0 +1,208 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://identuslabel.cz/schemas/ServiceConfiguration/v1.0",
+  "title": "ServiceConfiguration Verifiable Credential",
+  "description": "Configuration credential for employee wallet auto-provisioning with Enterprise Cloud Agent access",
+  "type": "object",
+  "properties": {
+    "@context": {
+      "type": "array",
+      "items": [
+        {
+          "const": "https://www.w3.org/2018/credentials/v1"
+        },
+        {
+          "const": "https://identuslabel.cz/schemas/v1"
+        }
+      ],
+      "minItems": 2
+    },
+    "type": {
+      "type": "array",
+      "items": [
+        {
+          "const": "VerifiableCredential"
+        },
+        {
+          "const": "ServiceConfiguration"
+        }
+      ],
+      "minItems": 2
+    },
+    "credentialSubject": {
+      "type": "object",
+      "properties": {
+        "employeeId": {
+          "type": "string",
+          "description": "Employee email or unique identifier",
+          "format": "email"
+        },
+        "employeeName": {
+          "type": "string",
+          "description": "Employee full name"
+        },
+        "department": {
+          "type": "string",
+          "description": "Department the employee belongs to",
+          "enum": ["HR", "IT", "Security"]
+        },
+        "employeePrismDid": {
+          "type": "string",
+          "description": "Employee's PRISM DID for identification and DIDComm",
+          "pattern": "^did:prism:"
+        },
+        "enterpriseAgent": {
+          "type": "object",
+          "description": "Enterprise Cloud Agent configuration",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "Base URL of the Enterprise Cloud Agent",
+              "format": "uri",
+              "default": "https://identuslabel.cz/enterprise"
+            },
+            "apiKey": {
+              "type": "string",
+              "description": "Employee-specific API key for authenticated requests",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "departmentWalletId": {
+              "type": "string",
+              "description": "UUID of the department wallet in Enterprise Cloud Agent",
+              "format": "uuid"
+            }
+          },
+          "required": ["url", "apiKey", "departmentWalletId"]
+        },
+        "mediator": {
+          "type": "object",
+          "description": "DIDComm mediator configuration",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "Mediator service URL",
+              "format": "uri",
+              "default": "https://identuslabel.cz/mediator"
+            },
+            "did": {
+              "type": "string",
+              "description": "Mediator DID",
+              "pattern": "^did:peer:"
+            }
+          },
+          "required": ["url", "did"]
+        },
+        "services": {
+          "type": "array",
+          "description": "List of company services the employee can access",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Service name"
+              },
+              "url": {
+                "type": "string",
+                "description": "Service URL",
+                "format": "uri"
+              },
+              "scope": {
+                "type": "array",
+                "description": "Permissions/scopes for this service",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": ["name", "url", "scope"]
+          }
+        },
+        "issuedDate": {
+          "type": "string",
+          "description": "When this configuration was issued",
+          "format": "date-time"
+        },
+        "expiresDate": {
+          "type": "string",
+          "description": "When this configuration expires",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "employeeId",
+        "employeeName",
+        "department",
+        "employeePrismDid",
+        "enterpriseAgent",
+        "mediator",
+        "services",
+        "issuedDate",
+        "expiresDate"
+      ]
+    },
+    "issuer": {
+      "type": "string",
+      "description": "DID of the company/department issuing this configuration",
+      "pattern": "^did:"
+    },
+    "issuanceDate": {
+      "type": "string",
+      "description": "When the credential was issued",
+      "format": "date-time"
+    },
+    "expirationDate": {
+      "type": "string",
+      "description": "When the credential expires",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "@context",
+    "type",
+    "credentialSubject",
+    "issuer",
+    "issuanceDate"
+  ],
+  "examples": [
+    {
+      "@context": [
+        "https://www.w3.org/2018/credentials/v1",
+        "https://identuslabel.cz/schemas/v1"
+      ],
+      "type": ["VerifiableCredential", "ServiceConfiguration"],
+      "credentialSubject": {
+        "employeeId": "alice@company.com",
+        "employeeName": "Alice Smith",
+        "department": "IT",
+        "employeePrismDid": "did:prism:abc123...",
+        "enterpriseAgent": {
+          "url": "https://identuslabel.cz/enterprise",
+          "apiKey": "63ca7582205fff117077caef24978d157f1c34dc8dbfcd9a3f42769d9ce7af52",
+          "departmentWalletId": "356a0ea1-883d-4985-a0d0-adc49c710fe0"
+        },
+        "mediator": {
+          "url": "https://identuslabel.cz/mediator",
+          "did": "did:peer:2.Ez6LSghwSE437wnDE1pt3X6hVDUQzSjsHzinpX3XFvMjRAm7y"
+        },
+        "services": [
+          {
+            "name": "Company Admin Portal",
+            "url": "https://identuslabel.cz/company-admin",
+            "scope": ["read:documents", "submit:requests"]
+          },
+          {
+            "name": "Secure Information Portal",
+            "url": "https://identuslabel.cz/ca/dashboard",
+            "scope": ["read:confidential"]
+          }
+        ],
+        "issuedDate": "2025-11-09T22:00:00Z",
+        "expiresDate": "2026-11-09T22:00:00Z"
+      },
+      "issuer": "did:prism:45f35c16-93cf-4fe9-8108-347d83dcee39",
+      "issuanceDate": "2025-11-09T22:00:00Z",
+      "expirationDate": "2026-11-09T22:00:00Z"
+    }
+  ]
+}

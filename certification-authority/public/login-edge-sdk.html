@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Login - Certification Authority</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .login-container {
+            max-width: 500px;
+            width: 100%;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            padding: 30px 40px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 1.8rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        
+        .main {
+            padding: 40px;
+        }
+        
+        .login-section {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .login-section h2 {
+            color: #c31432;
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+        }
+        
+        .login-section p {
+            color: #666;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+        
+        .security-info {
+            background: #f8f9fa;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .security-info h3 {
+            color: #240b36;
+            margin-bottom: 10px;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .security-info ul {
+            color: #666;
+            font-size: 0.9rem;
+            padding-left: 20px;
+            line-height: 1.6;
+        }
+        
+        .connection-selector {
+            margin: 20px 0;
+        }
+        
+        .connection-selector h3 {
+            color: #240b36;
+            margin-bottom: 10px;
+            font-size: 1rem;
+        }
+        
+        .connection-list {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+        
+        .connection-item {
+            padding: 12px 15px;
+            border-bottom: 1px solid #e0e0e0;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .connection-item:last-child {
+            border-bottom: none;
+        }
+        
+        .connection-item:hover {
+            background: #f0f8ff;
+        }
+        
+        .connection-item.selected {
+            background: #fff5f5;
+            border-color: #c31432;
+        }
+        
+        .connection-info h4 {
+            color: #240b36;
+            font-size: 0.9rem;
+            margin-bottom: 2px;
+        }
+        
+        .connection-info p {
+            color: #666;
+            font-size: 0.8rem;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        
+        .badge.active {
+            background: #28a745;
+            color: white;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin: 10px 10px 10px 0;
+            width: 100%;
+        }
+        
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(195, 20, 50, 0.3);
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .btn.secondary {
+            background: #6c757d;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        
+        .status.info {
+            background: #cce5ff;
+            border: 1px solid #b8daff;
+            color: #004085;
+        }
+        
+        .status.warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .loading::after {
+            content: '';
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #c31432;
+            border-top: 3px solid transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="header">
+            <h1>
+                <span>🔐</span>
+                <span>Secure Login</span>
+            </h1>
+            <p>Credential-Based Authentication Portal</p>
+        </div>
+        
+        <div class="main">
+            <div class="login-section">
+                <h2>🆔 RealPerson Credential Required</h2>
+                <p>Access requires verification with your RealPerson identity credential. Please select your connection and present your credential for authentication.</p>
+            </div>
+            
+            <div class="security-info">
+                <h3>🛡️ Security Requirements</h3>
+                <ul>
+                    <li>Active DIDComm connection with Certification Authority</li>
+                    <li>Valid RealPerson credential in your wallet</li>
+                    <li>Zero-knowledge proof verification</li>
+                    <li>No personal data stored on servers</li>
+                </ul>
+            </div>
+            
+            <div style="text-align: center; margin: 20px 0;">
+                <h3>Credential Verification Login</h3>
+                <p style="color: #666; margin-bottom: 20px;">
+                    Scan the QR code below with your wallet app to verify your RealPerson credential and login
+                </p>
+                <button class="btn" onclick="generateVerificationRequest()">
+                    🔓 Generate Login QR Code
+                </button>
+            </div>
+            
+            <div id="qrCodeSection" style="display: none; text-align: center; margin: 20px 0;">
+                <h4>📱 Scan with Your Wallet</h4>
+                <div id="qrCodeContainer" style="margin: 20px 0;"></div>
+                
+                <div style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 8px; border: 1px solid #e0e0e0;">
+                    <strong>📋 Or copy this verification request:</strong>
+                    <div id="verificationString" style="font-family: monospace; background: white; padding: 10px; border-radius: 4px; border: 1px solid #ddd; margin-top: 10px; word-break: break-all; font-size: 0.9rem; cursor: pointer;" 
+                         onclick="copyToClipboard(this.textContent)" title="Click to copy"></div>
+                    <button class="btn secondary" onclick="copyVerificationString()" style="margin-top: 10px; font-size: 0.9rem;">
+                        📋 Copy Request
+                    </button>
+                </div>
+                
+                <div style="margin-top: 20px;">
+                    <div class="loading" id="waitingIndicator" style="color: #666;">
+                        Waiting for credential verification...
+                    </div>
+                    <button class="btn secondary" onclick="manualStatusCheck()" style="margin-top: 10px; font-size: 0.9rem;">
+                        🔍 Manual Status Check (Debug)
+                    </button>
+                </div>
+            </div>
+            
+            <div id="loginResult"></div>
+            
+            <div style="text-align: center; margin-top: 20px; padding-top: 20px; border-top: 1px solid #e0e0e0;">
+                <a href="/" style="color: #c31432; text-decoration: none; font-size: 0.9rem;">
+                    ← Back to Main Portal
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- QR Code Library -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+
+    <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+        // SECURE SESSION MANAGEMENT (prevents race conditions)
+        let userSessionId = null;
+        let verificationRequestId = null;
+        let pollingInterval = null;
+        let verificationString = null;
+        let generateClickCount = 0; // Debug counter
+
+        // Initialize page with secure session
+        window.addEventListener('load', async () => {
+            console.log('🔐 [SECURE] Initializing secure login session...');
+            await createSecureSession();
+        });
+
+        // Create secure session to prevent authentication race conditions
+        async function createSecureSession() {
+            try {
+                const response = await fetch(apiUrl('/api/verification/start-session'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                const data = await response.json();
+                if (data.sessionId) {
+                    userSessionId = data.sessionId;
+                    console.log(`✅ [SECURE] Session created: ${userSessionId.substring(0, 8)}...`);
+                    
+                    // Update UI to show session is ready
+                    const sessionStatus = document.createElement('div');
+                    sessionStatus.innerHTML = `
+                        <div class="status success" style="margin-bottom: 20px;">
+                            <strong>🔒 Secure Session Active</strong><br>
+                            Your authentication is protected against race conditions
+                        </div>
+                    `;
+                    document.querySelector('.main').insertBefore(sessionStatus, document.querySelector('.main').firstChild);
+                } else {
+                    throw new Error('Failed to create session');
+                }
+            } catch (error) {
+                console.error('❌ Failed to create secure session:', error);
+                document.getElementById('loginResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Security Error:</strong><br>
+                        Failed to create secure session. Please refresh the page.
+                    </div>
+                `;
+            }
+        }
+
+        async function generateVerificationRequest() {
+            generateClickCount++;
+            console.log(`🖱️ [DEBUG] Generate button clicked ${generateClickCount} times`);
+            
+            try {
+                // SECURITY: Validate session exists before creating challenge
+                if (!userSessionId) {
+                    document.getElementById('loginResult').innerHTML = `
+                        <div class="status error">
+                            <strong>❌ Security Error:</strong><br>
+                            No secure session found. Please refresh the page.
+                        </div>
+                    `;
+                    return;
+                }
+
+                console.log(`🔄 [SECURE] Generate verification request #${generateClickCount} for session: ${userSessionId.substring(0, 8)}...`);
+                console.log(`🔍 [DEBUG] Current verificationString before: ${verificationString ? verificationString.substring(0, 20) + '...' : 'null'}`);
+                
+                document.getElementById('loginResult').innerHTML = `
+                    <div class="status info">
+                        <strong>🔄 Generating secure verification request...</strong><br>
+                        Creating QR code for credential verification (Session Protected)
+                    </div>
+                `;
+
+                // Create verification request WITH SESSION ID (critical security enhancement)
+                const response = await fetch(apiUrl('/api/presentations/create-invitation'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        credentialType: 'RealPerson',
+                        purpose: 'Login Authentication',
+                        sessionId: userSessionId  // SECURITY: Link challenge to session
+                    })
+                });
+
+                const data = await response.json();
+                console.log('🔄 [DEBUG] Create invitation response:', data);
+
+                if (data.success) {
+                    const oldVerificationRequestId = verificationRequestId;
+                    const oldVerificationString = verificationString;
+                    
+                    verificationRequestId = data.challengeId; // Changed from presentationId to challengeId
+                    verificationString = data.verificationString;
+                    
+                    console.log(`✅ [DEBUG] NEW Verification request created with ID: ${verificationRequestId}`);
+                    console.log(`🔍 [DEBUG] OLD verificationRequestId: ${oldVerificationRequestId}`);
+                    console.log(`🔍 [DEBUG] NEW verificationRequestId: ${verificationRequestId}`);
+                    console.log(`🔍 [DEBUG] Verification strings changed: ${oldVerificationString !== verificationString}`);
+
+                    // CRITICAL: Always update verification string first (before QR code)
+                    console.log(`📋 [DEBUG] Updating DOM with new verificationString: ${verificationString.substring(0, 30)}...`);
+                    const verificationStringElement = document.getElementById('verificationString');
+                    verificationStringElement.textContent = verificationString;
+                    console.log(`✅ [DEBUG] DOM updated, element text now: ${verificationStringElement.textContent.substring(0, 30)}...`);
+
+                    // Show QR code section
+                    document.getElementById('qrCodeSection').style.display = 'block';
+                    
+                    // Generate QR code (with error handling for library loading issues)
+                    const qrContainer = document.getElementById('qrCodeContainer');
+                    qrContainer.innerHTML = ''; // Clear previous QR code
+                    
+                    // Check if QRCode library is available
+                    if (typeof QRCode !== 'undefined') {
+                        console.log('📱 [DEBUG] QRCode library available, generating QR code...');
+                        QRCode.toCanvas(qrContainer, verificationString, {
+                            width: 256,
+                            margin: 2,
+                            color: {
+                                dark: '#c31432',
+                                light: '#ffffff'
+                            }
+                        }, function (error) {
+                            if (error) {
+                                console.error('QR Code generation failed:', error);
+                                qrContainer.innerHTML = `
+                                    <div class="status error">
+                                        <strong>❌ QR Code generation failed</strong><br>
+                                        Please use the copyable string below instead
+                                    </div>
+                                `;
+                            } else {
+                                console.log('✅ [DEBUG] QR code generated successfully');
+                            }
+                        });
+                    } else {
+                        console.error('❌ [ERROR] QRCode library not loaded');
+                        qrContainer.innerHTML = `
+                            <div class="status warning">
+                                <strong>⚠️ QR Code library not available</strong><br>
+                                Please use the copyable string below instead
+                            </div>
+                        `;
+                    }
+
+                    // Update status
+                    document.getElementById('loginResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ Verification Request Created!</strong><br>
+                            Scan the QR code or copy the string to your wallet to verify your RealPerson credential.<br>
+                            <small>System will automatically detect when you submit your credential.</small>
+                        </div>
+                    `;
+
+                    console.log('✅ [DEBUG] QR code ready - starting automatic polling...');
+                    
+                    // CRITICAL: Start automatic polling for login completion
+                    startPolling();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                console.error('❌ [DEBUG] Generate verification request failed:', error);
+                document.getElementById('loginResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to create verification request:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        function startPolling() {
+            // Clear any existing polling first
+            if (pollingInterval) {
+                console.log('🔄 [DEBUG] Clearing existing polling interval');
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+            }
+            
+            console.log(`🔄 [DEBUG] Starting polling for verification ID: ${verificationRequestId}`);
+            
+            // Test one poll immediately to make sure it works
+            performStatusCheck().then(() => {
+                console.log('🔄 [DEBUG] Initial status check completed, starting interval');
+                
+                pollingInterval = setInterval(async () => {
+                    console.log('⏰ [DEBUG] Polling interval triggered');
+                    await performStatusCheck();
+                }, 3000); // Poll every 3 seconds
+                
+                console.log('🔄 [DEBUG] Polling interval started with ID:', pollingInterval);
+            }).catch(error => {
+                console.error('❌ [DEBUG] Initial status check failed:', error);
+            });
+        }
+        
+        async function performStatusCheck() {
+            try {
+                // SECURITY: Validate session before checking status
+                if (!userSessionId || !verificationRequestId) {
+                    console.log('❌ [SECURITY] Missing session or verification ID');
+                    return false;
+                }
+
+                console.log(`🔍 [SECURE] Polling status for: ${verificationRequestId} (session: ${userSessionId.substring(0, 8)}...)`);
+                console.log(`🔍 [SECURE] URL: /api/presentations/${verificationRequestId}/status/${userSessionId}`);
+                
+                // Use SECURE session-based status endpoint
+                const response = await fetch(`/api/presentations/${verificationRequestId}/status/${userSessionId}`);
+                console.log(`🔍 [DEBUG] Response status: ${response.status}`);
+                
+                const data = await response.json();
+                console.log(`🔍 [DEBUG] Response data:`, data);
+                
+                if (data.success) {
+                    console.log(`🔍 [DEBUG] Data status: ${data.status}`);
+                    
+                    if (data.status === 'PresentationReceived') {
+                        console.log('✅ [DEBUG] Verification successful! Redirecting...');
+                        console.log('✅ [DEBUG] Presentation data:', data.presentation);
+                        
+                        if (pollingInterval) {
+                            clearInterval(pollingInterval);
+                            pollingInterval = null;
+                        }
+                        
+                        handleSuccessfulLogin(data.authenticatedUser);
+                        return true; // Success
+                    } else if (data.status === 'ProblemReportReceived') {
+                        if (pollingInterval) {
+                            clearInterval(pollingInterval);
+                            pollingInterval = null;
+                        }
+                        
+                        document.getElementById('loginResult').innerHTML = `
+                            <div class="status error">
+                                <strong>❌ Credential Verification Rejected</strong><br>
+                                The credential verification was declined or failed.
+                            </div>
+                        `;
+                        return true; // Done (failed)
+                    } else {
+                        console.log(`🔍 [DEBUG] Status: ${data.status}, continuing to poll...`);
+                        return false; // Continue polling
+                    }
+                } else {
+                    console.log(`❌ [DEBUG] Request failed: ${data.error}`);
+                    return false; // Continue polling
+                }
+            } catch (error) {
+                console.error('❌ [DEBUG] Polling error:', error);
+                return false; // Continue polling
+            }
+        }
+
+        function copyVerificationString() {
+            if (verificationString) {
+                copyToClipboard(verificationString);
+            }
+        }
+
+        async function manualStatusCheck() {
+            // SECURITY: Validate both session and verification ID
+            if (!userSessionId) {
+                alert('No secure session available. Please refresh the page.');
+                return;
+            }
+            
+            if (!verificationRequestId) {
+                alert('No verification request ID available. Please generate a QR code first.');
+                return;
+            }
+            
+            try {
+                console.log(`🔍 [SECURE] Manual status check for session: ${userSessionId.substring(0, 8)}...`);
+                console.log('🔍 [DEBUG] Checking status for:', verificationRequestId);
+                
+                // Use SECURE session-based endpoint
+                const response = await fetch(`/api/presentations/${verificationRequestId}/status/${userSessionId}`);
+                console.log('🔍 [DEBUG] Manual check response status:', response.status);
+                
+                const data = await response.json();
+                console.log('🔍 [DEBUG] Manual check response data:', data);
+                
+                if (data.success && data.status === 'PresentationReceived') {
+                    console.log('✅ [DEBUG] Manual check found successful verification!');
+                    handleSuccessfulLogin(data.presentation);
+                } else {
+                    alert(`Status: ${data.status || 'Unknown'}\nSuccess: ${data.success}`);
+                }
+            } catch (error) {
+                console.error('❌ [DEBUG] Manual check error:', error);
+                alert(`Manual check failed: ${error.message}`);
+            }
+        }
+
+        function copyToClipboard(text) {
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText(text).then(() => {
+                    // Show temporary success message
+                    const originalText = document.getElementById('verificationString').textContent;
+                    document.getElementById('verificationString').textContent = '✅ Copied to clipboard!';
+                    document.getElementById('verificationString').style.color = '#28a745';
+                    
+                    setTimeout(() => {
+                        document.getElementById('verificationString').textContent = originalText;
+                        document.getElementById('verificationString').style.color = '#333';
+                    }, 2000);
+                }).catch(err => {
+                    console.error('Failed to copy:', err);
+                    alert('Failed to copy to clipboard. Please select and copy manually.');
+                });
+            } else {
+                // Fallback for older browsers
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                alert('✅ Copied to clipboard!');
+            }
+        }
+
+        async function handleSuccessfulLogin(authenticatedUser) {
+            // Store authentication data in session storage
+            const authData = {
+                verificationMethod: 'QR-Code',
+                presentationId: verificationRequestId,
+                personalInfo: authenticatedUser, // Use authenticatedUser directly instead of presentationData.claims
+                loginTime: new Date().toISOString()
+            };
+            
+            // Register user-connection mapping for future credential delivery
+            try {
+                await fetch(apiUrl('/api/auth/register-connection'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        userUniqueId: authenticatedUser.uniqueId,
+                        connectionId: 'unknown', // connectionId not available in authenticatedUser
+                        holderInfo: authenticatedUser,
+                        presentationId: verificationRequestId  // Pass the presentation ID to look up the DIDComm connection
+                    })
+                });
+                console.log('✅ Connection mapping registered for user');
+            } catch (error) {
+                console.error('⚠️ Failed to register connection mapping:', error);
+                // Continue anyway - non-critical
+            }
+            
+            sessionStorage.setItem('ca_auth', JSON.stringify(authData));
+            console.log('🔍 [DEBUG] Stored auth data in session:', authData);
+            console.log('🔍 [DEBUG] Personal info being stored:', authData.personalInfo);
+            
+            document.getElementById('loginResult').innerHTML = `
+                <div class="status success">
+                    <strong>🎉 Login Successful!</strong><br>
+                    Your RealPerson credential has been verified.<br>
+                    Redirecting to secure portal...
+                </div>
+            `;
+            
+            // Redirect to main portal after 2 seconds
+            setTimeout(() => {
+                window.location.href = '/portal';
+            }, 2000);
+        }
+
+        // Cleanup polling on page unload
+        window.addEventListener('beforeunload', () => {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+            }
+        });
+    </script>
+</body>
+</html>

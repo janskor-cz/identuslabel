@@ -154,6 +154,7 @@ const app = {
         // Load data
         await this.loadCompanyInfo();
         await this.loadEmployees();
+        await loadCompanyCredentials(); // Load credentials after authentication
     },
 
     /**
@@ -409,41 +410,143 @@ const app = {
     },
 
     /**
-     * Issue credential to employee
+     * Issue Service Configuration credential to employee
      */
     async issueCredential(connectionId, employeeName) {
-        if (!confirm(`Issue credential to ${employeeName}?`)) {
-            return;
-        }
+        console.log('[SERVICE-CONFIG] Issuing Service Configuration VC to:', connectionId);
 
-        console.log('[CREDENTIAL] Issuing credential to:', connectionId);
+        // Extract name, role, department from label
+        // Format: "Name (Role) - Department" or "Name - Department" or just "Name"
+        let name = employeeName;
+        let role = '';
+        let department = '';
 
-        try {
-            const response = await fetch('/company-admin/api/company/issue-credential', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    connectionId,
-                    credentialType: 'EmployeeCredential',
-                    claims: {
-                        organization: this.currentCompany.displayName,
-                        credentialType: 'EmployeeCredential',
-                        issuedAt: new Date().toISOString()
-                    }
-                })
-            });
-
-            const data = await response.json();
-
-            if (data.success) {
-                this.showNotification(`Credential issued to ${employeeName}`, 'success');
-            } else {
-                this.showNotification(data.error || 'Failed to issue credential', 'error');
+        // Parse label: "Jan Novak (Accountant) - Finance"
+        const roleMatch = employeeName.match(/^([^(]+)\(([^)]+)\)(.*)$/);
+        if (roleMatch) {
+            name = roleMatch[1].trim();
+            role = roleMatch[2].trim();
+            const remainder = roleMatch[3].trim();
+            if (remainder.startsWith('- ')) {
+                department = remainder.substring(2).trim();
             }
-        } catch (error) {
-            console.error('[CREDENTIAL] Error:', error);
-            this.showNotification('Failed to issue credential', 'error');
+        } else {
+            // Try "Name - Department" format
+            const deptMatch = employeeName.match(/^([^-]+)-(.+)$/);
+            if (deptMatch) {
+                name = deptMatch[1].trim();
+                department = deptMatch[2].trim();
+            }
         }
+
+        // Show modal to collect email and confirm details
+        const modal = document.createElement('div');
+        modal.className = 'modal fade show';
+        modal.style.display = 'block';
+        modal.style.backgroundColor = 'rgba(0,0,0,0.5)';
+        modal.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">📋 Issue Service Configuration VC</h5>
+                        <button type="button" class="close" onclick="this.closest('.modal').remove()">
+                            <span>&times;</span>
+                        </button>
+                    </div>
+                    <div class="modal-body">
+                        <p><strong>Connection:</strong> ${connectionId}</p>
+                        <hr>
+                        <div class="form-group">
+                            <label>Employee Name *</label>
+                            <input type="text" class="form-control" id="employeeName" value="${name}" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Email Address *</label>
+                            <input type="email" class="form-control" id="employeeEmail" placeholder="employee@techcorp.com" required>
+                            <small class="form-text text-muted">Required for Enterprise Cloud Agent access</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Department *</label>
+                            <select class="form-control" id="employeeDept" required>
+                                <option value="">-- Select Department --</option>
+                                <option value="HR" ${department === 'HR' ? 'selected' : ''}>HR</option>
+                                <option value="IT" ${department === 'IT' ? 'selected' : ''}>IT</option>
+                                <option value="Security" ${department === 'Security' ? 'selected' : ''}>Security</option>
+                            </select>
+                            <small class="form-text text-muted">Determines Enterprise Cloud Agent access level</small>
+                        </div>
+                        <div class="alert alert-info">
+                            <strong>ℹ️ Service Configuration VC</strong><br>
+                            This credential will grant the employee access to:
+                            <ul class="mb-0 mt-2">
+                                <li>Enterprise Cloud Agent (port 8300)</li>
+                                <li>Department-specific API access</li>
+                                <li>Internal company services</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" onclick="this.closest('.modal').remove()">Cancel</button>
+                        <button type="button" class="btn btn-primary" id="confirmIssueBtn">Issue Credential</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        // Handle confirm button
+        document.getElementById('confirmIssueBtn').onclick = async () => {
+            const employeeNameInput = document.getElementById('employeeName').value.trim();
+            const employeeEmail = document.getElementById('employeeEmail').value.trim();
+            const employeeDept = document.getElementById('employeeDept').value;
+
+            if (!employeeNameInput || !employeeEmail || !employeeDept) {
+                this.showNotification('Name, Email, and Department are required', 'error');
+                return;
+            }
+
+            // Disable button and show loading
+            const btn = document.getElementById('confirmIssueBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Issuing...';
+
+            try {
+                const response = await fetch(`/company-admin/api/company/connections/${connectionId}/auto-issue-config`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',  // Include session cookie
+                    body: JSON.stringify({
+                        name: employeeNameInput,
+                        email: employeeEmail,
+                        department: employeeDept
+                    })
+                });
+
+                const data = await response.json();
+
+                console.log('[SERVICE-CONFIG] Server response:', data);
+
+                if (data.success) {
+                    this.showNotification(`✅ Service Configuration VC issued to ${employeeNameInput}`, 'success');
+                    console.log('[SERVICE-CONFIG] Credential issued:', data.data);
+                    modal.remove();
+
+                    // Reload employees to show updated state
+                    await this.loadEmployees();
+                } else {
+                    console.error('[SERVICE-CONFIG] Error response:', data);
+                    this.showNotification(data.error || 'Failed to issue credential', 'error');
+                    btn.disabled = false;
+                    btn.innerHTML = 'Issue Credential';
+                }
+            } catch (error) {
+                console.error('[SERVICE-CONFIG] Error:', error);
+                this.showNotification('Failed to issue credential: ' + error.message, 'error');
+                btn.disabled = false;
+                btn.innerHTML = 'Issue Credential';
+            }
+        };
     },
 
     /**
@@ -457,15 +560,28 @@ const app = {
         console.log('[EMPLOYEE] Removing:', connectionId);
 
         try {
-            const response = await fetch(`/api/company/connections/${connectionId}`, {
+            const response = await fetch(`/company-admin/api/company/connections/${connectionId}`, {
                 method: 'DELETE'
             });
 
             const data = await response.json();
 
             if (data.success) {
+                console.log(`✅ [EMPLOYEE] Successfully deleted connection: ${connectionId}`);
+                console.log(`📊 [EMPLOYEE] Employees before deletion: ${this.employees.length}`);
+
+                // ✅ FIX: Direct array filtering instead of database refresh
+                // This prevents the deleted connection from reappearing (state-database desync fix)
+                this.employees = this.employees.filter(e => e.connectionId !== connectionId);
+
+                console.log(`📊 [EMPLOYEE] Employees after deletion: ${this.employees.length}`);
+
+                // Update UI directly from filtered array
+                this.renderEmployees();
+                this.updateEmployeeStats();
+
                 this.showNotification(`Removed ${employeeName}`, 'success');
-                await this.loadEmployees();
+                console.log('✅ [EMPLOYEE] UI updated successfully with direct state mutation');
             } else {
                 this.showNotification(data.error || 'Failed to remove employee', 'error');
             }
@@ -499,3 +615,354 @@ const app = {
 document.addEventListener('DOMContentLoaded', () => {
     app.init();
 });
+
+// ============================================================================
+// COMPANY CREDENTIALS FUNCTIONALITY
+// ============================================================================
+
+// Global wrapper for showNotification (credentials functions need this)
+function showNotification(message, type = 'info') {
+    if (typeof app !== 'undefined' && typeof app.showNotification === 'function') {
+        app.showNotification(message, type);
+    } else {
+        console.log(`[${type.toUpperCase()}] ${message}`);
+    }
+}
+
+// Global variables for credentials
+let currentCredentialFilter = 'all';
+let allCredentials = [];
+
+/**
+ * Load company credentials from API
+ */
+async function loadCompanyCredentials(filter = 'all') {
+    try {
+        const response = await fetch(`/company-admin/api/company/credentials?filter=${filter}`, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.success) {
+            allCredentials = data.credentials;
+            displayCompanyCredentials(data.credentials, data.stats);
+
+            // Show the credentials section
+            const credentialsSection = document.getElementById('company-credentials-section');
+            if (credentialsSection) {
+                credentialsSection.style.display = 'block';
+            }
+        } else {
+            console.error('Failed to load credentials:', data.error);
+            showNotification('Failed to load credentials', 'error');
+        }
+    } catch (error) {
+        console.error('Error loading credentials:', error);
+        showNotification('Error loading credentials: ' + error.message, 'error');
+    }
+}
+
+/**
+ * Display company credentials in table
+ */
+function displayCompanyCredentials(credentials, stats) {
+    const tbody = document.getElementById('credentials-tbody');
+    const emptyState = document.getElementById('credentials-empty-state');
+    const tableContainer = document.getElementById('credentials-table-container');
+
+    // Update filter counts
+    if (stats) {
+        document.getElementById('count-all').textContent = stats.total;
+        document.getElementById('count-active').textContent = stats.active;
+        document.getElementById('count-revoked').textContent = stats.revoked;
+        document.getElementById('count-expired').textContent = stats.expired;
+    }
+
+    if (!credentials || credentials.length === 0) {
+        // Show empty state
+        if (emptyState) emptyState.style.display = 'block';
+        if (tableContainer) tableContainer.style.display = 'none';
+        return;
+    }
+
+    // Hide empty state, show table
+    if (emptyState) emptyState.style.display = 'none';
+    if (tableContainer) tableContainer.style.display = 'block';
+
+    // Build table rows
+    const rows = credentials.map(cred => {
+        const statusBadge = getStatusBadgeHTML(cred.status);
+        const shortCredId = cred.claims.credentialId || cred.recordId.substring(0, 8);
+
+        return `
+            <tr>
+                <td><code>${escapeHtml(shortCredId)}</code></td>
+                <td>${escapeHtml(cred.claims.companyName || 'N/A')}</td>
+                <td>${escapeHtml(cred.claims.registrationNumber || 'N/A')}</td>
+                <td>${formatDate(cred.issuedDate)}</td>
+                <td>${formatDate(cred.expiryDate)}</td>
+                <td>${statusBadge}</td>
+                <td>
+                    <button class="btn btn-sm btn-secondary" onclick="showCredentialDetails('${cred.recordId}')">
+                        View Details
+                    </button>
+                    <button class="btn btn-sm btn-secondary" onclick="copyCredentialJWT('${cred.recordId}')">
+                        Copy JWT
+                    </button>
+                </td>
+            </tr>
+        `;
+    }).join('');
+
+    tbody.innerHTML = rows;
+}
+
+/**
+ * Filter credentials by status
+ */
+function filterCredentials(filter) {
+    currentCredentialFilter = filter;
+
+    // Update active filter button
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if (btn.getAttribute('data-filter') === filter) {
+            btn.classList.add('active');
+        }
+    });
+
+    // Reload with filter
+    loadCompanyCredentials(filter);
+}
+
+/**
+ * Show credential details in modal
+ */
+function showCredentialDetails(recordId) {
+    const credential = allCredentials.find(c => c.recordId === recordId);
+
+    if (!credential) {
+        showNotification('Credential not found', 'error');
+        return;
+    }
+
+    const modal = document.getElementById('credential-details-modal');
+    const content = document.getElementById('credential-details-content');
+
+    const detailsHTML = `
+        <div class="credential-details">
+            <div class="detail-section">
+                <h4>Basic Information</h4>
+                <div class="detail-grid">
+                    <div class="detail-item">
+                        <label>Credential ID</label>
+                        <div class="detail-value"><code>${escapeHtml(credential.claims.credentialId || 'N/A')}</code></div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Record ID</label>
+                        <div class="detail-value"><code>${escapeHtml(credential.recordId)}</code></div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Status</label>
+                        <div class="detail-value">${getStatusBadgeHTML(credential.status)}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Protocol State</label>
+                        <div class="detail-value"><code>${escapeHtml(credential.protocolState)}</code></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="detail-section">
+                <h4>Company Information</h4>
+                <div class="detail-grid">
+                    <div class="detail-item">
+                        <label>Company Name</label>
+                        <div class="detail-value">${escapeHtml(credential.claims.companyName || 'N/A')}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Display Name</label>
+                        <div class="detail-value">${escapeHtml(credential.claims.companyDisplayName || 'N/A')}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Registration Number</label>
+                        <div class="detail-value">${escapeHtml(credential.claims.registrationNumber || 'N/A')}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Jurisdiction</label>
+                        <div class="detail-value">${escapeHtml(credential.claims.jurisdiction || 'N/A')}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Industry</label>
+                        <div class="detail-value">${escapeHtml(credential.claims.industry || 'N/A')}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Website</label>
+                        <div class="detail-value">
+                            ${credential.claims.website ? `<a href="${escapeHtml(credential.claims.website)}" target="_blank">${escapeHtml(credential.claims.website)}</a>` : 'N/A'}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="detail-section">
+                <h4>Dates & Validity</h4>
+                <div class="detail-grid">
+                    <div class="detail-item">
+                        <label>Issued Date</label>
+                        <div class="detail-value">${formatDate(credential.issuedDate)}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Established Date</label>
+                        <div class="detail-value">${formatDate(credential.claims.establishedDate)}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Expiry Date</label>
+                        <div class="detail-value">${formatDate(credential.expiryDate)}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Authorized to Issue</label>
+                        <div class="detail-value">${credential.claims.authorizedToIssueCredentials ? '✅ Yes' : '❌ No'}</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="detail-section">
+                <h4>DID Information</h4>
+                <div class="detail-grid">
+                    <div class="detail-item full-width">
+                        <label>Issuer DID</label>
+                        <div class="detail-value"><code>${escapeHtml(credential.issuer || 'N/A')}</code></div>
+                    </div>
+                    <div class="detail-item full-width">
+                        <label>Subject DID</label>
+                        <div class="detail-value"><code>${escapeHtml(credential.subject || 'N/A')}</code></div>
+                    </div>
+                </div>
+            </div>
+
+            ${credential.credentialStatus ? `
+            <div class="detail-section">
+                <h4>Revocation Information</h4>
+                <div class="detail-grid">
+                    <div class="detail-item">
+                        <label>Status Purpose</label>
+                        <div class="detail-value">${escapeHtml(credential.credentialStatus.statusPurpose)}</div>
+                    </div>
+                    <div class="detail-item">
+                        <label>Status List Index</label>
+                        <div class="detail-value">${escapeHtml(credential.credentialStatus.statusListIndex)}</div>
+                    </div>
+                    <div class="detail-item full-width">
+                        <label>Status List Credential</label>
+                        <div class="detail-value"><code style="font-size: 0.9em;">${escapeHtml(credential.credentialStatus.statusListCredential)}</code></div>
+                    </div>
+                </div>
+            </div>
+            ` : ''}
+
+            <div class="detail-section">
+                <h4>JWT Credential</h4>
+                <textarea id="jwt-credential-text" readonly style="width: 100%; height: 120px; font-family: monospace; font-size: 0.85em; padding: 8px;">${escapeHtml(credential.jwtCredential)}</textarea>
+                <button class="btn btn-secondary" onclick="copyToClipboard('jwt-credential-text')">
+                    Copy JWT to Clipboard
+                </button>
+            </div>
+        </div>
+    `;
+
+    content.innerHTML = detailsHTML;
+    modal.classList.remove('hidden');
+}
+
+/**
+ * Close credential details modal
+ */
+function closeCredentialDetailsModal() {
+    const modal = document.getElementById('credential-details-modal');
+    modal.classList.add('hidden');
+}
+
+/**
+ * Copy credential JWT to clipboard
+ */
+function copyCredentialJWT(recordId) {
+    const credential = allCredentials.find(c => c.recordId === recordId);
+
+    if (!credential || !credential.jwtCredential) {
+        showNotification('Credential JWT not found', 'error');
+        return;
+    }
+
+    copyToClipboardDirect(credential.jwtCredential);
+    showNotification('JWT credential copied to clipboard', 'success');
+}
+
+/**
+ * Copy text to clipboard (direct method)
+ */
+function copyToClipboardDirect(text) {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+}
+
+/**
+ * Copy text from textarea to clipboard
+ */
+function copyToClipboard(elementId) {
+    const element = document.getElementById(elementId);
+    if (element) {
+        element.select();
+        document.execCommand('copy');
+        showNotification('Copied to clipboard', 'success');
+    }
+}
+
+/**
+ * Get status badge HTML
+ */
+function getStatusBadgeHTML(status) {
+    const badges = {
+        'active': '<span class="status-badge status-active">Active</span>',
+        'revoked': '<span class="status-badge status-revoked">Revoked</span>',
+        'expired': '<span class="status-badge status-expired">Expired</span>'
+    };
+    return badges[status] || `<span class="status-badge">${escapeHtml(status)}</span>`;
+}
+
+/**
+ * Format date for display
+ */
+function formatDate(dateString) {
+    if (!dateString) return 'N/A';
+    try {
+        const date = new Date(dateString);
+        return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    } catch (e) {
+        return dateString;
+    }
+}
+
+/**
+ * Escape HTML to prevent XSS
+ */
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}

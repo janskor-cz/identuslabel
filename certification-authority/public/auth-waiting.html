@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verifying Credentials - CA Portal</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .waiting-card {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+        .spinner-border {
+            width: 4rem;
+            height: 4rem;
+            border-width: 0.4rem;
+        }
+        .status-item {
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            transition: all 0.3s ease;
+        }
+        .status-pending {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+        }
+        .status-complete {
+            background: #d1e7dd;
+            border-left: 4px solid #198754;
+        }
+        .status-waiting {
+            background: #cfe2ff;
+            border-left: 4px solid #0d6efd;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .icon-check {
+            color: #198754;
+            font-size: 1.5rem;
+        }
+        .icon-clock {
+            color: #0d6efd;
+            font-size: 1.5rem;
+        }
+        .icon-hourglass {
+            color: #ffc107;
+            font-size: 1.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="waiting-card">
+        <div class="text-center mb-4">
+            <h2>🔐 Verifying Your Credentials</h2>
+            <p class="text-muted">Please complete the verification process in your wallet</p>
+        </div>
+
+        <div id="status-container">
+            <!-- Status items will be inserted here -->
+        </div>
+
+        <div class="text-center mt-4">
+            <div class="spinner-border text-primary" role="status" id="loading-spinner">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="text-muted mt-3" id="status-message">Checking credential status...</p>
+        </div>
+
+        <div class="alert alert-info mt-4" role="alert">
+            <strong>💡 What's happening?</strong><br>
+            We've sent verification requests to your wallet. Please check your wallet application and submit the requested credentials.
+        </div>
+
+        <div id="error-container" class="alert alert-danger mt-4 d-none" role="alert">
+            <strong>⚠️ Error:</strong> <span id="error-message"></span>
+        </div>
+
+        <div class="text-center mt-3" id="redirect-message">
+            <small class="text-muted">This page will show extended features once verification is complete</small>
+        </div>
+    </div>
+
+    <!-- Extended Access Section (hidden by default, shown when clearance detected) -->
+    <div id="extended-access-section" class="waiting-card mt-4 d-none">
+        <div class="alert alert-success mb-4" role="alert" style="border-left: 5px solid #28a745;">
+            <div class="d-flex align-items-center">
+                <span style="font-size: 2rem; margin-right: 15px;">✅</span>
+                <div>
+                    <h5 class="alert-heading mb-1">Extended Access Unlocked</h5>
+                    <p class="mb-0">You now have access to additional security features</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="security-section" style="background: #f8f9fa; padding: 25px; border-radius: 15px; border: 2px solid #28a745;">
+            <div class="d-flex align-items-center mb-3">
+                <span style="font-size: 2.5rem; margin-right: 15px;">🔒</span>
+                <div>
+                    <h4 class="mb-1">Security Clearance Management</h4>
+                    <p class="text-muted mb-0">Issue and manage security clearance credentials</p>
+                </div>
+            </div>
+            <a href="/security-clearance.html" class="btn btn-lg btn-success w-100" style="border-radius: 10px; font-weight: 600;">
+                <i class="fas fa-plus-circle me-2"></i>Issue New Security Clearance VC
+            </a>
+        </div>
+    </div>
+
+    <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const sessionId = urlParams.get('sessionId');
+        const connectionId = urlParams.get('connectionId');
+
+        let pollInterval;
+        let identityVerified = false;
+        let clearanceChecked = false;
+        let clearancePresent = false;
+
+        if (!sessionId) {
+            showError('Invalid session. Please try logging in again.');
+        } else {
+            updateStatus('identity', 'complete', 'Identity Verified', 'Your identity has been verified successfully');
+            updateStatus('clearance', 'waiting', 'Checking Security Clearance', 'Waiting for security clearance credential...');
+            startPolling();
+        }
+
+        function updateStatus(id, state, title, description) {
+            const container = document.getElementById('status-container');
+            let statusItem = document.getElementById(`status-${id}`);
+
+            if (!statusItem) {
+                statusItem = document.createElement('div');
+                statusItem.id = `status-${id}`;
+                statusItem.className = 'status-item';
+                container.appendChild(statusItem);
+            }
+
+            let icon = '';
+            let stateClass = '';
+
+            switch(state) {
+                case 'complete':
+                    icon = '<span class="icon-check">✓</span>';
+                    stateClass = 'status-complete';
+                    break;
+                case 'waiting':
+                    icon = '<span class="icon-clock">⏳</span>';
+                    stateClass = 'status-waiting';
+                    break;
+                case 'pending':
+                    icon = '<span class="icon-hourglass">⏱️</span>';
+                    stateClass = 'status-pending';
+                    break;
+            }
+
+            statusItem.className = `status-item ${stateClass}`;
+            statusItem.innerHTML = `
+                <div class="d-flex align-items-center">
+                    <div class="me-3">${icon}</div>
+                    <div class="flex-grow-1">
+                        <strong>${title}</strong>
+                        <div class="small text-muted">${description}</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function checkClearanceStatus() {
+            try {
+                const response = await fetch(`/api/session/clearance-level?sessionId=${sessionId}`);
+                const data = await response.json();
+
+                if (data.success) {
+                    if (data.clearanceLevel && data.clearanceLevel !== 'NONE') {
+                        // User has clearance! Show extended features instead of redirecting
+                        clearancePresent = true;
+                        clearanceChecked = true;
+                        updateStatus('clearance', 'complete', 'Security Clearance Verified',
+                            `Clearance Level: ${data.clearanceLevel}`);
+
+                        // Hide loading elements
+                        document.getElementById('loading-spinner').classList.add('d-none');
+                        document.getElementById('status-message').textContent =
+                            'Verification complete!';
+
+                        // Show extended access section with animation
+                        stopPolling();
+                        setTimeout(() => {
+                            const extendedSection = document.getElementById('extended-access-section');
+                            extendedSection.classList.remove('d-none');
+                            extendedSection.style.opacity = '0';
+                            extendedSection.style.transform = 'translateY(20px)';
+
+                            // Smooth fade-in animation
+                            setTimeout(() => {
+                                extendedSection.style.transition = 'all 0.5s ease-in-out';
+                                extendedSection.style.opacity = '1';
+                                extendedSection.style.transform = 'translateY(0)';
+                            }, 50);
+                        }, 500);
+                    } else {
+                        // Still waiting or user doesn't have clearance
+                        if (!clearanceChecked) {
+                            clearanceChecked = true;
+                            // Give user 30 seconds to submit clearance VC
+                            setTimeout(() => {
+                                if (!clearancePresent) {
+                                    // Timeout - user did not provide clearance
+                                    updateStatus('clearance', 'pending', 'No Security Clearance',
+                                        'Continue with basic access');
+                                    document.getElementById('loading-spinner').classList.add('d-none');
+                                    document.getElementById('status-message').textContent =
+                                        'Basic access active. Submit security clearance to unlock extended features.';
+
+                                    stopPolling();
+                                }
+                            }, 30000); // 30 second timeout
+                        }
+                    }
+                } else {
+                    throw new Error(data.error || 'Failed to check clearance status');
+                }
+            } catch (error) {
+                console.error('Error checking clearance:', error);
+                document.getElementById('status-message').textContent = 'Checking clearance status...';
+            }
+        }
+
+        function startPolling() {
+            // Check immediately
+            checkClearanceStatus();
+
+            // Then poll every 2 seconds
+            pollInterval = setInterval(checkClearanceStatus, 2000);
+        }
+
+        function stopPolling() {
+            if (pollInterval) {
+                clearInterval(pollInterval);
+            }
+            document.getElementById('loading-spinner').classList.add('d-none');
+        }
+
+        function showError(message) {
+            document.getElementById('error-message').textContent = message;
+            document.getElementById('error-container').classList.remove('d-none');
+            document.getElementById('loading-spinner').classList.add('d-none');
+            stopPolling();
+        }
+    </script>
+</body>
+</html>

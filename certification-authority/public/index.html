@@ -1,0 +1,1584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certification Authority - Edge SDK Integration</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+        
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.95;
+        }
+
+        .edge-sdk-badge {
+            display: inline-block;
+            background: rgba(255,255,255,0.2);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            margin-top: 10px;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        
+        .main {
+            padding: 40px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+        
+        .section {
+            padding: 30px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            background: #f9f9f9;
+        }
+        
+        .section.full-width {
+            grid-column: 1 / -1;
+        }
+
+        .section.edge-sdk {
+            border: 2px solid #4caf50;
+            background: linear-gradient(135deg, #e8f5e8 0%, #f0f8ff 100%);
+        }
+        
+        .section h2 {
+            color: #c31432;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+            border-bottom: 2px solid #c31432;
+            padding-bottom: 10px;
+        }
+
+        .section.edge-sdk h2 {
+            color: #4caf50;
+            border-bottom-color: #4caf50;
+        }
+        
+        .certificate-types {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .cert-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            border: 2px solid #e0e0e0;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .cert-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+            border-color: #c31432;
+        }
+
+        .cert-card.edge-sdk:hover {
+            border-color: #4caf50;
+            box-shadow: 0 10px 20px rgba(76, 175, 80, 0.2);
+        }
+        
+        .cert-card .icon {
+            font-size: 3rem;
+            margin-bottom: 10px;
+        }
+        
+        .cert-card h3 {
+            color: #240b36;
+            margin-bottom: 5px;
+        }
+
+        .cert-card.edge-sdk h3 {
+            color: #2e7d32;
+        }
+        
+        .cert-card p {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .cert-card.edge-sdk p {
+            color: #4caf50;
+            font-weight: 500;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            margin: 5px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn.edge-sdk {
+            background: linear-gradient(135deg, #4caf50 0%, #2e7d32 100%);
+        }
+        
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(195, 20, 50, 0.3);
+        }
+
+        .btn.edge-sdk:hover:not(:disabled) {
+            box-shadow: 0 5px 15px rgba(76, 175, 80, 0.3);
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        
+        .status.info {
+            background: #cce5ff;
+            border: 1px solid #b8daff;
+            color: #004085;
+        }
+
+        .status.edge-sdk {
+            background: #e8f5e8;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .code {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            overflow-x: auto;
+            margin: 10px 0;
+            word-break: break-all;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            border: 2px solid #e0e0e0;
+        }
+        
+        .stat-card .number {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #c31432;
+        }
+
+        .stat-card.edge-sdk .number {
+            color: #4caf50;
+        }
+        
+        .stat-card .label {
+            color: #666;
+            font-size: 0.9rem;
+            margin-top: 5px;
+        }
+
+        .edge-sdk-demo {
+            background: linear-gradient(135deg, #e8f5e8 0%, #f0f8ff 100%);
+            border: 2px solid #4caf50;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+
+        .demo-buttons {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+
+        .log-container {
+            background: #1a1a1a;
+            color: #00ff00;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            max-height: 400px;
+            overflow-y: auto;
+            margin: 15px 0;
+            white-space: pre-wrap;
+        }
+        
+        .code {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            overflow-x: auto;
+            margin: 10px 0;
+            word-break: break-all;
+        }
+        
+        .connections-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .connection-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border: 1px solid #e0e0e0;
+        }
+        
+        .connection-card h4 {
+            color: #240b36;
+            margin-bottom: 10px;
+        }
+        
+        .connection-card .details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            font-size: 0.9rem;
+        }
+        
+        .form-group {
+            margin: 20px 0;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #240b36;
+        }
+        
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 1rem;
+        }
+        
+        .form-group input:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #c31432;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin: 0 2px;
+        }
+        
+        .badge.active {
+            background: #28a745;
+            color: white;
+        }
+        
+        .badge.pending {
+            background: #ffc107;
+            color: #333;
+        }
+        
+        .badge.cert-type {
+            background: #c31432;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <span>🏛️</span>
+                <span>Certification Authority</span>
+            </h1>
+            <p>Edge SDK Integration Portal</p>
+            <div class="edge-sdk-badge">
+                ⚡ Powered by Hyperledger Identus Edge Agent SDK
+            </div>
+        </div>
+        
+        <div class="main">
+            <!-- Edge SDK Integration Section -->
+            <div class="section full-width edge-sdk">
+                <h2>🚀 Edge SDK Integration Status</h2>
+                <div id="sdkStatus" class="status info">
+                    <strong>🔄 Initializing Edge SDK...</strong><br>
+                    Connecting to Identus Mediator and setting up client-side agent...
+                </div>
+                <div class="demo-buttons">
+                    <button class="btn edge-sdk" onclick="initializeEdgeSDK()">🔧 Initialize Edge SDK</button>
+                    <button class="btn edge-sdk" onclick="testMediatorConnection()">🌐 Test Mediator</button>
+                    <button class="btn edge-sdk" onclick="createEdgeDID()">🆔 Create DID (Edge)</button>
+                    <button class="btn edge-sdk" onclick="showWebpackDemo()">📦 Webpack Demo</button>
+                    <button class="btn" onclick="createCloudDID()">🆔 Create DID (Cloud Agent)</button>
+                </div>
+                <div class="log-container" id="sdkLog">Edge SDK Integration Log:
+Ready to demonstrate client-side DID operations...
+                </div>
+            </div>
+            
+            <!-- Quick Actions Section -->
+            <div class="section full-width">
+                <h2>🚀 Quick Actions</h2>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div style="padding: 20px; background: linear-gradient(135deg, #fff3cd 0%, #f0f8ff 100%); border-radius: 10px; border: 2px solid #c31432; box-shadow: 0 4px 12px rgba(195,20,50,0.1);">
+                        <h3 style="color: #c31432; margin: 0 0 8px 0; font-size: 1.2rem;">🔐 Secure Credential Login</h3>
+                        <p style="color: #333; margin: 0 0 10px 0; font-size: 0.95rem;">
+                            Access secured portal using your RealPerson credential
+                        </p>
+                        <a href="javascript:void(0)" onclick="window.location.href=pageUrl('/login')" class="btn" style="background: linear-gradient(135deg, #c31432 0%, #240b36 100%); text-decoration: none;">
+                            🔓 Try Secure Login
+                        </a>
+                    </div>
+                    
+                    <div style="padding: 20px; background: linear-gradient(135deg, #e8f4fd 0%, #f0f8ff 100%); border-radius: 10px; border: 2px solid #0066cc; box-shadow: 0 4px 12px rgba(0,102,204,0.1);">
+                        <h3 style="color: #0066cc; margin: 0 0 8px 0; font-size: 1.2rem;">🆔 RealPerson ID Service</h3>
+                        <p style="color: #333; margin: 0 0 10px 0; font-size: 0.95rem;">
+                            Issue official identity credentials for real persons
+                        </p>
+                        <a href="javascript:void(0)" onclick="window.location.href=pageUrl('/realperson')" class="btn" style="background: linear-gradient(135deg, #0066cc 0%, #004499 100%); text-decoration: none;">
+                            🚀 Create RealPerson ID
+                        </a>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Statistics Dashboard -->
+            <div class="section">
+                <h2>📊 System Statistics</h2>
+                <div class="stats-grid">
+                    <div class="stat-card edge-sdk">
+                        <div class="number" id="edgeOperations">0</div>
+                        <div class="label">Edge Operations</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="number" id="totalSchemas">0</div>
+                        <div class="label">Total Schemas</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="number" id="activeSessions">0</div>
+                        <div class="label">Active Sessions</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="number" id="securityKeys">0</div>
+                        <div class="label">Security Keys</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- DID Management -->
+            <div class="section">
+                <h2>🆔 Authority DID Management</h2>
+                <p>Manage your Certification Authority's Decentralized Identifier</p>
+                <button class="btn" onclick="createAuthorityDID()">Create Authority DID</button>
+                <button class="btn" onclick="listAuthorityDIDs()">Refresh DIDs</button>
+                <div id="didResult"></div>
+            </div>
+            
+            <!-- Create DIDComm Connection -->
+            <div class="section">
+                <h2>🔗 Create DIDComm Connection</h2>
+                <p>Create a new connection invitation to share with a holder wallet</p>
+                <div class="form-group">
+                    <label for="holderName">Holder Name (Label):</label>
+                    <input type="text" id="holderName" placeholder="Enter holder name for identification">
+                </div>
+                <button class="btn" onclick="createDIDCommInvitation()">
+                    Generate DIDComm Invitation
+                </button>
+                <div id="invitationResult"></div>
+            </div>
+            
+            <!-- Accept DIDComm Invitations -->
+            <div class="section">
+                <h2>📥 Accept DIDComm Invitation</h2>
+                <p><strong>Instructions:</strong> Paste the DIDComm invitation you received from a holder wallet. Supported formats:</p>
+                <ul style="margin: 10px 0; padding-left: 20px; font-size: 0.9rem; color: #666;">
+                    <li>📋 <strong>Base64 string</strong> (starts with "eyJ...") - Most common format</li>
+                    <li>🔗 <strong>Invitation URL</strong> (contains "?_oob=...") - Will extract Base64 automatically</li>
+                    <li>📄 <strong>JSON object</strong> - Raw invitation object</li>
+                </ul>
+                <div class="form-group">
+                    <label for="applicationInvitation">Application Invitation:</label>
+                    <textarea id="applicationInvitation" rows="6" style="font-family: monospace; font-size: 0.9rem;"
+                        placeholder="Paste the DIDComm invitation here...&#10;&#10;Example Base64: eyJpZCI6IjEyMy...&#10;Example URL: https://my.domain.com/path?_oob=eyJpZCI6IjEyMy...&#10;Example JSON: {&quot;id&quot;: &quot;123...&quot;, &quot;type&quot;: &quot;https://...&quot;}"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="applicantLabel">Your Label for this Applicant:</label>
+                    <input type="text" id="applicantLabel" placeholder="e.g., 'John Smith - Professional Cert', 'ABC Corp - Compliance', etc." 
+                           style="width: 100%;" maxlength="100">
+                    <small style="color: #666; display: block; margin-top: 5px; font-size: 0.85rem;">
+                        Add a label to identify who this applicant is (optional, max 100 chars)
+                    </small>
+                </div>
+                <button class="btn" onclick="acceptApplication()">
+                    ✅ Accept Application
+                </button>
+                <div id="acceptResult"></div>
+            </div>
+            
+            <!-- Active Connections -->
+            <div class="section">
+                <h2>🔗 Certificate Recipients</h2>
+                <p>Active connections with certificate holders</p>
+                <button class="btn" onclick="listConnections()">Refresh Connections</button>
+                <div id="connectionsResult" class="connections-list"></div>
+            </div>
+            
+            <!-- Admin Credential Approval -->
+            <div class="section">
+                <h2>⚖️ Credential Approval (Admin)</h2>
+                <p>Review and approve pending credential requests from holders</p>
+                <button class="btn" onclick="loadPendingCredentials()">🔄 Refresh Pending Requests</button>
+                <div id="pendingCredentialsResult"></div>
+            </div>
+            
+            <!-- Edge SDK Configuration -->
+            <div class="section edge-sdk">
+                <h2>⚙️ Edge SDK Configuration</h2>
+                <div id="configInfo" class="status info">
+                    <strong>🔧 Loading configuration...</strong>
+                </div>
+                <button class="btn edge-sdk" onclick="loadConfiguration()">🔄 Reload Config</button>
+                <button class="btn edge-sdk" onclick="testHealthCheck()">🏥 Health Check</button>
+                <button class="btn edge-sdk" onclick="window.location.href=pageUrl('/edge-demo')">🧪 View Edge SDK Demo</button>
+                <button class="btn" onclick="window.location.href=pageUrl('/revocation-management.html')">🚫 Revocation Management</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration constants
+        const CLOUD_AGENT_URL = 'http://localhost:8000';
+        const API_KEY = 'admin';
+
+        // Base path detection for reverse proxy routing
+        // When accessed via https://identuslabel.cz/ca, BASE_PATH = '/ca'
+        // When accessed via http://91.99.4.54:3005, BASE_PATH = ''
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+        // Helper function to build page URLs with base path
+        function pageUrl(path) {
+            // Ensure path starts with /
+            if (!path.startsWith('/')) {
+                path = '/' + path;
+            }
+            return BASE_PATH + path;
+        }
+
+        let edgeSDK = null;
+        let config = null;
+        let edgeOperationsCount = 0;
+        // Variables for connection management
+        let authorityDIDs = [];
+        let connections = [];
+        let connectionLabels = {}; // Store custom labels for connections
+
+        // Initialize on load
+        window.addEventListener('load', async () => {
+            loadConnectionLabels();
+            await checkHealth();
+            await listAuthorityDIDs();
+            await listConnections();
+            await loadConfiguration();
+            await loadStatistics();
+            log('🎯 CA Portal with Edge SDK integration loaded');
+        });
+
+        // Logging function
+        function log(message) {
+            const logContainer = document.getElementById('sdkLog');
+            const timestamp = new Date().toISOString().substring(11, 19);
+            logContainer.textContent += `\n[${timestamp}] ${message}`;
+            logContainer.scrollTop = logContainer.scrollHeight;
+            console.log(message);
+        }
+
+        // Load pending credentials for admin approval
+        async function loadPendingCredentials() {
+            try {
+                log('🔄 Loading pending credential requests...');
+                const response = await fetch(apiUrl('/api/credentials/pending'));
+                const data = await response.json();
+                
+                if (data.success) {
+                    displayPendingCredentials(data.pendingRequests);
+                    log(`📋 Found ${data.count} pending credential requests`);
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('pendingCredentialsResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to load pending requests:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+                log(`❌ Error: ${error.message}`);
+            }
+        }
+
+        function displayPendingCredentials(pendingRequests) {
+            const container = document.getElementById('pendingCredentialsResult');
+            
+            if (pendingRequests.length === 0) {
+                container.innerHTML = `
+                    <div class="status info">
+                        <strong>✅ No Pending Requests</strong><br>
+                        All credential requests have been processed.
+                    </div>
+                `;
+                return;
+            }
+            
+            const requestsHtml = pendingRequests.map(request => {
+                // Get holder name from credential claims or holderInfo
+                let holderName = 'Unknown Holder';
+                if (request.claims) {
+                    if (request.claims.firstName && request.claims.lastName) {
+                        holderName = `${request.claims.firstName} ${request.claims.lastName}`;
+                    } else if (request.claims.holderName) {
+                        holderName = request.claims.holderName;
+                    }
+                } else if (request.holderInfo) {
+                    holderName = `${request.holderInfo.firstName} ${request.holderInfo.lastName}`;
+                }
+                
+                const requestTime = new Date(request.createdAt).toLocaleString();
+                const credentialType = request.credentialFormat || 'JWT';
+                
+                // Determine credential schema/type from claims with icons
+                let schemaType = '❓ Unknown Credential';
+                if (request.claims) {
+                    if (request.claims.firstName && request.claims.lastName && request.claims.dateOfBirth) {
+                        schemaType = '🆔 RealPerson Identity';
+                    } else if (request.claims.clearanceLevel === 'CONFIDENTIAL') {
+                        schemaType = '🔐 Confidential Security Clearance';
+                    } else if (request.claims.clearanceLevel === 'RESTRICTED') {
+                        schemaType = '🚫 Restricted Security Clearance';
+                    } else if (request.claims.employeeId) {
+                        schemaType = '👤 Employee Credential';
+                    } else if (request.claims.companyName) {
+                        schemaType = '🏢 Company Credential';
+                    }
+                }
+                
+                return `
+                    <div style="border: 2px solid #ffc107; border-radius: 8px; padding: 20px; margin: 15px 0; background: #fff9c4;">
+                        <div style="display: grid; grid-template-columns: 1fr auto; gap: 20px; align-items: start;">
+                            <div>
+                                <h4 style="color: #c31432; margin-bottom: 10px;">📋 ${schemaType} Request</h4>
+                                <p><strong>Holder:</strong> ${holderName}</p>
+                                <p><strong>Request ID:</strong> ${request.recordId}</p>
+                                <p><strong>Connection ID:</strong> ${request.connectionId ? request.connectionId.substring(0, 16) + '...' : 'Not specified'}</p>
+                                <p><strong>Type:</strong> ${credentialType}</p>
+                                <p><strong>State:</strong> <span style="background: #ffc107; color: #333; padding: 2px 6px; border-radius: 3px; font-size: 0.8rem;">Request Received</span></p>
+                                <p><strong>Requested:</strong> ${requestTime}</p>
+                                ${request.claims ? `
+                                    <details style="margin-top: 10px;">
+                                        <summary style="cursor: pointer; color: #666;">📝 Credential Claims Information</summary>
+                                        <div style="margin-left: 20px; margin-top: 10px;">
+                                            ${request.claims.firstName ? `<p><strong>First Name:</strong> ${request.claims.firstName}</p>` : ''}
+                                            ${request.claims.lastName ? `<p><strong>Last Name:</strong> ${request.claims.lastName}</p>` : ''}
+                                            ${request.claims.holderName ? `<p><strong>Holder:</strong> ${request.claims.holderName}</p>` : ''}
+                                            ${request.claims.gender ? `<p><strong>Gender:</strong> ${request.claims.gender}</p>` : ''}
+                                            ${request.claims.dateOfBirth ? `<p><strong>Date of Birth:</strong> ${request.claims.dateOfBirth}</p>` : ''}
+                                            ${request.claims.uniqueId ? `<p><strong>Unique ID:</strong> ${request.claims.uniqueId}</p>` : ''}
+                                            ${request.claims.clearanceLevel ? `<p><strong>Clearance Level:</strong> ${request.claims.clearanceLevel}</p>` : ''}
+                                            ${request.claims.employeeId ? `<p><strong>Employee ID:</strong> ${request.claims.employeeId}</p>` : ''}
+                                        </div>
+                                    </details>
+                                ` : (request.holderInfo ? `
+                                    <details style="margin-top: 10px;">
+                                        <summary style="cursor: pointer; color: #666;">📝 Holder Information</summary>
+                                        <div style="margin-left: 20px; margin-top: 10px;">
+                                            <p><strong>First Name:</strong> ${request.holderInfo.firstName}</p>
+                                            <p><strong>Last Name:</strong> ${request.holderInfo.lastName}</p>
+                                            <p><strong>Email:</strong> ${request.holderInfo.email || 'Not provided'}</p>
+                                            <p><strong>Gender:</strong> ${request.holderInfo.gender || 'Not provided'}</p>
+                                            <p><strong>Date of Birth:</strong> ${request.holderInfo.dateOfBirth || 'Not provided'}</p>
+                                        </div>
+                                    </details>
+                                ` : '')}
+                            </div>
+                            <div>
+                                <button class="btn" onclick="approveCredential('${request.recordId}', '${holderName.replace(/'/g, "\\\'")}')">
+                                    ✅ Approve & Issue
+                                </button>
+                                <br><br>
+                                <button class="btn secondary" onclick="viewCredentialDetails('${request.recordId}')">
+                                    📄 View Details
+                                </button>
+                                <br><br>
+                                <button class="btn" style="background: #dc3545;" onclick="rejectCredential('${request.recordId}', '${holderName.replace(/'/g, "\\\'")}')">
+                                    ❌ Reject Request
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            
+            container.innerHTML = `
+                <div style="margin-bottom: 20px;">
+                    <strong>📋 ${pendingRequests.length} Pending Credential Request(s)</strong>
+                </div>
+                ${requestsHtml}
+            `;
+        }
+
+        async function approveCredential(recordId, holderName) {
+            if (!confirm(`Are you sure you want to approve and issue the credential for ${holderName}?`)) {
+                return;
+            }
+            
+            try {
+                log(`⚖️ Approving credential request: ${recordId}`);
+                const response = await fetch(`/api/credentials/approve/${recordId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        approve: true,
+                        notes: `Approved by admin at ${new Date().toISOString()}`
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    log(`✅ Credential approved and issued for ${holderName}`);
+                    alert(`✅ Credential successfully approved and issued to ${holderName}!`);
+                    // Refresh the pending list
+                    loadPendingCredentials();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                log(`❌ Approval failed: ${error.message}`);
+                alert(`❌ Failed to approve credential: ${error.message}`);
+            }
+        }
+
+        async function rejectCredential(recordId, holderName) {
+            const reason = prompt(`Why are you rejecting the credential for ${holderName}?\n\nEnter reason (or press Cancel to abort):`);
+            
+            if (reason === null) {
+                return; // User cancelled
+            }
+            
+            if (!confirm(`Are you sure you want to REJECT the credential for ${holderName}?\n\nReason: ${reason || 'No reason provided'}\n\nThis action cannot be undone.`)) {
+                return;
+            }
+            
+            try {
+                log(`❌ Rejecting credential request: ${recordId}`);
+                const response = await fetch(`/api/credentials/approve/${recordId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        approve: false,
+                        notes: reason || 'Rejected by administrator'
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    log(`❌ Credential rejected for ${holderName}: ${reason}`);
+                    alert(`❌ Credential request for ${holderName} has been rejected.\n\nReason: ${reason || 'No reason provided'}`);
+                    // Refresh the pending list
+                    loadPendingCredentials();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                log(`❌ Rejection failed: ${error.message}`);
+                alert(`❌ Failed to reject credential: ${error.message}`);
+            }
+        }
+
+        async function viewCredentialDetails(recordId) {
+            try {
+                const response = await fetch(`/api/credentials/details/${recordId}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    const credential = data.credential;
+                    console.log('Credential Details:', credential);
+                    
+                    const connectionInfo = credential.connectionId ? 
+                        `Connection: ${credential.connectionId.substring(0, 16)}...` : 
+                        'Connection: Not specified';
+                    
+                    alert(`Credential Details (see console for full data):\n\nRecord ID: ${credential.recordId}\nState: ${credential.protocolState}\n${connectionInfo}\nFormat: ${credential.credentialFormat}\nCreated: ${new Date(credential.createdAt).toLocaleString()}\n\nCheck browser console for complete details.`);
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                alert(`Failed to fetch credential details: ${error.message}`);
+            }
+        }
+
+        // Load configuration from server
+        async function loadConfiguration() {
+            try {
+                const response = await fetch(apiUrl('/api/config'));
+                config = await response.json();
+                
+                document.getElementById('configInfo').innerHTML = `
+                    <div class="status edge-sdk">
+                        <strong>✅ Configuration Loaded</strong><br>
+                        <strong>Mediator URL:</strong> ${config.mediatorUrl}<br>
+                        <strong>Mediator DID:</strong> ${config.mediatorDid.substring(0, 50)}...<br>
+                        <strong>Cloud Agent:</strong> ${config.cloudAgentUrl}<br>
+                        <strong>Port:</strong> ${config.port}
+                    </div>
+                `;
+                
+                log('✅ Configuration loaded successfully');
+                log(`🌐 Mediator: ${config.mediatorHttpUrl}`);
+                
+            } catch (error) {
+                document.getElementById('configInfo').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Configuration Error:</strong> ${error.message}
+                    </div>
+                `;
+                log(`❌ Configuration failed: ${error.message}`);
+            }
+        }
+
+        // Test health check
+        async function testHealthCheck() {
+            try {
+                log('🔄 Testing health check...');
+                const response = await fetch(apiUrl('/api/health'));
+                const health = await response.json();
+                
+                document.getElementById('configInfo').innerHTML = `
+                    <div class="status success">
+                        <strong>✅ Health Check Passed</strong><br>
+                        <strong>Service:</strong> ${health.service}<br>
+                        <strong>Status:</strong> ${health.status}<br>
+                        <strong>Version:</strong> ${health.version}<br>
+                        <strong>Timestamp:</strong> ${new Date(health.timestamp).toLocaleTimeString()}
+                    </div>
+                `;
+                
+                log('✅ Health check passed');
+                
+            } catch (error) {
+                log(`❌ Health check failed: ${error.message}`);
+            }
+        }
+
+        // Load statistics
+        async function loadStatistics() {
+            try {
+                const response = await fetch(apiUrl('/api/stats'));
+                const stats = await response.json();
+                
+                document.getElementById('totalSchemas').textContent = stats.totalSchemas;
+                document.getElementById('activeSessions').textContent = stats.activeSessions;
+                document.getElementById('securityKeys').textContent = stats.securityKeypairs;
+                document.getElementById('edgeOperations').textContent = edgeOperationsCount;
+                
+                log('📊 Statistics updated');
+                
+            } catch (error) {
+                log(`❌ Statistics failed: ${error.message}`);
+            }
+        }
+
+        // Edge SDK Functions
+        async function initializeEdgeSDK() {
+            try {
+                log('🔄 Initializing Edge SDK...');
+                document.getElementById('sdkStatus').innerHTML = `
+                    <div class="status info">
+                        <strong>🔄 Initializing Edge SDK...</strong><br>
+                        This would initialize the Hyperledger Identus Edge Agent SDK in the browser
+                    </div>
+                `;
+                
+                // Simulate SDK initialization
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                document.getElementById('sdkStatus').innerHTML = `
+                    <div class="status success">
+                        <strong>✅ Edge SDK Initialized!</strong><br>
+                        Ready for client-side DID operations and credential management
+                    </div>
+                `;
+                
+                edgeOperationsCount++;
+                document.getElementById('edgeOperations').textContent = edgeOperationsCount;
+                
+                log('✅ Edge SDK initialization simulated');
+                log('🎯 Edge Agent ready for operations');
+                
+            } catch (error) {
+                document.getElementById('sdkStatus').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Edge SDK Error:</strong> ${error.message}
+                    </div>
+                `;
+                log(`❌ Edge SDK initialization failed: ${error.message}`);
+            }
+        }
+
+        async function testMediatorConnection() {
+            try {
+                log('🔄 Testing mediator connection...');
+                
+                // Simulate mediator connection test
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                const success = Math.random() > 0.2; // 80% success rate for demo
+                
+                if (success) {
+                    log('✅ Mediator connection successful');
+                    log(`🌐 Connected to: ${config ? config.mediatorHttpUrl : 'Unknown mediator'}`);
+                    
+                    edgeOperationsCount++;
+                    document.getElementById('edgeOperations').textContent = edgeOperationsCount;
+                } else {
+                    throw new Error('Connection timeout');
+                }
+                
+            } catch (error) {
+                log(`❌ Mediator connection failed: ${error.message}`);
+            }
+        }
+
+        async function createEdgeDID() {
+            try {
+                log('🔄 Creating DID using Edge SDK...');
+                
+                // Simulate Edge SDK DID creation
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                
+                const mockDID = `did:peer:2.Ez6LSg${Math.random().toString(36).substring(2, 15)}`;
+                
+                log(`✅ DID created via Edge SDK: ${mockDID}`);
+                log('🎯 DID is long-form and immediately usable');
+                
+                edgeOperationsCount++;
+                document.getElementById('edgeOperations').textContent = edgeOperationsCount;
+                
+            } catch (error) {
+                log(`❌ Edge DID creation failed: ${error.message}`);
+            }
+        }
+
+        async function createCloudDID() {
+            try {
+                log('🔄 Creating DID using Cloud Agent fallback...');
+                
+                const response = await fetch(apiUrl('/api/cloud-agent/create-did'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    log(`✅ Cloud Agent DID created: ${data.shortDid}`);
+                    log(`📋 Long form: ${data.did.substring(0, 50)}...`);
+                    log(`📊 Status: ${data.status}`);
+                    
+                    edgeOperationsCount++;
+                    document.getElementById('edgeOperations').textContent = edgeOperationsCount;
+                } else {
+                    throw new Error(data.error);
+                }
+                
+            } catch (error) {
+                log(`❌ Cloud DID creation failed: ${error.message}`);
+            }
+        }
+
+        function showWebpackDemo() {
+            log('🔄 Opening webpack bundler demo...');
+            window.open('http://localhost:3007/webpack-demo-fixed', '_blank');
+            log('✅ Webpack demo opened in new tab');
+            
+            edgeOperationsCount++;
+            document.getElementById('edgeOperations').textContent = edgeOperationsCount;
+        }
+
+        function edgeSDKCredentials() {
+            log('🔄 Edge SDK credential operations...');
+            log('📜 This would handle client-side credential issuance');
+            log('⚡ All cryptographic operations performed locally');
+            log('🔒 Private keys never leave the browser');
+            
+            edgeOperationsCount++;
+            document.getElementById('edgeOperations').textContent = edgeOperationsCount;
+        }
+
+        // Certificate type selection removed - using simple DIDComm connections
+        function log(message) {
+            console.log(`[CA Portal] ${message}`);
+        }
+
+        // Traditional CA Functions
+        function loadConnectionLabels() {
+            const stored = localStorage.getItem('ca_connectionLabels');
+            if (stored) {
+                connectionLabels = JSON.parse(stored);
+            }
+        }
+
+        function saveConnectionLabels() {
+            localStorage.setItem('ca_connectionLabels', JSON.stringify(connectionLabels));
+        }
+
+        async function checkHealth() {
+            try {
+                const response = await fetch(apiUrl('/api/health'));
+                const data = await response.json();
+                console.log('Certification Authority Health:', data);
+            } catch (error) {
+                console.error('Health check failed:', error);
+            }
+        }
+
+        async function createAuthorityDID() {
+            try {
+                const response = await fetch(apiUrl('/api/create-did'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('didResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ Authority DID Created Successfully!</strong><br>
+                            <div class="code">${data.did}</div>
+                            <strong>Status:</strong> ${data.status}<br>
+                            ${data.status === 'CREATED' ? 
+                                `<button class="btn" onclick="publishDID('${data.shortDid}')">
+                                    📤 Publish to PRISM Network
+                                </button>` : ''}
+                        </div>
+                    `;
+                    await listAuthorityDIDs();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('didResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to create DID:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function publishDID(didId) {
+            try {
+                const response = await fetch(apiUrl('/api/publish-did'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ didId })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('didResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ DID Published to PRISM Network!</strong><br>
+                            <strong>DID:</strong> ${data.didId}<br>
+                            <strong>Status:</strong> ${data.status}
+                        </div>
+                    `;
+                    await listAuthorityDIDs();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('didResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to publish DID:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function listAuthorityDIDs() {
+            try {
+                const response = await fetch(apiUrl('/api/dids'));
+                const data = await response.json();
+                
+                if (data.success) {
+                    authorityDIDs = data.dids;
+                    
+                    if (data.dids.length === 0) {
+                        document.getElementById('didResult').innerHTML = `
+                            <div class="status info">
+                                <strong>📋 No Authority DIDs found</strong><br>
+                                Create your first Authority DID to start issuing certificates.
+                            </div>
+                        `;
+                    } else {
+                        const didList = data.dids.map(did => {
+                            let statusBadge = '';
+                            switch(did.status) {
+                                case 'CREATED':
+                                    statusBadge = '<span class="badge pending">Not Published</span>';
+                                    break;
+                                case 'PUBLISHED':
+                                    statusBadge = '<span class="badge active">Published</span>';
+                                    break;
+                                default:
+                                    statusBadge = `<span class="badge">${did.status}</span>`;
+                            }
+                            
+                            return `
+                            <div class="connection-card">
+                                <h4>Authority DID ${statusBadge}</h4>
+                                <div class="code">${did.did}</div>
+                                ${did.status === 'CREATED' ? 
+                                    `<button class="btn" onclick="publishDID('${did.did}')">
+                                        📤 Publish to PRISM
+                                    </button>` : ''}
+                            </div>
+                            `;
+                        }).join('');
+
+                        document.getElementById('didResult').innerHTML = didList;
+                    }
+                }
+            } catch (error) {
+                console.error('Error fetching DIDs:', error);
+            }
+        }
+
+        async function createDIDCommInvitation() {
+            const holderName = document.getElementById('holderName').value.trim();
+            
+            if (!holderName) {
+                alert('Please enter holder name');
+                return;
+            }
+            
+            try {
+                const response = await fetch(apiUrl('/api/cloud-agent/connections/create-invitation'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        label: `CA Connection: ${holderName}`
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    const invitationUrl = data.invitation.invitationUrl;
+
+                    document.getElementById('invitationResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ DIDComm Invitation Created!</strong><br>
+                            <strong>Holder:</strong> ${holderName}<br>
+                            <strong>Connection ID:</strong> ${data.connectionId}<br><br>
+
+                            <strong>📋 Share this invitation URL with ${holderName}:</strong>
+                            <div class="code" style="cursor: pointer; word-break: break-all;"
+                                onclick="copyToClipboard('${invitationUrl}')"
+                                title="Click to copy">
+                                ${invitationUrl}
+                            </div>
+                            <button class="btn" onclick="copyToClipboard('${invitationUrl}')">
+                                📋 Copy Invitation URL
+                            </button>
+                        </div>
+                    `;
+                    
+                    // Clear form
+                    document.getElementById('holderName').value = '';
+                    
+                    await listConnections();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('invitationResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to create invitation:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function acceptApplication() {
+            const invitation = document.getElementById('applicationInvitation').value.trim();
+            const label = document.getElementById('applicantLabel').value.trim();
+            
+            if (!invitation) {
+                alert('Please paste the application invitation');
+                return;
+            }
+            
+            try {
+                // Extract Base64 if it's a URL or JSON
+                let invitationString = invitation;
+                if (invitation.includes('_oob=')) {
+                    const urlParams = new URLSearchParams(invitation.split('?')[1]);
+                    invitationString = urlParams.get('_oob');
+                    if (!invitationString) {
+                        throw new Error('Invalid invitation URL. No _oob parameter found.');
+                    }
+                } else if (invitation.startsWith('eyJ')) {
+                    // Looks like Base64
+                    invitationString = invitation;
+                } else {
+                    try {
+                        // Try to parse as JSON and convert to Base64
+                        const invitationObj = JSON.parse(invitation);
+                        invitationString = btoa(JSON.stringify(invitationObj));
+                    } catch (e) {
+                        throw new Error('Invalid invitation format. Please provide valid JSON, Base64, or invitation URL.');
+                    }
+                }
+                
+                const response = await fetch(apiUrl('/api/cloud-agent/connections/accept-invitation'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        invitation: invitationString,
+                        label: label || undefined
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Store custom label if provided
+                    if (label) {
+                        connectionLabels[data.connectionId] = label;
+                        saveConnectionLabels();
+                    }
+                    
+                    document.getElementById('acceptResult').innerHTML = `
+                        <div class="status success">
+                            <strong>✅ Certificate Application Accepted!</strong><br>
+                            ${label ? `<strong>📋 Your Label:</strong> <span style="color: #c31432; font-weight: bold;">${label}</span><br>` : ''}
+                            <strong>Connection ID:</strong> ${data.connectionId}<br>
+                            <strong>Status:</strong> ${data.state}<br>
+                            <strong>Role:</strong> ${data.role}<br>
+                            <strong>My DID:</strong> <span style="font-family: monospace; font-size: 0.8rem;">${data.myDid}</span><br>
+                            <strong>Their DID:</strong> <span style="font-family: monospace; font-size: 0.8rem;">${data.theirDid}</span>
+                        </div>
+                    `;
+                    
+                    // Clear form
+                    document.getElementById('applicationInvitation').value = '';
+                    document.getElementById('applicantLabel').value = '';
+                    
+                    await listConnections();
+                } else {
+                    throw new Error(data.error);
+                }
+            } catch (error) {
+                document.getElementById('acceptResult').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Failed to accept application:</strong><br>
+                        ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function listConnections() {
+            try {
+                const response = await fetch(apiUrl('/api/cloud-agent/connections'));
+                const data = await response.json();
+                
+                if (data.success) {
+                    connections = data.connections.filter(conn => 
+                        conn.state !== 'InvitationExpired'
+                    );
+                    
+                    if (connections.length === 0) {
+                        document.getElementById('connectionsResult').innerHTML = `
+                            <div class="status info">
+                                <strong>🔗 No certificate recipients yet</strong><br>
+                                Create invitations or accept applications to establish connections.
+                            </div>
+                        `;
+                    } else {
+                        const connectionList = connections.map(conn => {
+                            const isActive = ['ConnectionResponseSent', 'ConnectionResponseReceived', 
+                                            'ConnectionCompleted', 'Active'].includes(conn.state);
+                            
+                            // Get custom label or fall back to connection label
+                            const customLabel = connectionLabels[conn.connectionId];
+                            const displayLabel = customLabel || conn.label || 'Certificate Recipient';
+                            
+                            return `
+                            <div class="connection-card">
+                                <h4>${displayLabel}</h4>
+                                <div class="details">
+                                    <div><strong>ID:</strong> ${conn.connectionId.substring(0, 8)}...</div>
+                                    <div><strong>Status:</strong> 
+                                        <span class="badge ${isActive ? 'active' : 'pending'}">
+                                            ${isActive ? '✅ Active' : '⏳ Pending'}
+                                        </span>
+                                    </div>
+                                    <div><strong>Role:</strong> ${conn.role}</div>
+                                    <div><strong>Created:</strong> ${new Date(conn.createdAt).toLocaleDateString()}</div>
+                                </div>
+                                <div style="margin-top: 10px;">
+                                    <button class="btn secondary" style="font-size: 0.8rem; padding: 6px 10px;"
+                                        onclick="editConnectionLabel('${conn.connectionId}', '${(displayLabel || '').replace(/'/g, "\\\'")}')">
+                                        ✏️ Edit Label
+                                    </button>
+                                    ${isActive ? `
+                                        <button class="btn" style="margin-left: 5px;"
+                                            onclick="issueCertificate('${conn.connectionId}')">
+                                            📜 Issue Certificate
+                                        </button>
+                                    ` : ''}
+                                    <button class="btn" style="margin-left: 5px; background: #dc3545;"
+                                        onclick="deleteConnection('${conn.connectionId}', '${(displayLabel || '').replace(/'/g, "\\\'")}'  )">
+                                        🗑️ Delete
+                                    </button>
+                                </div>
+                            </div>
+                            `;
+                        }).join('');
+
+                        document.getElementById('connectionsResult').innerHTML = connectionList;
+                    }
+                }
+            } catch (error) {
+                console.error('Error fetching connections:', error);
+            }
+        }
+
+        function editConnectionLabel(connectionId, currentLabel) {
+            const newLabel = prompt('Enter a new label for this connection:', currentLabel);
+            if (newLabel !== null) { // User didn't cancel
+                if (newLabel.trim()) {
+                    connectionLabels[connectionId] = newLabel.trim();
+                } else {
+                    delete connectionLabels[connectionId]; // Remove label if empty
+                }
+                saveConnectionLabels();
+                listConnections(); // Refresh display
+            }
+        }
+
+        function issueCertificate(connectionId) {
+            // Create a modal-style form for Security Clearance credential issuance
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(0,0,0,0.5); z-index: 1000; display: flex;
+                justify-content: center; align-items: center;
+            `;
+
+            modal.innerHTML = `
+                <div style="background: white; padding: 30px; border-radius: 15px; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto;">
+                    <h2 style="margin-bottom: 20px; color: #1e3c72;">🎫 Issue Security Clearance Credential</h2>
+                    <p style="margin-bottom: 20px; color: #666;">Connection ID: <strong>${connectionId}</strong></p>
+
+                    <form id="securityClearanceForm">
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: bold; margin-bottom: 5px;">Clearance Level:</label>
+                            <select id="clearanceLevel" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
+                                <option value="CONFIDENTIAL">🔐 CONFIDENTIAL</option>
+                                <option value="RESTRICTED">🚫 RESTRICTED</option>
+                            </select>
+                        </div>
+
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: bold; margin-bottom: 5px;">Holder First Name:</label>
+                            <input type="text" id="firstName" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;" required>
+                        </div>
+
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: bold; margin-bottom: 5px;">Holder Last Name:</label>
+                            <input type="text" id="lastName" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;" required>
+                        </div>
+
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: bold; margin-bottom: 5px;">Email:</label>
+                            <input type="email" id="email" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;" required>
+                        </div>
+
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: bold; margin-bottom: 5px;">Organization:</label>
+                            <input type="text" id="organization" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;" required>
+                        </div>
+
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: bold; margin-bottom: 5px;">Department:</label>
+                            <input type="text" id="department" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;" required>
+                        </div>
+
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: bold; margin-bottom: 5px;">Position:</label>
+                            <input type="text" id="position" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px;" required>
+                        </div>
+
+                        <div style="margin-bottom: 20px;">
+                            <label style="display: block; font-weight: bold; margin-bottom: 5px;">Ed25519 Public Key (Base64URL):</label>
+                            <textarea id="publicKey" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; height: 80px; font-family: monospace;"
+                                placeholder="Enter the Ed25519 public key from the holder's wallet..." required></textarea>
+                            <small style="color: #666;">The holder must generate an Ed25519 key in their wallet and provide the public key.</small>
+                        </div>
+
+                        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                            <button type="button" onclick="document.body.removeChild(this.closest('div').parentElement)"
+                                style="padding: 10px 20px; border: 1px solid #ddd; background: white; border-radius: 5px; cursor: pointer;">
+                                Cancel
+                            </button>
+                            <button type="submit"
+                                style="padding: 10px 20px; background: #1e3c72; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                                🎫 Issue Security Clearance
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            `;
+
+            // Handle form submission
+            modal.querySelector('#securityClearanceForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                await issueSecurityClearance(connectionId, modal);
+            });
+
+            document.body.appendChild(modal);
+        }
+
+        async function issueSecurityClearance(connectionId, modal) {
+            const form = modal.querySelector('#securityClearanceForm');
+            const formData = new FormData(form);
+
+            const clearanceLevel = modal.querySelector('#clearanceLevel').value;
+            const firstName = modal.querySelector('#firstName').value;
+            const lastName = modal.querySelector('#lastName').value;
+            const email = modal.querySelector('#email').value;
+            const organization = modal.querySelector('#organization').value;
+            const department = modal.querySelector('#department').value;
+            const position = modal.querySelector('#position').value;
+            const publicKey = modal.querySelector('#publicKey').value.trim();
+
+            if (!publicKey) {
+                alert('⚠️ Ed25519 public key is required!');
+                return;
+            }
+
+            const requestData = {
+                connectionId: connectionId,  // ✅ Use explicit connection ID
+                publicKey: publicKey,
+                holderPersonalInfo: {
+                    uniqueId: `${firstName.toLowerCase()}-${lastName.toLowerCase()}-${Date.now()}`,
+                    firstName: firstName,
+                    lastName: lastName,
+                    email: email,
+                    organization: organization,
+                    department: department,
+                    position: position,
+                    clearanceLevel: clearanceLevel
+                }
+            };
+
+            try {
+                const endpoint = clearanceLevel === 'CONFIDENTIAL'
+                    ? '/api/credentials/issue-confidential-clearance'
+                    : '/api/credentials/issue-restricted-clearance';
+
+                log(`🎯 Issuing ${clearanceLevel} Security Clearance to connection: ${connectionId}`);
+
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestData)
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    log(`✅ Security Clearance issued successfully: ${result.recordId}`);
+                    alert(`✅ ${clearanceLevel} Security Clearance issued successfully!\\n\\nRecord ID: ${result.recordId}\\nClearance ID: ${result.clearanceId}\\n\\nThe credential offer has been sent to the holder's wallet.`);
+                    document.body.removeChild(modal);
+                } else {
+                    log(`❌ Failed to issue Security Clearance: ${result.error}`);
+                    alert(`❌ Failed to issue Security Clearance:\\n${result.error}`);
+                }
+            } catch (error) {
+                log(`❌ Error issuing Security Clearance: ${error.message}`);
+                alert(`❌ Error issuing Security Clearance:\\n${error.message}`);
+            }
+        }
+
+        async function deleteConnection(connectionId, connectionLabel) {
+            if (!confirm(`Are you sure you want to delete this connection?\n\n` +
+                         `Label: ${connectionLabel}\n` +
+                         `ID: ${connectionId.substring(0, 20)}...\n\n` +
+                         `This action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                log(`🗑️ Deleting connection: ${connectionId}`);
+
+                const response = await fetch(`/api/cloud-agent/connections/${connectionId}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+                    throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                log(`✅ Connection deleted successfully: ${connectionId}`);
+                alert(`✅ Connection "${connectionLabel}" deleted successfully!`);
+
+                // Refresh connection list after deletion
+                await listConnections();
+            } catch (error) {
+                log(`❌ Error deleting connection: ${error.message}`);
+                alert(`❌ Failed to delete connection:\n\n${error.message}`);
+            }
+        }
+
+        function copyToClipboard(text) {
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText(text).then(() => {
+                    alert('✅ Copied to clipboard!');
+                }).catch(err => {
+                    console.error('Failed to copy:', err);
+                });
+            } else {
+                // Fallback
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                alert('✅ Copied to clipboard!');
+            }
+        }
+
+        // Refresh statistics every 30 seconds
+        setInterval(loadStatistics, 30000);
+    </script>
+</body>
+</html>

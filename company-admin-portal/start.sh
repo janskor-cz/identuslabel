@@ -16,6 +16,14 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
+# Load environment variables from .env file
+if [ -f ".env" ]; then
+    echo "🔐 Loading environment variables from .env file..."
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "⚠️  Warning: .env file not found. Database password must be set via ENTERPRISE_DB_PASSWORD environment variable."
+fi
+
 # Set port
 PORT=3010
 

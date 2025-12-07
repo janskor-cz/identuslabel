@@ -1,0 +1,64 @@
+{
+  "name": "SecurityClearanceLevel",
+  "version": "4.0.0",
+  "description": "W3C-compliant security clearance credential with flattened dual-key structure",
+  "type": "https://w3c-ccg.github.io/vc-json-schemas/schema/2.0/schema.json",
+  "author": "did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c",
+  "tags": ["security", "clearance", "cryptographic", "dual-key"],
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://certification-authority.org/schemas/SecurityClearanceLevel/4.0.0",
+    "type": "object",
+    "properties": {
+      "credentialType": {
+        "type": "string"
+      },
+      "clearanceLevel": {
+        "type": "string",
+        "enum": ["INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP-SECRET"]
+      },
+      "holderName": {
+        "type": "string"
+      },
+      "holderUniqueId": {
+        "type": "string"
+      },
+      "ed25519PublicKey": {
+        "type": "string"
+      },
+      "ed25519Fingerprint": {
+        "type": "string"
+      },
+      "x25519PublicKey": {
+        "type": "string"
+      },
+      "x25519Fingerprint": {
+        "type": "string"
+      },
+      "issuedDate": {
+        "type": "string",
+        "format": "date"
+      },
+      "expiryDate": {
+        "type": "string",
+        "format": "date"
+      },
+      "clearanceId": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "credentialType",
+      "clearanceLevel",
+      "holderName",
+      "holderUniqueId",
+      "ed25519PublicKey",
+      "ed25519Fingerprint",
+      "x25519PublicKey",
+      "x25519Fingerprint",
+      "issuedDate",
+      "expiryDate",
+      "clearanceId"
+    ]
+  }
+}

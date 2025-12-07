@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Security Clearance Request - Certification Authority</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            padding: 30px 40px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+        
+        .user-nav {
+            background: #f8f9fa;
+            padding: 15px 40px;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 500;
+            color: #240b36;
+        }
+        
+        .main {
+            padding: 40px;
+            display: grid;
+            gap: 30px;
+        }
+        
+        .section {
+            padding: 30px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            background: #f9f9f9;
+        }
+        
+        .section h2 {
+            color: #c31432;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+            border-bottom: 2px solid #c31432;
+            padding-bottom: 10px;
+        }
+        
+        .clearance-types {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin: 20px 0;
+        }
+        
+        .clearance-card {
+            background: white;
+            border: 3px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 25px;
+            text-align: center;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+        
+        .clearance-card:hover {
+            border-color: #c31432;
+            box-shadow: 0 10px 20px rgba(195, 20, 50, 0.1);
+        }
+        
+        .clearance-card.selected {
+            border-color: #c31432;
+            background: #fff5f5;
+        }
+        
+        .clearance-card .icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+            display: block;
+        }
+        
+        .clearance-card h3 {
+            color: #240b36;
+            margin-bottom: 10px;
+            font-size: 1.3rem;
+        }
+        
+        .clearance-card .level {
+            background: #c31432;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 15px;
+            display: inline-block;
+        }
+        
+        .clearance-card .description {
+            font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 15px;
+            line-height: 1.5;
+        }
+        
+        .clearance-card .features {
+            font-size: 0.8rem;
+            color: #333;
+        }
+        
+        .clearance-card .features ul {
+            list-style: none;
+            padding: 0;
+        }
+        
+        .clearance-card .features li {
+            margin: 5px 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+        }
+        
+        .connection-selector {
+            margin: 20px 0;
+        }
+        
+        .connection-selector h3 {
+            color: #240b36;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+        }
+        
+        .connection-list {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+        
+        .connection-item {
+            padding: 12px 15px;
+            border-bottom: 1px solid #e0e0e0;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .connection-item:last-child {
+            border-bottom: none;
+        }
+        
+        .connection-item:hover {
+            background: #f0f8ff;
+        }
+        
+        .connection-item.selected {
+            background: #fff5f5;
+            border-color: #c31432;
+        }
+        
+        .connection-info h4 {
+            color: #240b36;
+            font-size: 0.9rem;
+            margin-bottom: 2px;
+        }
+        
+        .connection-info p {
+            color: #666;
+            font-size: 0.8rem;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        
+        .badge.active {
+            background: #28a745;
+            color: white;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin: 10px 10px 10px 0;
+        }
+        
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(195, 20, 50, 0.3);
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .btn.secondary {
+            background: #6c757d;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        
+        .status.info {
+            background: #cce5ff;
+            border: 1px solid #b8daff;
+            color: #004085;
+        }
+        
+        .status.warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+        }
+
+        .crypto-info {
+            background: #f8f9fa;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        
+        .crypto-info h4 {
+            color: #240b36;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .crypto-info ul {
+            color: #666;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <span>🔐</span>
+                <span>Security Clearance Request</span>
+            </h1>
+            <p>Advanced Cryptographic Credentials - Certification Authority</p>
+        </div>
+        
+        <div class="user-nav">
+            <div class="user-info">
+                <span>🔐</span>
+                <span>Logged in as: <strong id="userName">Loading...</strong></span>
+            </div>
+            <a href="/portal" class="btn secondary">← Back to Portal</a>
+        </div>
+        
+        <div class="main">
+            <!-- User Authentication Check -->
+            <div id="authCheck" class="section">
+                <div class="status info">
+                    <strong>🔍 Verifying Authentication...</strong><br>
+                    Please wait while we verify your logged-in status.
+                </div>
+            </div>
+
+            <!-- Security Clearance Selection -->
+            <div id="clearanceSelection" class="section" style="display: none;">
+                <h2>🏷️ Select Security Clearance Type</h2>
+                <p>Choose the security clearance level you wish to request. Each clearance includes a unique cryptographic keypair.</p>
+                
+                <div class="clearance-types">
+                    <div class="clearance-card" id="confidentialCard" onclick="selectClearance('confidential')">
+                        <span class="icon">🔐</span>
+                        <h3>Confidential Clearance</h3>
+                        <div class="level">CONFIDENTIAL</div>
+                        <div class="description">
+                            Medium-level security clearance with embedded RSA-2048 keypair for secure communications and document signing.
+                        </div>
+                        <div class="features">
+                            <ul>
+                                <li>✅ 1 year validity</li>
+                                <li>🔑 RSA-2048 keypair</li>
+                                <li>📝 Document signing</li>
+                                <li>🔒 Encrypted communications</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class="clearance-card" id="restrictedCard" onclick="selectClearance('restricted')">
+                        <span class="icon">🔒</span>
+                        <h3>Restricted Clearance</h3>
+                        <div class="level" style="background: #17a2b8;">RESTRICTED</div>
+                        <div class="description">
+                            Higher-level security clearance with embedded RSA-2048 keypair for sensitive operations and advanced security protocols.
+                        </div>
+                        <div class="features">
+                            <ul>
+                                <li>✅ 2 years validity</li>
+                                <li>🔑 RSA-2048 keypair</li>
+                                <li>📝 Document signing</li>
+                                <li>🔒 Encrypted communications</li>
+                                <li>🛡️ Advanced protocols</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="crypto-info">
+                    <h4>🔑 Cryptographic Features</h4>
+                    <ul>
+                        <li><strong>RSA-2048 Keypair:</strong> Each credential includes a unique public/private key pair</li>
+                        <li><strong>Public Key:</strong> Embedded in the credential for verification and encryption</li>
+                        <li><strong>Private Key:</strong> Securely stored in Cloud Agent's key management system</li>
+                        <li><strong>Key Fingerprint:</strong> SHA256 hash for key verification and identification</li>
+                        <li><strong>Digital Signatures:</strong> Sign documents and messages using your private key</li>
+                        <li><strong>Secure Communications:</strong> Others can encrypt messages using your public key</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Automatic Connection Info -->
+            <div id="connectionInfo" class="section" style="display: none;">
+                <h2>✅ Ready to Request</h2>
+                <p>Your security clearance will be issued to the same connection you used for authentication.</p>
+                
+                <div class="status info">
+                    <strong>🔗 Connection Details:</strong><br>
+                    Your credential will be delivered through your existing DIDComm connection that was used for RealPerson authentication.
+                    No additional connection setup required.
+                </div>
+            </div>
+
+            <!-- Request Summary -->
+            <div id="requestSummary" class="section" style="display: none;">
+                <h2>📋 Request Summary</h2>
+                <div id="summaryContent"></div>
+                
+                <div style="margin-top: 30px;">
+                    <button class="btn" onclick="submitClearanceRequest()" id="submitBtn">
+                        🚀 Request Security Clearance
+                    </button>
+                    <button class="btn secondary" onclick="resetForm()">
+                        🔄 Start Over
+                    </button>
+                </div>
+            </div>
+
+            <!-- Results -->
+            <div id="results"></div>
+        </div>
+    </div>
+
+    <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+        let selectedClearanceType = null;
+        let userPersonalInfo = null;
+        let userAuthConnectionId = null;
+
+        // Check authentication on page load
+        window.addEventListener('load', () => {
+            checkAuthentication();
+        });
+
+        function checkAuthentication() {
+            const authData = sessionStorage.getItem('ca_auth');
+            
+            if (!authData) {
+                document.getElementById('authCheck').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Authentication Required</strong><br>
+                        You must be logged in to request security clearances.
+                        <div style="margin-top: 15px;">
+                            <a href="/login" class="btn">🔓 Login Now</a>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+            
+            try {
+                const auth = JSON.parse(authData);
+                
+                // Check if authentication is recent (within 1 hour)
+                const loginTime = new Date(auth.loginTime);
+                const now = new Date();
+                const hoursSinceLogin = (now - loginTime) / (1000 * 60 * 60);
+                
+                if (hoursSinceLogin > 1) {
+                    sessionStorage.removeItem('ca_auth');
+                    document.getElementById('authCheck').innerHTML = `
+                        <div class="status warning">
+                            <strong>⏰ Session Expired</strong><br>
+                            Your session has expired. Please login again.
+                            <div style="margin-top: 15px;">
+                                <a href="/login" class="btn">🔓 Login Again</a>
+                            </div>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                // Valid authentication
+                userPersonalInfo = auth.personalInfo;
+                
+                document.getElementById('userName').textContent = 
+                    `${userPersonalInfo.firstName || ''} ${userPersonalInfo.lastName || ''}`.trim() || 'User';
+                
+                document.getElementById('authCheck').style.display = 'none';
+                document.getElementById('clearanceSelection').style.display = 'block';
+                
+                // Find an active connection automatically
+                findActiveConnection();
+                
+            } catch (error) {
+                console.error('Error parsing authentication data:', error);
+                document.getElementById('authCheck').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Authentication Error</strong><br>
+                        There was an error with your authentication data.
+                        <div style="margin-top: 15px;">
+                            <a href="/login" class="btn">🔓 Login Again</a>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        async function findActiveConnection() {
+            try {
+                // Get the logged-in user's information from session
+                const authData = sessionStorage.getItem('ca_auth');
+                if (!authData) {
+                    throw new Error('Not authenticated');
+                }
+                
+                const auth = JSON.parse(authData);
+                const userUniqueId = auth.personalInfo?.uniqueId;
+                
+                if (!userUniqueId) {
+                    throw new Error('User unique ID not found in session');
+                }
+                
+                // Get the CA's connections to find the connection for this user
+                const response = await fetch(apiUrl('/api/user-connection/' + userUniqueId);
+                const data = await response.json();
+                
+                if (data.success) {
+                    const activeConnections = data.connections.filter(conn => 
+                        conn.state === 'ConnectionResponseSent' || 
+                        conn.state === 'ConnectionResponseReceived' || 
+                        conn.state === 'Active'
+                    );
+                    
+                    console.log(`🔍 [DEBUG] Found ${activeConnections.length} active connections for current user`);
+                    
+                    if (activeConnections.length > 0) {
+                        // Use the first active connection for this specific user
+                        userAuthConnectionId = activeConnections[0].connectionId;
+                        console.log(`✅ Using user-specific connection: ${userAuthConnectionId}`);
+                        console.log(`🔍 [DEBUG] Connection details:`, activeConnections[0]);
+                    } else {
+                        document.getElementById('clearanceSelection').innerHTML = `
+                            <div class="status error">
+                                <strong>❌ No Active Connections for Your Wallet</strong><br>
+                                You need an active DIDComm connection to receive security clearances.
+                                Please establish a connection with the Certification Authority first.
+                                <div style="margin-top: 15px;">
+                                    <a href="/portal" class="btn secondary">← Back to Portal</a>
+                                </div>
+                            </div>
+                        `;
+                    }
+                } else {
+                    console.error('Failed to load connections:', data.error);
+                }
+            } catch (error) {
+                console.error('Error finding active connection:', error);
+                document.getElementById('clearanceSelection').innerHTML = `
+                    <div class="status error">
+                        <strong>❌ Connection Access Error</strong><br>
+                        Unable to access your wallet connections: ${error.message}
+                        <div style="margin-top: 15px;">
+                            <a href="/login" class="btn">🔓 Login Again</a>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+        
+        // Helper function to get current user's API key (would need to be implemented based on session)
+        function getCurrentUserApiKey() {
+            // For now, return null to use default tenant key
+            // In production, this should extract the user's specific API key from session
+            return null;
+        }
+
+        function selectClearance(type) {
+            // Clear previous selection
+            document.getElementById('confidentialCard').classList.remove('selected');
+            document.getElementById('restrictedCard').classList.remove('selected');
+            
+            // Select new clearance type
+            selectedClearanceType = type;
+            document.getElementById(type + 'Card').classList.add('selected');
+            
+            // Show connection info and request summary
+            document.getElementById('connectionInfo').style.display = 'block';
+            document.getElementById('requestSummary').style.display = 'block';
+            displayRequestSummary();
+        }
+
+        // Connection display and selection no longer needed - using auth connection
+
+        function displayRequestSummary() {
+            const clearanceTypeDisplay = selectedClearanceType === 'confidential' ? 'CONFIDENTIAL' : 'RESTRICTED';
+            const validityPeriod = selectedClearanceType === 'confidential' ? '1 year' : '2 years';
+            
+            document.getElementById('summaryContent').innerHTML = `
+                <div style="background: white; padding: 20px; border-radius: 8px; border: 2px solid #e0e0e0;">
+                    <h3 style="color: #240b36; margin-bottom: 15px;">Request Details</h3>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; font-size: 0.9rem;">
+                        <div>
+                            <strong>Applicant Name:</strong><br>
+                            ${userPersonalInfo.firstName} ${userPersonalInfo.lastName}
+                        </div>
+                        <div>
+                            <strong>Unique ID:</strong><br>
+                            ${userPersonalInfo.uniqueId}
+                        </div>
+                        <div>
+                            <strong>Clearance Level:</strong><br>
+                            <span style="background: #c31432; color: white; padding: 3px 8px; border-radius: 3px; font-size: 0.8rem;">${clearanceTypeDisplay}</span>
+                        </div>
+                        <div>
+                            <strong>Validity Period:</strong><br>
+                            ${validityPeriod}
+                        </div>
+                        <div>
+                            <strong>Delivery:</strong><br>
+                            Your authenticated connection
+                        </div>
+                        <div>
+                            <strong>Cryptographic Features:</strong><br>
+                            RSA-2048 Keypair + Fingerprint
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="status info" style="margin-top: 20px;">
+                    <strong>🔑 What happens next:</strong><br>
+                    1. A unique RSA-2048 keypair will be generated<br>
+                    2. The public key will be embedded in your credential<br>
+                    3. The private key will be securely stored in Cloud Agent<br>
+                    4. You'll receive the credential offer in your wallet<br>
+                    5. Accept the offer to complete the process
+                </div>
+            `;
+        }
+
+        async function submitClearanceRequest() {
+            if (!selectedClearanceType) {
+                alert('Please select a clearance type');
+                return;
+            }
+            
+            if (!userAuthConnectionId) {
+                alert('Authentication connection not found. Please login again.');
+                return;
+            }
+            
+            const submitBtn = document.getElementById('submitBtn');
+            submitBtn.disabled = true;
+            submitBtn.textContent = '🔄 Processing Request...';
+            
+            try {
+                const endpoint = selectedClearanceType === 'confidential' 
+                    ? '/api/credentials/issue-confidential-clearance'
+                    : '/api/credentials/issue-restricted-clearance';
+                
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        connectionId: userAuthConnectionId,
+                        holderPersonalInfo: userPersonalInfo
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('results').innerHTML = `
+                        <div class="section">
+                            <h2>✅ Clearance Request Successful</h2>
+                            <div class="status success">
+                                <strong>🎉 ${selectedClearanceType.toUpperCase()} Security Clearance Requested!</strong><br>
+                                Your security clearance with embedded cryptographic keypair has been issued.
+                            </div>
+                            
+                            <div style="background: white; padding: 20px; border-radius: 8px; border: 2px solid #28a745; margin: 20px 0;">
+                                <h3 style="color: #28a745; margin-bottom: 15px;">🔑 Cryptographic Details</h3>
+                                <div style="font-size: 0.9rem;">
+                                    <div style="margin-bottom: 10px;">
+                                        <strong>Clearance ID:</strong> ${data.clearanceId}
+                                    </div>
+                                    <div style="margin-bottom: 10px;">
+                                        <strong>Key Fingerprint:</strong><br>
+                                        <code style="background: #f8f9fa; padding: 5px; border-radius: 3px; font-size: 0.8rem;">${data.keyFingerprint}</code>
+                                    </div>
+                                    <div style="margin-bottom: 10px;">
+                                        <strong>Record ID:</strong> ${data.recordId}
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="status info">
+                                <strong>📱 Next Steps:</strong><br>
+                                1. Open your wallet application<br>
+                                2. Accept the credential offer<br>
+                                3. Your credential will include the public key<br>
+                                4. The private key is securely stored in Cloud Agent<br>
+                                5. Use the fingerprint to verify key authenticity
+                            </div>
+                            
+                            <div style="margin-top: 20px;">
+                                <a href="/portal" class="btn">← Back to Portal</a>
+                                <button class="btn secondary" onclick="resetForm()">🔄 Request Another</button>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    throw new Error(data.error);
+                }
+                
+            } catch (error) {
+                document.getElementById('results').innerHTML = `
+                    <div class="section">
+                        <h2>❌ Request Failed</h2>
+                        <div class="status error">
+                            <strong>Request Error:</strong><br>
+                            ${error.message}
+                        </div>
+                        <div style="margin-top: 20px;">
+                            <button class="btn secondary" onclick="resetForm()">🔄 Try Again</button>
+                        </div>
+                    </div>
+                `;
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = '🚀 Request Security Clearance';
+            }
+        }
+
+        function resetForm() {
+            selectedClearanceType = null;
+            
+            document.getElementById('confidentialCard').classList.remove('selected');
+            document.getElementById('restrictedCard').classList.remove('selected');
+            
+            document.getElementById('connectionInfo').style.display = 'none';
+            document.getElementById('requestSummary').style.display = 'none';
+            document.getElementById('results').innerHTML = '';
+        }
+    </script>
+</body>
+</html>

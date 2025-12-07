@@ -1,0 +1,246 @@
+{
+  "CA-1760642938791-ZKYFTQ": {
+    "connectionId": "34aa877c-2b14-4a5e-9668-d6b0bddb4af5",
+    "holderInfo": {
+      "firstName": "Alice",
+      "lastName": "Cooper",
+      "uniqueId": "CA-1760642938791-ZKYFTQ"
+    },
+    "discoveredVia": "credential-lookup",
+    "registeredAt": "2025-10-16T19:30:33.450Z"
+  },
+  "CA-1760644896777-AY8PKS": {
+    "connectionId": "292d0102-d45f-42bb-b8c0-4eaa014c99db",
+    "holderInfo": {
+      "lastName": "Cooper 2",
+      "firstName": "Alice",
+      "gender": "Female",
+      "dateOfBirth": "1996-10-16",
+      "id": "did:prism:be299c1387e9da53a0a6a9bb2722876271f87e6d2291e4ee0d5449983dbedfb8:CskBCsYBEl0KCG1hc3Rlci0wEAFCTwoJc2VjcDI1NmsxEiAYelJLvY0qbbvRqYukIFuUf6pxinMmNY9LZ_bUUouzvxogCJgXYnpsFZuUystn91IMF4JV6jjr3EjDbfYAabNaOaoSZQoQYXV0aGVudGljYXRpb24tMBAEQk8KCXNlY3AyNTZrMRIgGHpSS72NKm270amLpCBblH-qcYpzJjWPS2f21FKLs78aIAiYF2J6bBWblMrLZ_dSDBeCVeo469xIw232AGmzWjmq",
+      "uniqueId": "CA-1760644896777-AY8PKS"
+    },
+    "registeredAt": "2025-10-16T20:05:18.254Z"
+  },
+  "CA-1761655635678-ZEFSJP": {
+    "connectionId": "920bf346-6022-4c0a-bf09-bfc31226e52b",
+    "holderInfo": {
+      "firstName": "Test",
+      "lastName": "Alice",
+      "uniqueId": "CA-1761655635678-ZEFSJP",
+      "dateOfBirth": "1986-01-01",
+      "gender": "Female"
+    },
+    "registeredAt": "2025-10-28T12:47:15.739Z"
+  },
+  "CA-1761685520735-HC92VP": {
+    "connectionId": "a4d55d60-29ae-4da1-a097-dfe532a0b0df",
+    "holderInfo": {
+      "firstName": "Alice",
+      "lastName": "Cooper",
+      "uniqueId": "CA-1761685520735-HC92VP",
+      "dateOfBirth": "1996-10-16",
+      "gender": "Female"
+    },
+    "registeredAt": "2025-10-28T21:05:21.213Z"
+  },
+  "CA-1761735646453-JAK4MN": {
+    "connectionId": "a4d55d60-29ae-4da1-a097-dfe532a0b0df",
+    "holderInfo": {
+      "firstName": "Alice",
+      "lastName": "Cooper",
+      "uniqueId": "CA-1761735646453-JAK4MN",
+      "dateOfBirth": "1996-10-16",
+      "gender": "Female"
+    },
+    "registeredAt": "2025-10-29T11:00:46.512Z"
+  },
+  "CA-1761738679481-7C93QE": {
+    "connectionId": "8475704f-f437-49d4-849c-adb0f8b82b6d",
+    "holderInfo": {
+      "firstName": "Bob",
+      "lastName": "Johnson",
+      "uniqueId": "CA-1761738679481-7C93QE",
+      "dateOfBirth": "1980-01-01",
+      "gender": "Male"
+    },
+    "registeredAt": "2025-10-29T11:51:19.546Z"
+  },
+  "CA-1761739686085-SZUSA2": {
+    "connectionId": "a4d55d60-29ae-4da1-a097-dfe532a0b0df",
+    "holderInfo": {
+      "expiryDate": "2027-10-29",
+      "credentialType": "RealPersonIdentity",
+      "issuedDate": "2025-10-29",
+      "lastName": "Cooper",
+      "firstName": "Alice",
+      "gender": "Female",
+      "credentialId": "REALPERSON-1761739686096-Y9WOMU",
+      "dateOfBirth": "1996-10-16",
+      "id": "did:prism:be299c1387e9da53a0a6a9bb2722876271f87e6d2291e4ee0d5449983dbedfb8:CskBCsYBEl0KCG1hc3Rlci0wEAFCTwoJc2VjcDI1NmsxEiAYelJLvY0qbbvRqYukIFuUf6pxinMmNY9LZ_bUUouzvxogCJgXYnpsFZuUystn91IMF4JV6jjr3EjDbfYAabNaOaoSZQoQYXV0aGVudGljYXRpb24tMBAEQk8KCXNlY3AyNTZrMRIgGHpSS72NKm270amLpCBblH-qcYpzJjWPS2f21FKLs78aIAiYF2J6bBWblMrLZ_dSDBeCVeo469xIw232AGmzWjmq",
+      "uniqueId": "CA-1761739686085-SZUSA2"
+    },
+    "registeredAt": "2025-10-31T10:57:39.708Z"
+  },
+  "CA-1761766331488-2XVW0K": {
+    "connectionId": "ad40dd50-7fc9-42db-9268-f1ed55a84576",
+    "holderInfo": {
+      "expiryDate": "2027-10-29",
+      "credentialType": "RealPersonIdentity",
+      "issuedDate": "2025-10-29",
+      "lastName": "Johnson",
+      "firstName": "Bob",
+      "gender": "Male",
+      "credentialId": "REALPERSON-1761766331497-YMA08Q",
+      "dateOfBirth": "1980-01-01",
+      "id": "did:prism:be299c1387e9da53a0a6a9bb2722876271f87e6d2291e4ee0d5449983dbedfb8:CskBCsYBEl0KCG1hc3Rlci0wEAFCTwoJc2VjcDI1NmsxEiAYelJLvY0qbbvRqYukIFuUf6pxinMmNY9LZ_bUUouzvxogCJgXYnpsFZuUystn91IMF4JV6jjr3EjDbfYAabNaOaoSZQoQYXV0aGVudGljYXRpb24tMBAEQk8KCXNlY3AyNTZrMRIgGHpSS72NKm270amLpCBblH-qcYpzJjWPS2f21FKLs78aIAiYF2J6bBWblMrLZ_dSDBeCVeo469xIw232AGmzWjmq",
+      "uniqueId": "CA-1761766331488-2XVW0K"
+    },
+    "registeredAt": "2025-10-29T22:08:53.792Z"
+  },
+  "CA-1761912137692-49OT3T": {
+    "connectionId": "3097bded-82ee-482a-af01-c971d1030928",
+    "holderInfo": {
+      "expiryDate": "2027-10-31",
+      "credentialType": "RealPersonIdentity",
+      "issuedDate": "2025-10-31",
+      "lastName": "Public",
+      "firstName": "Alice",
+      "gender": "Female",
+      "credentialId": "REALPERSON-1761912137702-Z2IDRU",
+      "dateOfBirth": "1968-07-15",
+      "id": "did:prism:be299c1387e9da53a0a6a9bb2722876271f87e6d2291e4ee0d5449983dbedfb8:CskBCsYBEl0KCG1hc3Rlci0wEAFCTwoJc2VjcDI1NmsxEiAYelJLvY0qbbvRqYukIFuUf6pxinMmNY9LZ_bUUouzvxogCJgXYnpsFZuUystn91IMF4JV6jjr3EjDbfYAabNaOaoSZQoQYXV0aGVudGljYXRpb24tMBAEQk8KCXNlY3AyNTZrMRIgGHpSS72NKm270amLpCBblH-qcYpzJjWPS2f21FKLs78aIAiYF2J6bBWblMrLZ_dSDBeCVeo469xIw232AGmzWjmq",
+      "uniqueId": "CA-1761912137692-49OT3T"
+    },
+    "registeredAt": "2025-10-31T12:54:19.490Z"
+  },
+  "CA-1762027245571-O9LDAG": {
+    "connectionId": "903977b2-6a80-4e0f-9978-d87021e4fbc4",
+    "holderInfo": {
+      "expiryDate": "2027-11-01",
+      "credentialType": "RealPersonIdentity",
+      "issuedDate": "2025-11-01",
+      "lastName": "Testovaci",
+      "firstName": "Pan",
+      "gender": "Male",
+      "credentialId": "REALPERSON-1762027245579-K7REG6",
+      "dateOfBirth": "2015-05-15",
+      "id": "did:prism:be299c1387e9da53a0a6a9bb2722876271f87e6d2291e4ee0d5449983dbedfb8:CskBCsYBEl0KCG1hc3Rlci0wEAFCTwoJc2VjcDI1NmsxEiAYelJLvY0qbbvRqYukIFuUf6pxinMmNY9LZ_bUUouzvxogCJgXYnpsFZuUystn91IMF4JV6jjr3EjDbfYAabNaOaoSZQoQYXV0aGVudGljYXRpb24tMBAEQk8KCXNlY3AyNTZrMRIgGHpSS72NKm270amLpCBblH-qcYpzJjWPS2f21FKLs78aIAiYF2J6bBWblMrLZ_dSDBeCVeo469xIw232AGmzWjmq",
+      "uniqueId": "CA-1762027245571-O9LDAG"
+    },
+    "registeredAt": "2025-11-02T18:16:24.790Z"
+  },
+  "CA-1762542081733-PNKO0V": {
+    "connectionId": "bfdd5109-50df-46fa-906d-a829c05d8a82",
+    "holderInfo": {
+      "expiryDate": "2027-11-07",
+      "credentialType": "RealPersonIdentity",
+      "issuedDate": "2025-11-07",
+      "lastName": "Cooper",
+      "firstName": "Alice",
+      "gender": "Female",
+      "credentialId": "REALPERSON-1762542081997-7ML1RY",
+      "dateOfBirth": "1996-10-16",
+      "id": "did:prism:be299c1387e9da53a0a6a9bb2722876271f87e6d2291e4ee0d5449983dbedfb8:CskBCsYBEl0KCG1hc3Rlci0wEAFCTwoJc2VjcDI1NmsxEiAYelJLvY0qbbvRqYukIFuUf6pxinMmNY9LZ_bUUouzvxogCJgXYnpsFZuUystn91IMF4JV6jjr3EjDbfYAabNaOaoSZQoQYXV0aGVudGljYXRpb24tMBAEQk8KCXNlY3AyNTZrMRIgGHpSS72NKm270amLpCBblH-qcYpzJjWPS2f21FKLs78aIAiYF2J6bBWblMrLZ_dSDBeCVeo469xIw232AGmzWjmq",
+      "uniqueId": "CA-1762542081733-PNKO0V"
+    },
+    "registeredAt": "2025-11-07T22:41:31.819Z"
+  },
+  "CA-1763246399606-80EUBS": {
+    "connectionId": "608407a7-c427-431f-b1a6-eef6172f24bc",
+    "holderInfo": {
+      "firstName": "Alice",
+      "lastName": "Private",
+      "uniqueId": "CA-1763246399606-80EUBS",
+      "dateOfBirth": "2005-11-16",
+      "gender": "Female"
+    },
+    "registeredAt": "2025-11-15T22:40:00.177Z"
+  },
+  "CA-1763321677157-JU2V5P": {
+    "connectionId": "6e6ec265-7abb-433e-9321-6d05d5339ef0",
+    "holderInfo": {
+      "firstName": "Alice",
+      "lastName": "Private",
+      "uniqueId": "CA-1763321677157-JU2V5P",
+      "dateOfBirth": "2000-01-01",
+      "gender": "Female"
+    },
+    "registeredAt": "2025-11-16T19:34:37.423Z"
+  },
+  "CA-1763573616488-YBCJA3": {
+    "connectionId": "1f37a68b-a2f8-4507-b605-ec22d8839fe5",
+    "holderInfo": {
+      "firstName": "Alice",
+      "lastName": "Private",
+      "uniqueId": "CA-1763573616488-YBCJA3",
+      "dateOfBirth": "2005-01-01",
+      "gender": "Female"
+    },
+    "registeredAt": "2025-11-19T17:33:36.602Z"
+  },
+  "CA-1763620046204-A16Y6U": {
+    "connectionId": "186ba3aa-d1f5-4675-9bf6-88f0b0b1803f",
+    "holderInfo": {
+      "firstName": "Alice",
+      "lastName": "Cooper",
+      "uniqueId": "CA-1763620046204-A16Y6U",
+      "dateOfBirth": "2005-01-01",
+      "gender": "Female"
+    },
+    "registeredAt": "2025-11-20T06:27:26.459Z"
+  },
+  "CA-1764019643676-G4OIJC": {
+    "connectionId": "b297801f-7c42-4cf9-82c9-b21d93d1b1b7",
+    "holderInfo": {
+      "firstName": "Alice",
+      "lastName": "Private",
+      "uniqueId": "CA-1764019643676-G4OIJC",
+      "dateOfBirth": "2005-01-01",
+      "gender": "Female"
+    },
+    "registeredAt": "2025-11-24T21:27:23.749Z"
+  },
+  "CA-1764831568933-CSL9D9": {
+    "connectionId": "d4d9437c-ea89-447f-8509-1bcbe1351a31",
+    "holderInfo": {
+      "firstName": "Alice",
+      "lastName": "Cooper",
+      "uniqueId": "CA-1764831568933-CSL9D9",
+      "dateOfBirth": "1996-10-16",
+      "gender": "Female"
+    },
+    "registeredAt": "2025-12-04T06:59:28.990Z"
+  },
+  "CA-1764856514836-9VBUZN": {
+    "connectionId": "670fe6df-a749-4631-82c5-82e7c7793377",
+    "holderInfo": {
+      "expiryDate": "2027-12-04",
+      "credentialType": "RealPersonIdentity",
+      "issuedDate": "2025-12-04",
+      "lastName": "Cooper",
+      "firstName": "Alice",
+      "gender": "Female",
+      "credentialId": "REALPERSON-1764856514849-GLPPT1",
+      "dateOfBirth": "1996-10-16",
+      "id": "did:prism:0867a05f42dabd52f53e43b4f8a5a5d384876662bbccefc206ecb2528a171030:CuIBCt8BEl0KCG1hc3Rlci0wEAFCTwoJc2VjcDI1NmsxEiAYelJLvY0qbbvRqYukIFuUf6pxinMmNY9LZ_bUUouzvxogCJgXYnpsFZuUystn91IMF4JV6jjr3EjDbfYAabNaOaoSQQoQYXV0aGVudGljYXRpb24tMBAESisKB0VkMjU1MTkSIFGvhlvK3pJdIhpOHJPyKwjftXdFF2iTSE9uavCnSMbOEjsKC2FncmVlbWVudC0wEANKKgoGWDI1NTE5EiBkO--3dNpm_vRc5qV0s38I6GI0KKROQpKk2OCZiwgffQ",
+      "uniqueId": "CA-1764856514836-9VBUZN"
+    },
+    "registeredAt": "2025-12-05T11:02:28.908Z"
+  },
+  "CA-1764883370632-I74TDH": {
+    "connectionId": "b0a59f49-d137-4cef-972e-f062a4853e0b",
+    "holderInfo": {
+      "expiryDate": "2027-12-04",
+      "credentialType": "RealPersonIdentity",
+      "issuedDate": "2025-12-04",
+      "lastName": "Johnson",
+      "firstName": "Bob",
+      "gender": "Male",
+      "credentialId": "REALPERSON-1764883370642-NLE9VB",
+      "dateOfBirth": "1980-01-01",
+      "id": "did:prism:0867a05f42dabd52f53e43b4f8a5a5d384876662bbccefc206ecb2528a171030:CuIBCt8BEl0KCG1hc3Rlci0wEAFCTwoJc2VjcDI1NmsxEiAYelJLvY0qbbvRqYukIFuUf6pxinMmNY9LZ_bUUouzvxogCJgXYnpsFZuUystn91IMF4JV6jjr3EjDbfYAabNaOaoSQQoQYXV0aGVudGljYXRpb24tMBAESisKB0VkMjU1MTkSIFGvhlvK3pJdIhpOHJPyKwjftXdFF2iTSE9uavCnSMbOEjsKC2FncmVlbWVudC0wEANKKgoGWDI1NTE5EiBkO--3dNpm_vRc5qV0s38I6GI0KKROQpKk2OCZiwgffQ",
+      "uniqueId": "CA-1764883370632-I74TDH"
+    },
+    "registeredAt": "2025-12-05T12:19:39.894Z"
+  }
+}

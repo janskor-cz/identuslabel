@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Login - Certification Authority</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .login-container {
+            max-width: 600px;
+            width: 100%;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            padding: 30px 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 1.8rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 0.95rem;
+        }
+
+        .main {
+            padding: 40px;
+        }
+
+        .login-step {
+            min-height: 300px;
+        }
+
+        .login-step h2 {
+            color: #c31432;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+        }
+
+        .login-step p {
+            color: #666;
+            line-height: 1.6;
+            margin-bottom: 20px;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        .input-group label {
+            display: block;
+            color: #240b36;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .input-group input {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: #c31432;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+            width: 100%;
+        }
+
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(195, 20, 50, 0.3);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn.secondary {
+            background: #6c757d;
+        }
+
+        .status-box {
+            background: #f8f9fa;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #e0e0e0;
+            border-top: 4px solid #c31432;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .proof-details {
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+            text-align: left;
+        }
+
+        .proof-details ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .proof-details li {
+            padding: 8px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .proof-details li:last-child {
+            border-bottom: none;
+        }
+
+        .proof-details strong {
+            color: #240b36;
+            margin-right: 8px;
+        }
+
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .status.success {
+            background: #d4edda;
+            border: 2px solid #c3e6cb;
+            color: #155724;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            border: 2px solid #f5c6cb;
+            color: #721c24;
+        }
+
+        .status.info {
+            background: #cce5ff;
+            border: 2px solid #b8daff;
+            color: #004085;
+        }
+
+        .info-box {
+            background: #f8f9fa;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+
+        .info-box h3 {
+            color: #240b36;
+            margin-bottom: 15px;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .info-box ul {
+            color: #666;
+            font-size: 0.9rem;
+            padding-left: 25px;
+            line-height: 1.8;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="header">
+            <h1>
+                <span>🔐</span>
+                <span>Secure Login</span>
+            </h1>
+            <p>DIDComm Present Proof Authentication</p>
+        </div>
+
+        <div class="main">
+            <!-- Step 1: Identifier Input -->
+            <div id="identificationStep" class="login-step">
+                <h2>Enter Your Identification</h2>
+                <p>Provide your unique ID or name to initiate secure DIDComm authentication with your wallet.</p>
+
+                <div class="input-group">
+                    <label for="userIdentifier">Unique ID or Name:</label>
+                    <input type="text" id="userIdentifier" placeholder="e.g., CA-1760257349872-TJHFK8 or Alice Cooper" autofocus>
+                </div>
+
+                <button class="btn" onclick="initiateProofRequest()">
+                    🔓 Login with Wallet
+                </button>
+
+                <div class="info-box">
+                    <h3>🛡️ Security Features</h3>
+                    <ul>
+                        <li>End-to-end DIDComm encryption</li>
+                        <li>Challenge-response replay protection</li>
+                        <li>Domain binding prevents phishing</li>
+                        <li>Cryptographic proof of possession</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Step 2: Proof Request Status -->
+            <div id="proofRequestStep" class="login-step" style="display: none;">
+                <h2>📱 Check Your Wallet</h2>
+                <p>A proof request has been sent to your wallet via DIDComm</p>
+
+                <div class="status-box">
+                    <div class="loading-spinner"></div>
+                    <p id="statusMessage" style="font-size: 1.1rem; color: #666; font-weight: 500;">Waiting for approval...</p>
+                </div>
+
+                <div class="proof-details">
+                    <h3 style="margin-bottom: 15px;">Request Details</h3>
+                    <ul>
+                        <li><strong>Identifier:</strong> <span id="displayUserId"></span></li>
+                        <li><strong>Connection:</strong> <span id="displayConnectionId"></span></li>
+                        <li><strong>Requested Data:</strong> Name, Unique ID, Date of Birth, Gender</li>
+                        <li><strong>Protocol:</strong> DIDComm v2 Present Proof</li>
+                    </ul>
+                </div>
+
+                <button class="btn secondary" onclick="cancelProofRequest()">
+                    ❌ Cancel
+                </button>
+            </div>
+
+            <!-- Step 3: Result -->
+            <div id="resultStep" class="login-step" style="display: none;">
+                <div id="resultMessage"></div>
+            </div>
+
+            <div style="text-align: center; margin-top: 20px; padding-top: 20px; border-top: 1px solid #e0e0e0;">
+                <a href="/" style="color: #c31432; text-decoration: none; font-size: 0.9rem;">
+                    ← Back to Main Portal
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[LOGIN] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+        let currentProofId = null;
+        let pollingInterval = null;
+        let currentSessionId = null;
+
+        // Create session on page load
+        window.addEventListener('load', async () => {
+            console.log('🔐 [DIDCOMM-LOGIN] Initializing DIDComm authentication...');
+
+            try {
+                const response = await fetch(apiUrl('/api/auth/create-session'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    currentSessionId = data.sessionId;
+                    console.log(`✅ [DIDCOMM-LOGIN] Session created: ${currentSessionId.substring(0, 12)}...`);
+                } else {
+                    throw new Error(data.error || 'Failed to create session');
+                }
+            } catch (error) {
+                console.error('❌ [DIDCOMM-LOGIN] Session creation failed:', error);
+                showError('Failed to create secure session. Please refresh the page.');
+            }
+        });
+
+        async function initiateProofRequest() {
+            const userIdentifier = document.getElementById('userIdentifier').value.trim();
+
+            if (!userIdentifier) {
+                alert('Please enter your unique ID or name');
+                return;
+            }
+
+            if (!currentSessionId) {
+                showError('No session available. Please refresh the page.');
+                return;
+            }
+
+            try {
+                console.log(`🔐 [DIDCOMM-LOGIN] Initiating proof request for: ${userIdentifier}`);
+
+                // Call new DIDComm initiate endpoint
+                const response = await fetch(apiUrl('/api/auth/didcomm/initiate'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        identifier: userIdentifier,
+                        sessionId: currentSessionId
+                    })
+                });
+
+                const data = await response.json();
+                console.log('📋 [DIDCOMM-LOGIN] Initiate response:', data);
+
+                if (!data.success) {
+                    if (data.error === 'NoConnectionFound') {
+                        // Redirect to connection setup
+                        showError('No DIDComm connection found. Please establish a connection first.');
+                        setTimeout(() => {
+                            window.location.href = `/setup-connection?identifier=${encodeURIComponent(userIdentifier)}&returnUrl=/login`;
+                        }, 3000);
+                        return;
+                    } else if (data.error === 'RateLimitExceeded') {
+                        showError('Too many authentication attempts. Please wait 1 minute and try again.');
+                        return;
+                    }
+                    throw new Error(data.message || 'Failed to initiate proof request');
+                }
+
+                // Store proof ID and show waiting screen
+                currentProofId = data.presentationId;
+
+                document.getElementById('displayUserId').textContent = userIdentifier;
+                document.getElementById('displayConnectionId').textContent =
+                    data.connectionId.substring(0, 12) + '...';
+
+                // Hide identifier input, show waiting screen
+                document.getElementById('identificationStep').style.display = 'none';
+                document.getElementById('proofRequestStep').style.display = 'block';
+
+                console.log(`✅ [DIDCOMM-LOGIN] Proof request sent: ${currentProofId}`);
+                console.log(`   Connection ID: ${data.connectionId}`);
+
+                // Start polling for completion
+                startPolling();
+
+            } catch (error) {
+                console.error('❌ [DIDCOMM-LOGIN] Initiate proof request failed:', error);
+                showError(error.message || 'Failed to initiate authentication');
+            }
+        }
+
+        function startPolling() {
+            console.log(`🔄 [DIDCOMM-LOGIN] Starting status polling for: ${currentProofId}`);
+
+            // Poll immediately
+            performStatusCheck();
+
+            // Then poll every 2 seconds
+            pollingInterval = setInterval(async () => {
+                await performStatusCheck();
+            }, 2000);
+        }
+
+        async function performStatusCheck() {
+            try {
+                if (!currentProofId || !currentSessionId) {
+                    console.error('❌ [DIDCOMM-LOGIN] Missing proof ID or session ID');
+                    return;
+                }
+
+                console.log(`🔍 [DIDCOMM-LOGIN] Polling status for: ${currentProofId}`);
+
+                const response = await fetch(apiUrl(`/api/auth/didcomm/status/${currentProofId}?sessionId=${currentSessionId}`));
+                const data = await response.json();
+
+                console.log(`📊 [DIDCOMM-LOGIN] Status response:`, data);
+
+                if (data.success) {
+                    const statusEl = document.getElementById('statusMessage');
+
+                    if (data.status === 'PresentationReceived') {
+                        console.log('✅ [DIDCOMM-LOGIN] Presentation received! Verifying...');
+                        statusEl.textContent = 'Presentation received! Verifying...';
+
+                        // Stop polling
+                        if (pollingInterval) {
+                            clearInterval(pollingInterval);
+                            pollingInterval = null;
+                        }
+
+                        // Verify presentation
+                        await completeLogin();
+
+                    } else if (data.status === 'AwaitingPresentation') {
+                        statusEl.textContent = 'Waiting for approval in your wallet...';
+                    } else {
+                        statusEl.textContent = `Status: ${data.state || data.status}`;
+                    }
+                }
+            } catch (error) {
+                console.error('❌ [DIDCOMM-LOGIN] Polling error:', error);
+                // Continue polling despite errors
+            }
+        }
+
+        async function completeLogin() {
+            try {
+                console.log(`🔐 [DIDCOMM-LOGIN] Completing login for proof: ${currentProofId}`);
+
+                const response = await fetch(apiUrl(`/api/auth/didcomm/verify/${currentProofId}`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessionId: currentSessionId
+                    })
+                });
+
+                const data = await response.json();
+                console.log('✅ [DIDCOMM-LOGIN] Verify response:', data);
+
+                if (data.success && data.authenticated) {
+                    showSuccess(data.userData, data.connectionId);
+
+                    // Store in sessionStorage for portal access
+                    sessionStorage.setItem('ca_auth', JSON.stringify({
+                        verificationMethod: 'DIDComm-Present-Proof',
+                        sessionId: currentSessionId,
+                        userData: data.userData,
+                        connectionId: data.connectionId,
+                        loginTime: new Date().toISOString()
+                    }));
+
+                    // Redirect to portal
+                    setTimeout(() => {
+                        window.location.href = data.redirectUrl || '/portal';
+                    }, 2000);
+
+                } else {
+                    throw new Error(data.message || 'Verification failed');
+                }
+
+            } catch (error) {
+                console.error('❌ [DIDCOMM-LOGIN] Login completion error:', error);
+                showError(error.message || 'Failed to complete authentication');
+            }
+        }
+
+        function showSuccess(userData, connectionId) {
+            document.getElementById('proofRequestStep').style.display = 'none';
+            document.getElementById('resultStep').style.display = 'block';
+            document.getElementById('resultMessage').innerHTML = `
+                <div class="status success">
+                    <h2 style="margin-bottom: 15px;">🎉 Authentication Successful!</h2>
+                    <p style="font-size: 1.1rem; margin-bottom: 15px;">Welcome back, <strong>${userData.firstName} ${userData.lastName}</strong>!</p>
+                    <div style="text-align: left; margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.5); border-radius: 8px;">
+                        <p><strong>Unique ID:</strong> ${userData.uniqueId}</p>
+                        <p><strong>Connection:</strong> ${connectionId.substring(0, 16)}...</p>
+                        <p><strong>Auth Method:</strong> DIDComm Present Proof</p>
+                    </div>
+                    <p style="margin-top: 20px; font-size: 0.95rem;">Redirecting to portal...</p>
+                </div>
+            `;
+        }
+
+        function showError(message) {
+            document.getElementById('identificationStep').style.display = 'none';
+            document.getElementById('proofRequestStep').style.display = 'none';
+            document.getElementById('resultStep').style.display = 'block';
+            document.getElementById('resultMessage').innerHTML = `
+                <div class="status error">
+                    <h2 style="margin-bottom: 15px;">❌ Authentication Failed</h2>
+                    <p style="font-size: 1rem; margin-bottom: 15px;">${message}</p>
+                    <button class="btn" onclick="window.location.reload()">Try Again</button>
+                </div>
+            `;
+        }
+
+        function cancelProofRequest() {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+            }
+            window.location.reload();
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+            }
+        });
+    </script>
+</body>
+</html>

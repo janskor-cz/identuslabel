@@ -1,0 +1,66 @@
+{
+  "name": "SecurityClearanceLevel",
+  "version": "2.0.0",
+  "description": "Unified Security Clearance credential supporting multiple clearance levels with Ed25519 public key authentication",
+  "type": "https://w3c-ccg.github.io/vc-json-schemas/schema/2.0/schema.json",
+  "author": "did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c",
+  "tags": ["security", "clearance", "authentication"],
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://identuslabel.cz/schemas/SecurityClearanceLevel/2.0.0",
+    "type": "object",
+    "properties": {
+      "clearanceLevel": {
+        "type": "string"
+      },
+      "holderName": {
+        "type": "string"
+      },
+      "holderUniqueId": {
+        "type": "string"
+      },
+      "publicKey": {
+        "type": "string"
+      },
+      "keyAlgorithm": {
+        "type": "string"
+      },
+      "keyFingerprint": {
+        "type": "string"
+      },
+      "issuedDate": {
+        "type": "string"
+      },
+      "expiryDate": {
+        "type": "string"
+      },
+      "clearanceId": {
+        "type": "string"
+      },
+      "issuingAuthority": {
+        "type": "string"
+      },
+      "requiresMultiFactorAuth": {
+        "type": "boolean"
+      },
+      "allowsDigitalSigning": {
+        "type": "boolean"
+      },
+      "allowsEncryption": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "clearanceLevel",
+      "holderName",
+      "holderUniqueId",
+      "issuedDate",
+      "expiryDate",
+      "clearanceId",
+      "issuingAuthority",
+      "requiresMultiFactorAuth",
+      "allowsDigitalSigning",
+      "allowsEncryption"
+    ]
+  }
+}

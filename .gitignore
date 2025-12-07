@@ -7,11 +7,14 @@ node_modules/
 **/.next/
 dist/
 build/
+.turbo/
+**/.turbo/
 
 # Logs
 *.log
 /tmp/*.log
 *.log.*
+logs/
 
 # Environment files with secrets
 .env
@@ -20,23 +23,26 @@ build/
 
 # Temporary files
 /tmp/*
-!/ tmp/.gitkeep
+!/tmp/.gitkeep
 *.tmp
 *.temp
 
 # Database files
 *.db
 *.sqlite
+postgres/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*.iml
 
 # OS
 .DS_Store
 Thumbs.db
+.AppleDouble
 
 # Docker volumes
 **/db-data/
@@ -45,6 +51,47 @@ Thumbs.db
 # Backups
 /backups/
 *.tar.gz
+TrashBin/
+
+# User/system directories (not project files)
+.bash_history
+.bashrc
+.profile
+.viminfo
+.cache/
+.cargo/
+.config/
+.gradle/
+.local/
+.npm/
+.pki/
+.rustup/
+.ssh/
+.yarn/
+.cloud-locale-test.skip
+snap/
+
+# Claude Code workspace
+.claude.json
+.claude.json.backup
+.claude/
+
+# Development tools (not part of main project)
+claudecodeui/
+
+# Large wallet project (separate repository recommended)
+clean-identus-wallet/
+
+# External git repositories (use git submodules if needed)
+hyperledger-identus-ssi/
+identus-mediator/
+identus-infrastructure/
+
+# Schema caches (regenerated)
+**/.schema-cache.json
+
+# Runtime data (regenerated)
+company-admin-portal/data/
 
 # Sensitive credentials (keep these templates only)
 # NOTE: multitenancy-test-credentials.txt is included for documentation purposes

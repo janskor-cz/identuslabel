@@ -24,6 +24,13 @@ identuslabel.cz {
     }
     respond @options 204
 
+    # JSON Schemas for Verifiable Credentials (/schemas -> static files)
+    # Serve W3C VC JSON schemas for credential validation
+    handle_path /schemas* {
+        root * /var/www/schemas
+        file_server
+    }
+
     # Company Admin Portal (/company-admin -> port 3010)
     # Standalone multitenancy admin interface for company DID and employee management
     handle_path /company-admin* {
@@ -84,7 +91,7 @@ identuslabel.cz {
     }
 
     # Alice Wallet (/alice -> port 3001)
-    # Note: Using 'handle' instead of 'handle_path' to preserve /alice prefix for Next.js basePath
+    # Note: Using 'handle' to preserve /alice prefix for Next.js basePath
     handle /alice* {
         reverse_proxy 127.0.0.1:3001 {
             header_up Host {host}
@@ -130,6 +137,50 @@ identuslabel.cz {
     # Proxy to Cloud Agent DIDComm endpoint for message exchange
     handle_path /didcomm* {
         reverse_proxy 127.0.0.1:8090 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # TechCorp Cloud Agent DIDComm (/techcorp/didcomm -> port 8290)
+    # Proxy to TechCorp multitenancy Cloud Agent DIDComm endpoint
+    handle_path /techcorp/didcomm* {
+        reverse_proxy 127.0.0.1:8290 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # TechCorp Cloud Agent API (/techcorp -> port 8200)
+    # Proxy to TechCorp multitenancy Cloud Agent REST API
+    handle_path /techcorp* {
+        reverse_proxy 127.0.0.1:8200 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Enterprise Cloud Agent DIDComm (/enterprise/didcomm -> port 8390)
+    # Proxy to Enterprise multitenancy Cloud Agent DIDComm endpoint (HR, IT, Security)
+    handle_path /enterprise/didcomm* {
+        reverse_proxy 127.0.0.1:8390 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Enterprise Cloud Agent API (/enterprise -> port 8300)
+    # Proxy to Enterprise multitenancy Cloud Agent REST API
+    handle_path /enterprise* {
+        reverse_proxy 127.0.0.1:8300 {
             header_up Host {host}
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}

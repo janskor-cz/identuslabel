@@ -172,8 +172,10 @@ Edit `/lib/companies.js` to:
 
 Configured in `/lib/companies.js`:
 ```javascript
-const MULTITENANCY_CLOUD_AGENT_URL = 'http://91.99.4.54:8200';
+const MULTITENANCY_CLOUD_AGENT_URL = 'http://91.99.4.54:8200';  // Internal-only access (not proxied)
 ```
+
+**Note**: The Multitenancy Cloud Agent is accessible only via internal IP address and is not exposed through the Caddy reverse proxy.
 
 ---
 
@@ -312,10 +314,12 @@ Clear browser cookies and cache, or use incognito mode.
 docker ps | grep multitenancy
 ```
 
-2. Test Cloud Agent:
+2. Test Cloud Agent (internal-only access):
 ```bash
 curl http://91.99.4.54:8200/_system/health
 ```
+
+**Note**: Multitenancy Cloud Agent is only accessible via internal IP (not exposed through reverse proxy).
 
 ---
 

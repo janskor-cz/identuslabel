@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Credential Revocation Management - Certification Authority</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            padding: 30px 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1rem;
+        }
+
+        .main {
+            padding: 40px;
+        }
+
+        .section {
+            padding: 30px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            background: #f9f9f9;
+            margin-bottom: 30px;
+        }
+
+        .section h2 {
+            color: #c31432;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+            border-bottom: 2px solid #c31432;
+            padding-bottom: 10px;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #c31432 0%, #240b36 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            margin: 5px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(195, 20, 50, 0.3);
+        }
+
+        .btn.secondary {
+            background: #6c757d;
+        }
+
+        .btn.danger {
+            background: #dc3545;
+        }
+
+        .btn.danger:hover {
+            background: #c82333;
+            box-shadow: 0 5px 15px rgba(220, 53, 69, 0.3);
+        }
+
+        .btn:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            opacity: 0.6;
+            transform: none;
+        }
+
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .status.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+
+        .status.info {
+            background: #cce5ff;
+            border: 1px solid #b8daff;
+            color: #004085;
+        }
+
+        .status.warning {
+            background: #fff3cd;
+            border: 1px solid #ffeeba;
+            color: #856404;
+        }
+
+        .credential-card {
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }
+
+        .credential-card:hover {
+            border-color: #c31432;
+            box-shadow: 0 4px 16px rgba(195, 20, 50, 0.2);
+        }
+
+        .credential-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .credential-id {
+            font-weight: 600;
+            color: #240b36;
+            font-size: 1.1rem;
+        }
+
+        .credential-badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: bold;
+        }
+
+        .badge-issued {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .badge-revoked {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .credential-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .detail-item {
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+
+        .detail-label {
+            font-size: 0.85rem;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .detail-value {
+            font-weight: 600;
+            color: #333;
+            word-break: break-all;
+        }
+
+        .credential-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 15px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 3rem;
+            color: #666;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #c31432;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+        }
+
+        .empty-state-icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+        }
+
+        .controls-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+            border: 2px solid #e0e0e0;
+        }
+
+        .credential-count {
+            font-weight: 600;
+            color: #240b36;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <span>🚫</span>
+                <span>Credential Revocation Management</span>
+            </h1>
+            <p>Manage and revoke issued credentials using Cloud Agent StatusList2021</p>
+        </div>
+
+        <div class="main">
+            <!-- Information Section -->
+            <div class="section">
+                <h2>ℹ️ About Credential Revocation</h2>
+                <div class="status info">
+                    <strong>Cloud Agent Native Revocation</strong><br>
+                    This system uses Hyperledger Identus Cloud Agent's native StatusList2021 implementation for credential revocation.
+                    All credentials are automatically provisioned with revocation capability when issued.
+                </div>
+                <p style="margin-top: 15px; color: #666;">
+                    <strong>How it works:</strong>
+                </p>
+                <ul style="margin-top: 10px; margin-left: 20px; color: #666;">
+                    <li>All issued credentials include a <code>credentialStatus</code> property with StatusList2021Entry</li>
+                    <li>Revoking a credential updates the Cloud Agent's internal status list</li>
+                    <li>Wallets verify credential status by fetching the latest status list from the Cloud Agent</li>
+                    <li>Revocation is irreversible - revoked credentials cannot be restored</li>
+                </ul>
+            </div>
+
+            <!-- Credentials Management Section -->
+            <div class="section">
+                <h2>📋 Issued Credentials</h2>
+
+                <div class="controls-bar">
+                    <div class="credential-count" id="credentialCount">
+                        Loading credentials...
+                    </div>
+                    <div>
+                        <button class="btn secondary" onclick="refreshCredentials()">
+                            🔄 Refresh
+                        </button>
+                        <a href="/" class="btn">
+                            ← Back to Main
+                        </a>
+                    </div>
+                </div>
+
+                <div id="statusMessage"></div>
+
+                <div id="credentialsList">
+                    <div class="loading">
+                        <div class="loading-spinner"></div>
+                        <p style="margin-top: 1rem;">Loading issued credentials...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Base path detection for reverse proxy routing
+        const BASE_PATH = window.location.pathname.startsWith('/ca') ? '/ca' : '';
+        console.log('[CA] Detected BASE_PATH:', BASE_PATH);
+
+        // Helper function to build API URLs with base path
+        function apiUrl(path) {
+            return BASE_PATH + path;
+        }
+
+        let credentials = [];
+
+        // Load credentials on page load
+        window.addEventListener('load', () => {
+            loadIssuedCredentials();
+        });
+
+        // Cache for StatusList credentials
+        const statusListCache = new Map();
+
+        async function fetchStatusList(statusListUrl) {
+            if (statusListCache.has(statusListUrl)) {
+                console.log(`📋 [REVOCATION] Using cached StatusList: ${statusListUrl}`);
+                return statusListCache.get(statusListUrl);
+            }
+
+            // Normalize the URL to avoid mixed content issues
+            // Extract the path from the StatusList URL and use relative path
+            // Example: http://91.99.4.54:8000/cloud-agent/credential-status/abc -> /cloud-agent/credential-status/abc
+            const urlObj = new URL(statusListUrl);
+            const statusListPath = urlObj.pathname; // e.g., /cloud-agent/credential-status/abc
+
+            console.log(`🌐 [REVOCATION] Fetching StatusList from path: ${statusListPath}`);
+
+            // Fetch via the CA server proxy to avoid mixed content and CORS issues
+            const response = await fetch(apiUrl(`/api/proxy-statuslist?path=${encodeURIComponent(statusListPath)}`));
+            if (!response.ok) throw new Error(`Failed to fetch StatusList: ${response.status}`);
+
+            const statusListCredential = await response.json();
+            statusListCache.set(statusListUrl, statusListCredential);
+            console.log(`✅ [REVOCATION] StatusList fetched and cached successfully`);
+            return statusListCredential;
+        }
+
+        function decodeStatusList(encodedList) {
+            console.log(`🔓 [REVOCATION] Decoding StatusList bitstring...`);
+
+            // Base64URL decode
+            const base64 = encodedList.replace(/-/g, '+').replace(/_/g, '/');
+            const padding = 4 - (base64.length % 4);
+            const paddedBase64 = padding !== 4 ? base64 + '='.repeat(padding) : base64;
+
+            const binaryString = atob(paddedBase64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            // Decompress using pako (gzip)
+            const decompressed = pako.inflate(bytes);
+
+            // Convert to bitstring
+            let bits = '';
+            for (let i = 0; i < decompressed.length; i++) {
+                bits += decompressed[i].toString(2).padStart(8, '0');
+            }
+
+            console.log(`✅ [REVOCATION] Decoded bitstring length: ${bits.length} bits`);
+            return bits;
+        }
+
+        async function checkRevocationStatus(credential) {
+            if (!credential.credentialStatusId) {
+                console.log(`⚠️ [REVOCATION] No credentialStatusId for record ${credential.recordId}`);
+                return { isRevoked: false, checked: false };
+            }
+
+            try {
+                // Parse statusListUrl and index from credentialStatusId
+                // Format: "http://host/status-list-id#index"
+                const [statusListUrl, indexStr] = credential.credentialStatusId.split('#');
+                const statusListIndex = parseInt(indexStr);
+
+                console.log(`🔍 [REVOCATION] Checking status for record ${credential.recordId}: index ${statusListIndex}`);
+
+                const statusListCredential = await fetchStatusList(statusListUrl);
+                const encodedList = statusListCredential.credentialSubject.encodedList;
+                const bits = decodeStatusList(encodedList);
+
+                const isRevoked = bits[statusListIndex] === '1';
+                console.log(`${isRevoked ? '🚫' : '✅'} [REVOCATION] Credential ${credential.recordId} is ${isRevoked ? 'REVOKED' : 'ACTIVE'} (bit ${statusListIndex} = ${bits[statusListIndex]})`);
+
+                return { isRevoked, checked: true };
+            } catch (error) {
+                console.warn(`⚠️ [REVOCATION] Failed to check revocation status for ${credential.recordId}:`, error);
+                return { isRevoked: false, checked: false };
+            }
+        }
+
+        async function loadIssuedCredentials() {
+            try {
+                console.log('📋 [REVOCATION] Loading revocable credentials...');
+
+                const response = await fetch(apiUrl('/api/credentials/revocable'));
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                credentials = data.contents || [];
+
+                console.log(`✅ [REVOCATION] Loaded ${credentials.length} revocable credentials`);
+
+                await displayCredentials();
+                updateCredentialCount();
+
+            } catch (error) {
+                console.error('❌ [REVOCATION] Error loading credentials:', error);
+                showError('Failed to load credentials: ' + error.message);
+
+                document.getElementById('credentialsList').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">❌</div>
+                        <h3 style="color: #dc3545;">Error Loading Credentials</h3>
+                        <p style="color: #666;">Failed to fetch revocable credentials from Cloud Agent.</p>
+                        <p style="font-size: 0.9rem; color: #999; margin-top: 1rem;">Error: ${error.message}</p>
+                        <button class="btn secondary" onclick="loadIssuedCredentials()" style="margin-top: 15px;">🔄 Retry</button>
+                    </div>
+                `;
+            }
+        }
+
+        async function displayCredentials() {
+            const container = document.getElementById('credentialsList');
+
+            if (credentials.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📋</div>
+                        <h3>No Revocable Credentials Found</h3>
+                        <p style="color: #666; margin-top: 1rem;">
+                            No credentials with revocation capability have been issued yet.
+                        </p>
+                        <p style="font-size: 0.9rem; color: #999; margin-top: 1rem;">
+                            Only credentials in "CredentialSent" or "CredentialRevoked" state with a credentialStatusId appear here.
+                        </p>
+                        <p style="font-size: 0.9rem; color: #999; margin-top: 0.5rem;">
+                            Credentials must be configured with StatusList2021 revocation support when issued.
+                        </p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Check actual revocation status for all credentials
+            console.log(`🔍 [REVOCATION] Checking actual revocation status for ${credentials.length} credentials...`);
+            const statusChecks = await Promise.all(
+                credentials.map(async (credential) => {
+                    const status = await checkRevocationStatus(credential);
+                    return { ...credential, ...status };
+                })
+            );
+
+            // Update credentials with actual revocation status
+            credentials = statusChecks;
+
+            container.innerHTML = credentials.map(credential => {
+                const isRevoked = credential.isRevoked;
+                const badgeClass = isRevoked ? 'badge-revoked' : 'badge-issued';
+                const badgeText = isRevoked ? '🚫 REVOKED' : '✅ ISSUED';
+
+                const createdAt = credential.issuedAt ? new Date(credential.issuedAt).toLocaleString() : 'Unknown';
+                const updatedAt = credential.updatedAt ? new Date(credential.updatedAt).toLocaleString() : 'Unknown';
+
+                // Extract subject information from claims
+                const holderDid = credential.subjectId || 'Unknown';
+                const subjectName = credential.claims?.name || credential.claims?.fullName || credential.claims?.givenName || 'Unknown';
+
+                // Extract credential status ID
+                const statusId = credential.credentialStatusId || 'Not Available';
+
+                return `
+                    <div class="credential-card">
+                        <div class="credential-header">
+                            <div class="credential-id">
+                                🎫 ${subjectName !== 'Unknown' ? subjectName : 'Credential Record'}
+                            </div>
+                            <div class="credential-badge ${badgeClass}">
+                                ${badgeText}
+                            </div>
+                        </div>
+
+                        <div class="credential-details">
+                            <div class="detail-item">
+                                <div class="detail-label">Record ID</div>
+                                <div class="detail-value" style="font-family: monospace; font-size: 0.85rem;">
+                                    ${credential.recordId}
+                                </div>
+                            </div>
+
+                            <div class="detail-item">
+                                <div class="detail-label">Credential Status ID</div>
+                                <div class="detail-value" style="font-family: monospace; font-size: 0.85rem;">
+                                    ${statusId}
+                                </div>
+                            </div>
+
+                            <div class="detail-item">
+                                <div class="detail-label">Schema ID</div>
+                                <div class="detail-value" style="font-family: monospace; font-size: 0.85rem;">
+                                    ${credential.schemaId ? credential.schemaId.split('/').pop() : 'Unknown'}
+                                </div>
+                            </div>
+
+                            <div class="detail-item">
+                                <div class="detail-label">Holder DID</div>
+                                <div class="detail-value" style="font-family: monospace; font-size: 0.85rem;">
+                                    ${holderDid.substring(0, 30)}...
+                                </div>
+                            </div>
+
+                            <div class="detail-item">
+                                <div class="detail-label">Protocol State</div>
+                                <div class="detail-value">
+                                    ${credential.protocolState}
+                                </div>
+                            </div>
+
+                            <div class="detail-item">
+                                <div class="detail-label">Issued At</div>
+                                <div class="detail-value">
+                                    ${createdAt}
+                                </div>
+                            </div>
+
+                            <div class="detail-item">
+                                <div class="detail-label">Last Updated</div>
+                                <div class="detail-value">
+                                    ${updatedAt}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="credential-actions">
+                            <button
+                                class="btn secondary"
+                                onclick="viewCredentialDetails('${credential.recordId}')"
+                            >
+                                🔍 View Details
+                            </button>
+                            <button
+                                class="btn danger"
+                                onclick="revokeCredential('${credential.recordId}')"
+                                ${isRevoked ? 'disabled' : ''}
+                            >
+                                ${isRevoked ? '🚫 Already Revoked' : '🚫 Revoke Credential'}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function updateCredentialCount() {
+            const total = credentials.length;
+            const revoked = credentials.filter(c => c.isRevoked === true).length;
+            const active = total - revoked;
+
+            document.getElementById('credentialCount').innerHTML = `
+                📊 Total: <strong>${total}</strong> credentials
+                &nbsp;|&nbsp;
+                ✅ Active: <strong>${active}</strong>
+                &nbsp;|&nbsp;
+                🚫 Revoked: <strong>${revoked}</strong>
+            `;
+        }
+
+        async function revokeCredential(recordId) {
+            // Find credential for confirmation dialog
+            const credential = credentials.find(c => c.recordId === recordId);
+            if (!credential) {
+                showError('Credential not found');
+                return;
+            }
+
+            // Confirmation dialog
+            const confirmMessage =
+                `⚠️ REVOKE CREDENTIAL\n\n` +
+                `Are you sure you want to revoke this credential?\n\n` +
+                `Record ID: ${recordId}\n` +
+                `Schema: ${credential.schemaId ? credential.schemaId.split('/').pop() : 'Unknown'}\n` +
+                `Holder: ${credential.subjectId ? credential.subjectId.substring(0, 30) + '...' : 'Unknown'}\n\n` +
+                `This action is IRREVERSIBLE!\n` +
+                `The credential holder will no longer be able to use this credential.\n\n` +
+                `Click OK to proceed with revocation, or Cancel to abort.`;
+
+            if (!confirm(confirmMessage)) {
+                console.log('🚫 [REVOCATION] User cancelled revocation');
+                return;
+            }
+
+            try {
+                console.log(`🚫 [REVOCATION] Attempting to revoke credential: ${recordId}`);
+                showInfo(`Revoking credential ${recordId.substring(0, 12)}...`);
+
+                const response = await fetch(`/api/credentials/revoke/${recordId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const data = await response.json();
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || data.details || 'Unknown error');
+                }
+
+                console.log(`✅ [REVOCATION] Successfully revoked credential: ${recordId}`);
+                showSuccess(`Credential revoked successfully! The credential holder will no longer be able to use this credential.`);
+
+                // Refresh credentials list after short delay
+                setTimeout(() => {
+                    refreshCredentials();
+                }, 2000);
+
+            } catch (error) {
+                console.error(`❌ [REVOCATION] Error revoking credential:`, error);
+                showError(`Failed to revoke credential: ${error.message}`);
+            }
+        }
+
+        function viewCredentialDetails(recordId) {
+            const credential = credentials.find(c => c.recordId === recordId);
+            if (!credential) {
+                alert('Credential not found');
+                return;
+            }
+
+            const details = JSON.stringify(credential, null, 2);
+
+            // Create modal or alert with details
+            const detailsWindow = window.open('', 'Credential Details', 'width=800,height=600');
+            detailsWindow.document.write(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Credential Details - ${recordId}</title>
+                    <style>
+                        body {
+                            font-family: monospace;
+                            padding: 20px;
+                            background: #1e1e1e;
+                            color: #d4d4d4;
+                        }
+                        pre {
+                            background: #2d2d2d;
+                            padding: 20px;
+                            border-radius: 8px;
+                            overflow: auto;
+                            white-space: pre-wrap;
+                            word-wrap: break-word;
+                        }
+                        h1 {
+                            color: #4fc3f7;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <h1>🎫 Credential Record Details</h1>
+                    <p><strong>Record ID:</strong> ${recordId}</p>
+                    <pre>${details}</pre>
+                </body>
+                </html>
+            `);
+        }
+
+        function refreshCredentials() {
+            console.log('🔄 [REVOCATION] Refreshing credentials list...');
+            clearStatusMessage();
+            loadIssuedCredentials();
+        }
+
+        function showSuccess(message) {
+            const statusDiv = document.getElementById('statusMessage');
+            statusDiv.innerHTML = `
+                <div class="status success">
+                    <strong>✅ Success</strong><br>${message}
+                </div>
+            `;
+            statusDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function showError(message) {
+            const statusDiv = document.getElementById('statusMessage');
+            statusDiv.innerHTML = `
+                <div class="status error">
+                    <strong>❌ Error</strong><br>${message}
+                </div>
+            `;
+            statusDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function showInfo(message) {
+            const statusDiv = document.getElementById('statusMessage');
+            statusDiv.innerHTML = `
+                <div class="status info">
+                    <strong>ℹ️ Info</strong><br>${message}
+                </div>
+            `;
+        }
+
+        function clearStatusMessage() {
+            document.getElementById('statusMessage').innerHTML = '';
+        }
+    </script>
+</body>
+</html>

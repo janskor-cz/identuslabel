@@ -737,3 +737,183 @@ code {
         bottom: 16px;
     }
 }
+
+/* ============================================================================
+   COMPANY CREDENTIALS STYLING
+   ============================================================================ */
+
+/* Credential Filters */
+.credential-filters {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.filter-btn {
+    padding: 8px 16px;
+    border: 2px solid #ddd;
+    background: white;
+    color: #333;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: all 0.2s ease;
+}
+
+.filter-btn:hover {
+    border-color: #4285f4;
+    background: #f8f9fa;
+}
+
+.filter-btn.active {
+    border-color: #4285f4;
+    background: #4285f4;
+    color: white;
+    font-weight: 600;
+}
+
+/* Status Badges */
+.status-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.85em;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.status-active {
+    background: #d4edda;
+    color: #155724;
+}
+
+.status-revoked {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.status-expired {
+    background: #e2e3e5;
+    color: #383d41;
+}
+
+/* Empty State */
+.empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border: 2px dashed #dee2e6;
+}
+
+.empty-icon {
+    font-size: 4em;
+    margin-bottom: 16px;
+    opacity: 0.5;
+}
+
+.empty-state h3 {
+    margin: 0 0 8px 0;
+    color: #495057;
+}
+
+.empty-state p {
+    margin: 0;
+    color: #6c757d;
+}
+
+/* Credential Details Modal */
+.credential-details {
+    max-height: 70vh;
+    overflow-y: auto;
+}
+
+.detail-section {
+    margin-bottom: 30px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #dee2e6;
+}
+
+.detail-section:last-child {
+    border-bottom: none;
+}
+
+.detail-section h4 {
+    margin: 0 0 16px 0;
+    color: #495057;
+    font-size: 1.1em;
+    font-weight: 600;
+}
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 16px;
+}
+
+.detail-item {
+    display: flex;
+    flex-direction: column;
+}
+
+.detail-item.full-width {
+    grid-column: 1 / -1;
+}
+
+.detail-item label {
+    font-size: 0.85em;
+    font-weight: 600;
+    color: #6c757d;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.detail-value {
+    font-size: 1em;
+    color: #212529;
+    word-break: break-word;
+}
+
+.detail-value code {
+    background: #f8f9fa;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.9em;
+    color: #e83e8c;
+}
+
+.detail-value a {
+    color: #4285f4;
+    text-decoration: none;
+}
+
+.detail-value a:hover {
+    text-decoration: underline;
+}
+
+/* Button Small */
+.btn-sm {
+    padding: 4px 12px;
+    font-size: 0.85em;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .credential-filters {
+        flex-direction: column;
+    }
+
+    .filter-btn {
+        width: 100%;
+    }
+
+    .detail-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .detail-item.full-width {
+        grid-column: 1;
+    }
+}
