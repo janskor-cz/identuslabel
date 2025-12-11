@@ -748,10 +748,192 @@ function showDocumentsError(message) {
     }
 }
 
-function viewDocument(documentDID) {
-    console.log(`[Documents] View document: ${documentDID}`);
-    showError('Document viewing feature coming soon!');
-    // TODO: Implement document viewing/download functionality
+/**
+ * View/Download a document using the wallet postMessage bridge
+ *
+ * This function uses ephemeral DID document access control:
+ * 1. Opens/focuses the Alice Wallet window
+ * 2. Sends DOCUMENT_ACCESS_REQUEST via postMessage
+ * 3. Wallet generates ephemeral X25519 keypair (perfect forward secrecy)
+ * 4. Wallet signs request with Ed25519 key (non-repudiation)
+ * 5. Wallet fetches & decrypts document from Company Admin Portal
+ * 6. Wallet sends decrypted document back via DOCUMENT_ACCESS_RESPONSE
+ * 7. Display PDF via blob URL
+ *
+ * @param {string} documentDID - The PRISM DID of the document
+ */
+async function viewDocument(documentDID) {
+    console.log(`[Documents] View document via wallet bridge: ${documentDID}`);
+
+    // NOTE: Clearance level is now handled server-side from the VP-verified session
+    // The client no longer sends clearance level - this is a security improvement
+
+    try {
+        // Show loading state
+        showLoading(true);
+
+        // Ensure wallet is open
+        await ensureWalletOpen();
+
+        // Request document access via wallet (clearance verified server-side)
+        console.log(`[Documents] Requesting document access (clearance verified server-side)`);
+        const { documentBlob, filename } = await requestDocumentAccess(documentDID);
+
+        // Create blob URL and display document
+        console.log(`[Documents] Received document: ${filename}, size: ${documentBlob.byteLength || documentBlob.length} bytes`);
+
+        // Convert ArrayBuffer/Array to Blob if needed
+        // IMPORTANT: documentBlob from postMessage is a plain array of numbers (from Array.from(Uint8Array))
+        // The Blob constructor needs Uint8Array to treat it as binary, not convert array to string
+        const blob = documentBlob instanceof Blob
+            ? documentBlob
+            : new Blob([new Uint8Array(documentBlob)], { type: 'application/pdf' });
+
+        const blobUrl = URL.createObjectURL(blob);
+
+        // Open in new tab
+        const newWindow = window.open(blobUrl, '_blank');
+
+        // Clean up blob URL after a delay (browser needs time to load it)
+        setTimeout(() => {
+            URL.revokeObjectURL(blobUrl);
+        }, 60000); // 1 minute
+
+        if (!newWindow) {
+            // Fallback: download link if popup blocked
+            const link = document.createElement('a');
+            link.href = blobUrl;
+            link.download = filename || 'document.pdf';
+            link.click();
+        }
+
+        console.log('[Documents] Document displayed successfully');
+
+    } catch (error) {
+        console.error('[Documents] Error viewing document:', error);
+        showError(`Failed to view document: ${error.message}`);
+    } finally {
+        showLoading(false);
+    }
+}
+
+/**
+ * DEPRECATED: Map clearance level string to numeric value
+ *
+ * NOTE: This function is no longer used. Clearance level mapping is now handled
+ * server-side using ReEncryptionService.getLevelNumber() which uses correct 1-indexed values:
+ *   UNCLASSIFIED: 1, CONFIDENTIAL: 2, SECRET: 3, TOP_SECRET: 4
+ *
+ * The client no longer sends clearance level - the server extracts it from the
+ * VP-verified session to prevent clearance level spoofing attacks.
+ *
+ * @deprecated Use server-side session clearance instead
+ */
+function mapClearanceToNumeric(level) {
+    console.warn('[DEPRECATED] mapClearanceToNumeric() is no longer used. Clearance is verified server-side.');
+    const levelMap = {
+        'UNCLASSIFIED': 0,
+        'CONFIDENTIAL': 1,
+        'SECRET': 2,
+        'TOP_SECRET': 3
+    };
+    return levelMap[level] || 0;
+}
+
+/**
+ * LEGACY: View document via direct proxy (fallback method)
+ * Use viewDocument() instead - this is kept for backwards compatibility
+ */
+async function viewDocumentViaProxy(documentDID) {
+    console.log(`[Documents] LEGACY: View document via proxy: ${documentDID}`);
+
+    try {
+        // Use server-side proxy endpoint to download document
+        // The proxy extracts file info from the PRISM DID and makes proper POST request to Iagon
+        const proxyUrl = `/company-admin/api/documents/download-by-did/${encodeURIComponent(documentDID)}`;
+
+        console.log(`[Documents] Using proxy endpoint: ${proxyUrl}`);
+
+        // Open the document in a new tab via the proxy
+        window.open(proxyUrl, '_blank');
+
+        console.log('[Documents] Document download initiated via proxy');
+
+    } catch (error) {
+        console.error('[Documents] Error viewing document:', error);
+        showError(`Failed to view document: ${error.message}`);
+    }
+}
+
+/**
+ * Extract Iagon download URL from a long-form PRISM DID
+ *
+ * The DID contains base64url-encoded protobuf state which includes service endpoints.
+ * We look for the "iagon-storage" service to get the download URL.
+ *
+ * @param {string} prismDID - The long-form PRISM DID
+ * @returns {string|null} The Iagon download URL or null if not found
+ */
+function extractIagonUrlFromPrismDID(prismDID) {
+    try {
+        // Split the DID into its parts
+        // Format: did:prism:[stateHash]:[encodedState]
+        const parts = prismDID.split(':');
+
+        if (parts.length < 4) {
+            console.log('[Documents] Short-form DID, no embedded state');
+            return null;
+        }
+
+        // The last part is the base64url-encoded state
+        const encodedState = parts[parts.length - 1];
+        console.log('[Documents] Encoded state length:', encodedState.length);
+
+        // Base64url decode
+        const base64 = encodedState
+            .replace(/-/g, '+')
+            .replace(/_/g, '/');
+
+        // Add padding if needed
+        const padding = base64.length % 4;
+        const paddedBase64 = padding > 0
+            ? base64 + '='.repeat(4 - padding)
+            : base64;
+
+        // Decode to binary
+        const binaryStr = atob(paddedBase64);
+
+        // Look for Iagon URL patterns in the decoded data
+        // The URL is embedded as a JSON array string in the service endpoint
+        // Pattern: ["https://gw.iagon.com/api/v2/download?..."]
+
+        // Search for the Iagon URL pattern
+        const iagonPattern = /https:\/\/gw\.iagon\.com\/api\/v2\/download\?[^"\]]+/g;
+        const matches = binaryStr.match(iagonPattern);
+
+        if (matches && matches.length > 0) {
+            console.log('[Documents] Found Iagon URL in DID state:', matches[0]);
+            return matches[0];
+        }
+
+        // Alternative pattern: look for gw.v2.iagon.com
+        const iagonV2Pattern = /https:\/\/gw\.v2\.iagon\.com\/api\/v2\/storage\/download[^"\]]+/g;
+        const v2Matches = binaryStr.match(iagonV2Pattern);
+
+        if (v2Matches && v2Matches.length > 0) {
+            console.log('[Documents] Found Iagon v2 URL in DID state:', v2Matches[0]);
+            return v2Matches[0];
+        }
+
+        console.log('[Documents] No Iagon URL pattern found in DID state');
+        console.log('[Documents] Decoded state preview:', binaryStr.substring(0, 200));
+
+        return null;
+
+    } catch (error) {
+        console.error('[Documents] Error parsing PRISM DID:', error);
+        return null;
+    }
 }
 
 function escapeHtml(text) {
@@ -1037,6 +1219,182 @@ window.addEventListener('popstate', () => {
     }
     initializeDashboard();
 });
+
+// ============================================================================
+// WALLET BRIDGE COMMUNICATION (Ephemeral DID Document Access)
+// ============================================================================
+
+// Wallet window reference for postMessage communication
+let walletWindow = null;
+let walletReady = false;
+let pendingDocumentRequests = new Map(); // requestId -> { resolve, reject, timeout }
+
+// Wallet URL (production uses HTTPS domain)
+const WALLET_URL = window.location.hostname === 'localhost'
+    ? 'http://localhost:3001/alice'
+    : 'https://identuslabel.cz/alice';
+
+const WALLET_ORIGIN = window.location.hostname === 'localhost'
+    ? 'http://localhost:3001'
+    : 'https://identuslabel.cz';
+
+// Listen for messages from wallet
+window.addEventListener('message', (event) => {
+    // Validate origin
+    if (event.origin !== WALLET_ORIGIN) {
+        console.log('[WalletBridge] Ignoring message from unknown origin:', event.origin);
+        return;
+    }
+
+    const data = event.data;
+    console.log('[WalletBridge] Received message:', data.type);
+
+    switch (data.type) {
+        case 'WALLET_READY':
+            console.log('[WalletBridge] Wallet is ready');
+            walletReady = true;
+            break;
+
+        case 'PONG':
+            console.log('[WalletBridge] Wallet responded to ping');
+            walletReady = true;
+            break;
+
+        case 'DOCUMENT_ACCESS_RESPONSE':
+            handleDocumentAccessResponse(data);
+            break;
+
+        default:
+            // Ignore other message types
+            break;
+    }
+});
+
+/**
+ * Handle document access response from wallet
+ */
+function handleDocumentAccessResponse(data) {
+    const { requestId, success, documentBlob, filename, error, message } = data;
+
+    const pending = pendingDocumentRequests.get(requestId);
+    if (!pending) {
+        console.warn('[WalletBridge] Received response for unknown request:', requestId);
+        return;
+    }
+
+    // Clear timeout
+    if (pending.timeout) {
+        clearTimeout(pending.timeout);
+    }
+
+    // Remove from pending
+    pendingDocumentRequests.delete(requestId);
+
+    // Check for documentBlob existence (wallet may not send 'success' field)
+    if (documentBlob && documentBlob.length > 0) {
+        console.log('[WalletBridge] Document access granted:', filename);
+        pending.resolve({ documentBlob, filename });
+    } else {
+        console.error('[WalletBridge] Document access denied:', error || 'No document data', message || '');
+        pending.reject(new Error(message || error || 'Document access denied'));
+    }
+}
+
+/**
+ * Wait for wallet window to be ready
+ */
+async function waitForWalletReady(timeout = 30000) {
+    return new Promise((resolve, reject) => {
+        if (walletReady) {
+            resolve();
+            return;
+        }
+
+        const startTime = Date.now();
+
+        const checkInterval = setInterval(() => {
+            if (walletReady) {
+                clearInterval(checkInterval);
+                resolve();
+                return;
+            }
+
+            // Try pinging the wallet
+            if (walletWindow && !walletWindow.closed) {
+                walletWindow.postMessage({
+                    type: 'PING',
+                    source: 'employee-portal',
+                    timestamp: Date.now()
+                }, WALLET_ORIGIN);
+            }
+
+            // Check timeout
+            if (Date.now() - startTime > timeout) {
+                clearInterval(checkInterval);
+                reject(new Error('Wallet did not respond in time. Please ensure your wallet is open and logged in.'));
+            }
+        }, 1000);
+    });
+}
+
+/**
+ * Open wallet window if not already open
+ */
+async function ensureWalletOpen() {
+    // Check if wallet window exists and is open
+    if (walletWindow && !walletWindow.closed) {
+        // Window exists, focus it
+        walletWindow.focus();
+        return;
+    }
+
+    // Open new wallet window
+    console.log('[WalletBridge] Opening wallet window:', WALLET_URL);
+    walletWindow = window.open(WALLET_URL, 'alice-wallet', 'width=1200,height=800');
+    walletReady = false;
+
+    if (!walletWindow) {
+        throw new Error('Could not open wallet window. Please check your popup blocker settings.');
+    }
+
+    // Wait for wallet to be ready
+    await waitForWalletReady();
+}
+
+/**
+ * Request document access via wallet postMessage bridge
+ * This uses ephemeral keys for perfect forward secrecy
+ *
+ * NOTE: clearanceLevel is no longer sent - server uses VP-verified session clearance
+ * This is a security improvement to prevent clients from spoofing clearance levels
+ */
+async function requestDocumentAccess(documentDID) {
+    const requestId = crypto.randomUUID();
+
+    return new Promise((resolve, reject) => {
+        // Set timeout for request (60 seconds)
+        const timeout = setTimeout(() => {
+            pendingDocumentRequests.delete(requestId);
+            reject(new Error('Document access request timed out'));
+        }, 60000);
+
+        // Store pending request
+        pendingDocumentRequests.set(requestId, { resolve, reject, timeout });
+
+        // Send request to wallet (clearance verified server-side from session)
+        // Include sessionToken so wallet can authenticate with server
+        const sessionToken = getSessionToken();
+        console.log('[WalletBridge] Sending document access request:', requestId, 'with session:', sessionToken ? 'present' : 'missing');
+        walletWindow.postMessage({
+            type: 'DOCUMENT_ACCESS_REQUEST',
+            requestId,
+            documentDID,
+            sessionToken,  // Pass session token for server authentication
+            // NOTE: clearanceLevel removed - server uses session-verified clearance
+            timestamp: Date.now()
+        }, WALLET_ORIGIN);
+    });
+}
 
 // Export functions for inline onclick handlers
 window.copyToClipboard = copyToClipboard;

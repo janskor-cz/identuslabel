@@ -187,7 +187,7 @@ class IagonStorageClient {
             iv: encryptionInfo.iv,
             authTag: encryptionInfo.authTag
           },
-          iagonUrl: this.getFileUrl(this.nodeId, filename),
+          iagonUrl: this.getFileUrl(result.fileId, filename),
           uploadedAt: new Date().toISOString(),
           fileSize: encryptedContent.length,
           originalSize: fileContent.length
@@ -338,14 +338,16 @@ class IagonStorageClient {
 
   /**
    * Get the download URL for a file
-   * @param {string} nodeId - Node ID where file is stored
-   * @param {string} filename - Filename
+   * @param {string} fileId - File ID from upload response (data._id)
+   * @param {string} filename - Filename (for reference)
    * @returns {string} Download URL
    */
-  getFileUrl(nodeId, filename) {
+  getFileUrl(fileId, filename) {
     // URL encode the filename to handle special characters
     const encodedFilename = encodeURIComponent(filename);
-    return `${this.downloadBaseUrl}/download?nodeId=${nodeId}&filename=${encodedFilename}`;
+    // Include fileId as the primary identifier for downloads
+    // The fileId is what Iagon's download API needs (not nodeId)
+    return `${this.downloadBaseUrl}/download?fileId=${fileId}&filename=${encodedFilename}`;
   }
 
   /**

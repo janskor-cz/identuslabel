@@ -146,6 +146,7 @@ class DocumentRegistryPersistence {
           classificationLevel: doc.classificationLevel,
           contentEncryptionKey: doc.contentEncryptionKey,
           metadataVCRecordId: doc.metadataVCRecordId || null,
+          iagonStorage: doc.iagonStorage || null, // Iagon storage metadata (fileId, encryptionInfo, etc.)
           createdAt: doc.createdAt,
           updatedAt: doc.updatedAt
         });

@@ -26,6 +26,37 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ PDF Blob Corruption Fix for Document Display (Dec 11, 2025)
+
+**STATUS**: ✅ **PRODUCTION READY** - PDF documents now display correctly after decryption
+
+Fixed critical bug where PDF documents failed to display with "Tento soubor nemůžeme otevřít" (Czech: "We can't open this file") despite successful decryption.
+
+**Root Cause**: The `Blob` constructor in the dashboard received a plain JavaScript array of numbers `[212, 36, 205, ...]` from `Array.from(decrypted)` via postMessage. JavaScript's `Blob()` converts plain arrays to their string representation `"212,36,205,32,..."` (UTF-8 text) instead of treating them as binary bytes.
+
+**Key Fix**:
+```javascript
+// Before (broken):
+new Blob([documentBlob], { type: 'application/pdf' });
+
+// After (fixed):
+new Blob([new Uint8Array(documentBlob)], { type: 'application/pdf' });
+```
+
+**Data Flow**:
+```
+Server → NaCl box ciphertext (base64) → Wallet decrypts to Uint8Array →
+Array.from(decrypted) via postMessage → Dashboard receives number array →
+new Uint8Array(array) → Blob → PDF displays correctly
+```
+
+**Files Modified**:
+- `/root/company-admin-portal/public/js/employee-portal-dashboard.js` (lines 785-790)
+
+**Details**: See plan file at `/root/.claude/plans/smooth-moseying-clock.md`
+
+---
+
 ### ✅ Document Upload with PRISM DID & DocumentMetadataVC (Dec 7, 2025)
 
 **STATUS**: ✅ **PRODUCTION READY** - Complete document upload flow with blockchain-anchored DIDs
@@ -691,8 +722,8 @@ This documentation has been reorganized to improve maintainability and AI perfor
 
 ---
 
-**Document Version**: 6.2 (Dec 6, 2025 - DIDComm VP Parsing Fix)
-**Last Updated**: 2025-12-06
+**Document Version**: 6.3 (Dec 11, 2025 - PDF Blob Corruption Fix)
+**Last Updated**: 2025-12-11
 **Status**: Production-Ready - Streamlined for AI Performance
 **File Size**: ~590 lines (with detailed feature docs in subdocuments)
 **Maintained By**: Hyperledger Identus SSI Infrastructure Team

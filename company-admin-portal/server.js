@@ -57,6 +57,7 @@ const SchemaManager = require('./lib/SchemaManager');
 const EmployeePortalDatabase = require('./lib/EmployeePortalDatabase');
 const DocumentRegistry = require('./lib/DocumentRegistry');
 const EnterpriseDocumentManager = require('./lib/EnterpriseDocumentManager');
+const ReEncryptionService = require('./lib/ReEncryptionService');
 
 const app = express();
 const PORT = process.env.PORT || 3010;
@@ -3303,6 +3304,520 @@ app.get('/api/documents/stats', async (req, res) => {
       success: false,
       error: 'InternalServerError',
       message: error.message || 'Failed to get statistics'
+    });
+  }
+});
+
+// ============================================================================
+// Ephemeral Document Access Control API
+// Perfect Forward Secrecy for Document Access
+// ============================================================================
+
+/**
+ * GET /api/ephemeral-documents
+ * List documents accessible to a requestor based on their issuer DID and clearance level
+ *
+ * Query Parameters:
+ * - issuerDID: The issuer DID from the requestor's credential (for releasability filtering)
+ * - clearanceLevel: The requestor's security clearance level (1-4)
+ */
+app.get('/api/ephemeral-documents', async (req, res) => {
+  try {
+    const { issuerDID, clearanceLevel } = req.query;
+
+    if (!issuerDID) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'issuerDID query parameter is required'
+      });
+    }
+
+    const level = clearanceLevel ? parseInt(clearanceLevel, 10) : 1;
+
+    console.log(`[EphemeralDocuments] List request: issuerDID=${issuerDID}, clearanceLevel=${level}`);
+
+    const documents = await ReEncryptionService.listAccessibleDocuments(issuerDID, level);
+
+    res.json({
+      success: true,
+      documents,
+      count: documents.length,
+      issuerDID,
+      clearanceLevel: level
+    });
+
+  } catch (error) {
+    console.error('[EphemeralDocuments] Error listing documents:', error);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to list documents'
+    });
+  }
+});
+
+/**
+ * POST /api/ephemeral-documents/upload
+ * Upload a new classified document
+ *
+ * Request Body (multipart/form-data):
+ * - file: The document file
+ * - title: Document title
+ * - description: Document description (optional)
+ * - classificationLevel: 1-4 (UNCLASSIFIED to TOP_SECRET)
+ * - classificationLabel: UNCLASSIFIED|CONFIDENTIAL|SECRET|TOP_SECRET
+ * - releasableTo: JSON array of issuer DIDs allowed access
+ * - creatorDID: PRISM DID of the document creator
+ * - creatorClearanceLevel: Creator's clearance level
+ * - enterprise: Enterprise identifier (e.g., 'techcorp')
+ */
+app.post('/api/ephemeral-documents/upload', upload.single('file'), async (req, res) => {
+  try {
+    const {
+      title,
+      description,
+      classificationLevel,
+      classificationLabel,
+      releasableTo,
+      creatorDID,
+      creatorClearanceLevel,
+      enterprise
+    } = req.body;
+
+    const file = req.file;
+
+    // Validate required fields
+    if (!file) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'File is required'
+      });
+    }
+
+    if (!title || !classificationLevel || !releasableTo || !creatorDID || !enterprise) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'Missing required fields: title, classificationLevel, releasableTo, creatorDID, enterprise'
+      });
+    }
+
+    const level = parseInt(classificationLevel, 10);
+    if (level < 1 || level > 4) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'classificationLevel must be 1-4'
+      });
+    }
+
+    // Parse releasableTo (can be JSON string or array)
+    let releasableArray;
+    try {
+      releasableArray = typeof releasableTo === 'string' ? JSON.parse(releasableTo) : releasableTo;
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'releasableTo must be a valid JSON array of DIDs'
+      });
+    }
+
+    console.log(`[EphemeralDocuments] Upload: ${title} (${file.originalname})`);
+    console.log(`   Classification: ${classificationLabel || level}`);
+    console.log(`   Creator: ${creatorDID}`);
+    console.log(`   Enterprise: ${enterprise}`);
+    console.log(`   Releasable to: ${releasableArray.length} DIDs`);
+
+    // Store document using ReEncryptionService
+    const result = await ReEncryptionService.storeDocument({
+      fileBuffer: file.buffer,
+      filename: file.originalname,
+      title,
+      description: description || '',
+      classificationLevel: level,
+      classificationLabel: classificationLabel || ReEncryptionService.getLevelLabel(level),
+      releasableDIDs: releasableArray,
+      creatorDID,
+      creatorClearanceLevel: parseInt(creatorClearanceLevel || level, 10),
+      enterprise
+    });
+
+    console.log(`[EphemeralDocuments] Document stored: ${result.documentId}`);
+
+    res.json({
+      success: true,
+      documentId: result.documentId,
+      encryptionKeyId: result.encryptionKeyId,
+      iagonFileId: result.iagonFileId,
+      originalHash: result.originalHash,
+      message: 'Document uploaded and encrypted successfully'
+    });
+
+  } catch (error) {
+    console.error('[EphemeralDocuments] Upload error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to upload document'
+    });
+  }
+});
+
+/**
+ * POST /api/ephemeral-documents/access
+ * Request ephemeral access to a document using Document DID
+ *
+ * Pure SSI Architecture - No Database Required
+ * Uses DocumentRegistry (in-memory) + Iagon (decentralized storage)
+ *
+ * Request Body:
+ * - documentDID: The document's PRISM DID (not UUID)
+ * - requestorDID: The requestor's PRISM DID
+ * - issuerDID: The issuer DID from the requestor's Security Clearance VC
+ * - clearanceLevel: The requestor's clearance level (1-4)
+ * - ephemeralDID: The ephemeral DID for this request
+ * - ephemeralPublicKey: Base64-encoded X25519 public key
+ * - signature: Ed25519 signature over the request payload
+ * - timestamp: Request timestamp (ISO 8601)
+ * - nonce: Random nonce for replay prevention
+ */
+app.post('/api/ephemeral-documents/access', async (req, res) => {
+  try {
+    const {
+      documentDID,
+      requestorDID,
+      issuerDID,
+      // clearanceLevel intentionally NOT extracted - SECURITY: use session instead
+      ephemeralDID,
+      ephemeralPublicKey,
+      signature,
+      timestamp,
+      nonce
+    } = req.body;
+
+    // SECURITY FIX: Get clearance from VP-verified session, NOT client request
+    // The client's clearance was verified during login via VP verification
+    const sessionToken = req.query.sessionId || req.headers['x-session-id'];
+    const session = employeeSessions.get(sessionToken);
+
+    if (!session) {
+      console.log('[EphemeralAccess] DENIED: No valid session');
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized',
+        message: 'No valid session. Please log in first.'
+      });
+    }
+
+    // Use clearance from session (set during VP verification at login)
+    // Default to UNCLASSIFIED if no clearance verification done yet
+    const sessionClearanceLabel = session.clearanceLevel || 'UNCLASSIFIED';
+    const clearanceLevelNumeric = ReEncryptionService.getLevelNumber(sessionClearanceLabel);
+
+    // Validate required fields (clearanceLevel removed - comes from session)
+    if (!documentDID || !requestorDID || !issuerDID || !ephemeralDID ||
+        !ephemeralPublicKey || !signature || !timestamp || !nonce) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'Missing required fields'
+      });
+    }
+
+    console.log('\n' + '='.repeat(70));
+    console.log('[EphemeralAccess] Document access request (Pure SSI Architecture)');
+    console.log(`   Document DID: ${documentDID.substring(0, 50)}...`);
+    console.log(`   Requestor: ${requestorDID.substring(0, 40)}...`);
+    console.log(`   Issuer: ${issuerDID.substring(0, 40)}...`);
+    console.log(`   Session Clearance: ${sessionClearanceLabel} (level ${clearanceLevelNumeric})`);
+    console.log(`   Ephemeral DID: ${ephemeralDID.substring(0, 40)}...`);
+    console.log('='.repeat(70));
+
+    // Get client info for audit
+    const clientIp = req.ip || req.connection.remoteAddress;
+    const userAgent = req.headers['user-agent'];
+
+    // Process the access request through ReEncryptionService
+    // Now uses DocumentRegistry (in-memory) instead of PostgreSQL
+    const result = await ReEncryptionService.processAccessRequest({
+      documentDID,
+      requestorDID,
+      issuerDID,
+      clearanceLevel: clearanceLevelNumeric,
+      ephemeralDID,
+      ephemeralPublicKey,
+      signature,
+      timestamp,
+      nonce,
+      clientIp,
+      userAgent
+    });
+
+    if (!result.success) {
+      console.log(`[EphemeralAccess] Access DENIED: ${result.error}`);
+      return res.status(403).json({
+        success: false,
+        error: 'AccessDenied',
+        denialReason: result.error,
+        message: result.message || 'Access denied'
+      });
+    }
+
+    console.log(`[EphemeralAccess] Access GRANTED: copyId=${result.copyId}`);
+
+    res.json({
+      success: true,
+      documentDID: result.documentDID,
+      copyId: result.copyId,
+      copyHash: result.copyHash,
+      ciphertext: result.ciphertext,
+      nonce: result.nonce,
+      serverPublicKey: result.serverPublicKey,
+      filename: result.filename,
+      classificationLevel: result.classificationLevel,
+      accessedAt: result.accessedAt
+    });
+
+  } catch (error) {
+    console.error('[EphemeralAccess] Error processing request:', error);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to process access request'
+    });
+  }
+});
+
+/**
+ * GET /api/ephemeral-documents/audit/:documentDID
+ * Get audit log for a document (admin/forensics)
+ *
+ * Pure SSI Architecture - Reads from file-based audit log
+ *
+ * Path Parameters:
+ * - documentDID: URL-encoded document DID
+ *
+ * Query Parameters:
+ * - limit: Maximum number of entries (default 100)
+ * - offset: Pagination offset (default 0)
+ */
+app.get('/api/ephemeral-documents/audit/:documentDID', async (req, res) => {
+  try {
+    const documentDID = decodeURIComponent(req.params.documentDID);
+    const limit = parseInt(req.query.limit || '100', 10);
+    const offset = parseInt(req.query.offset || '0', 10);
+
+    console.log(`[EphemeralAudit] Audit log request for document: ${documentDID.substring(0, 50)}...`);
+
+    const auditLog = await ReEncryptionService.getDocumentAuditLog(documentDID, limit, offset);
+
+    res.json({
+      success: true,
+      documentDID,
+      entries: auditLog,
+      count: auditLog.length,
+      limit,
+      offset
+    });
+
+  } catch (error) {
+    console.error('[EphemeralAudit] Error getting audit log:', error);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to get audit log'
+    });
+  }
+});
+
+/**
+ * GET /api/ephemeral-documents/metadata/:documentDID
+ * Get document metadata by Document DID (without content)
+ *
+ * Pure SSI Architecture - No Database Required
+ * Uses DocumentRegistry (in-memory) to lookup document metadata
+ *
+ * @param {string} documentDID - URL-encoded Document DID (e.g., did:prism:...)
+ */
+app.get('/api/ephemeral-documents/metadata/:documentDID', async (req, res) => {
+  try {
+    // URL-decode the documentDID since DIDs contain special characters
+    const documentDID = decodeURIComponent(req.params.documentDID);
+
+    if (!documentDID || !documentDID.startsWith('did:')) {
+      return res.status(400).json({
+        success: false,
+        error: 'InvalidRequest',
+        message: 'Valid document DID is required (must start with did:)'
+      });
+    }
+
+    const document = ReEncryptionService.getDocumentMetadata(documentDID);
+
+    if (!document) {
+      return res.status(404).json({
+        success: false,
+        error: 'NotFound',
+        message: 'Document not found in registry'
+      });
+    }
+
+    res.json({
+      success: true,
+      document
+    });
+
+  } catch (error) {
+    console.error('[EphemeralDocuments] Error getting document metadata:', error);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to get document metadata'
+    });
+  }
+});
+
+/**
+ * GET /api/documents/download-by-did/:documentDID
+ * Download document content by parsing the PRISM DID to extract Iagon file ID
+ *
+ * This endpoint acts as a proxy to work around Iagon's POST-only download API.
+ * The document DID contains the Iagon file URL in its service endpoint.
+ */
+app.get('/api/documents/download-by-did/:documentDID', async (req, res) => {
+  try {
+    const documentDID = decodeURIComponent(req.params.documentDID);
+
+    console.log('[DocumentDownload] Download request for DID:', documentDID.substring(0, 50) + '...');
+
+    // Parse the PRISM DID to extract Iagon URL info
+    // DID format: did:prism:[stateHash]:[base64urlEncodedState]
+    const parts = documentDID.split(':');
+    if (parts.length < 4 || parts[0] !== 'did' || parts[1] !== 'prism') {
+      return res.status(400).json({
+        success: false,
+        error: 'InvalidDID',
+        message: 'Invalid PRISM DID format'
+      });
+    }
+
+    // Extract and decode the state part (last segment)
+    const encodedState = parts[parts.length - 1];
+
+    // Base64url decode
+    let stateJson;
+    try {
+      const base64 = encodedState.replace(/-/g, '+').replace(/_/g, '/');
+      const padding = base64.length % 4;
+      const paddedBase64 = padding > 0 ? base64 + '='.repeat(4 - padding) : base64;
+      const binaryStr = Buffer.from(paddedBase64, 'base64').toString('binary');
+
+      // Look for Iagon URL pattern in the binary data
+      // The URL is embedded in the service endpoint
+      // Support both old format (filename&nodeId) and new format (fileId&filename)
+      const iagonPatternNew = /https:\/\/gw\.iagon\.com\/api\/v2\/download\?fileId=([a-f0-9]+)&filename=([^&\s"\]]+)/;
+      const iagonPatternOld = /https:\/\/gw\.iagon\.com\/api\/v2\/download\?filename=([^&]+)&nodeId=([a-f0-9]+)/;
+
+      let fileId, filename;
+      const matchNew = binaryStr.match(iagonPatternNew);
+      const matchOld = binaryStr.match(iagonPatternOld);
+
+      if (matchNew) {
+        fileId = matchNew[1];
+        filename = decodeURIComponent(matchNew[2]);
+        console.log('[DocumentDownload] Extracted from DID (new format):', { fileId, filename });
+      } else if (matchOld) {
+        // Old format - nodeId was actually the file ID
+        fileId = matchOld[2];
+        filename = decodeURIComponent(matchOld[1]);
+        console.log('[DocumentDownload] Extracted from DID (old format):', { fileId, filename });
+      } else {
+        console.error('[DocumentDownload] No Iagon URL found in DID state');
+        return res.status(400).json({
+          success: false,
+          error: 'NoIagonUrl',
+          message: 'Could not extract Iagon URL from document DID'
+        });
+      }
+
+      // Use IagonStorageClient to download the file
+      const { IagonStorageClient } = require('./lib/IagonStorageClient');
+      const iagonClient = new IagonStorageClient({
+        accessToken: process.env.IAGON_ACCESS_TOKEN,
+        nodeId: process.env.IAGON_NODE_ID,
+        downloadBaseUrl: 'https://gw.iagon.com/api/v2'
+      });
+
+      // Look up document in registry to get encryption info
+      // First try by exact DID match, then fallback to fileId lookup
+      let documentRecord = DocumentRegistry.documents.get(documentDID);
+
+      // If DID lookup fails (common when URL DID has service endpoints that don't match stored DID),
+      // use fileId as fallback lookup key
+      if (!documentRecord && fileId) {
+        console.log('[DocumentDownload] DID not found, trying fileId lookup:', fileId);
+        documentRecord = DocumentRegistry.findByFileId(fileId);
+        if (documentRecord) {
+          console.log('[DocumentDownload] Found document via fileId lookup');
+        }
+      }
+
+      let encryptionInfo = null;
+
+      if (documentRecord && documentRecord.iagonStorage && documentRecord.iagonStorage.encryptionInfo) {
+        encryptionInfo = documentRecord.iagonStorage.encryptionInfo;
+        console.log('[DocumentDownload] Found encryption info in registry:', {
+          algorithm: encryptionInfo.algorithm,
+          keyId: encryptionInfo.keyId
+        });
+      } else {
+        console.log('[DocumentDownload] No encryption info found in registry (UNCLASSIFIED document or legacy)');
+      }
+
+      // Use the extracted fileId for Iagon download
+      console.log('[DocumentDownload] Downloading from Iagon with file ID:', fileId);
+
+      const fileContent = await iagonClient.downloadFile(fileId, encryptionInfo);
+
+      // Determine content type from filename
+      let contentType = 'application/octet-stream';
+      if (filename.endsWith('.pdf')) {
+        contentType = 'application/pdf';
+      } else if (filename.endsWith('.txt')) {
+        contentType = 'text/plain';
+      } else if (filename.endsWith('.json')) {
+        contentType = 'application/json';
+      } else if (filename.endsWith('.doc') || filename.endsWith('.docx')) {
+        contentType = 'application/msword';
+      } else if (filename.endsWith('.png')) {
+        contentType = 'image/png';
+      } else if (filename.endsWith('.jpg') || filename.endsWith('.jpeg')) {
+        contentType = 'image/jpeg';
+      }
+
+      // Set headers for file download
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+      res.setHeader('Content-Length', fileContent.length);
+
+      console.log('[DocumentDownload] Sending file:', { filename, contentType, size: fileContent.length });
+
+      res.send(fileContent);
+
+    } catch (parseError) {
+      console.error('[DocumentDownload] Error parsing DID or downloading:', parseError);
+      throw parseError;
+    }
+
+  } catch (error) {
+    console.error('[DocumentDownload] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'DownloadError',
+      message: error.message || 'Failed to download document'
     });
   }
 });
