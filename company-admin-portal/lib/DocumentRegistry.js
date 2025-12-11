@@ -457,6 +457,30 @@ class DocumentRegistry {
     }
 
     /**
+     * Find document by Iagon file ID
+     *
+     * Use this when the full DID is not available or doesn't match the stored DID.
+     * This is particularly useful for downloads where the DID in the URL may have
+     * additional service endpoint data that doesn't match the stored registry DID.
+     *
+     * @param {string} fileId - Iagon file ID (from upload response data._id)
+     * @returns {Object|null} Document record or null if not found
+     */
+    findByFileId(fileId) {
+        if (!fileId) {
+            return null;
+        }
+
+        for (const [documentDID, documentRecord] of this.documents.entries()) {
+            if (documentRecord.iagonStorage && documentRecord.iagonStorage.fileId === fileId) {
+                return documentRecord;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Get registry statistics
      *
      * @returns {Object} Registry statistics
