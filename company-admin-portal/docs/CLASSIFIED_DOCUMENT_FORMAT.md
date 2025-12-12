@@ -102,12 +102,19 @@ For Word documents, use **Paragraph Styles** - the easiest and most user-friendl
 #### How to Create in Word (3 Easy Steps!)
 
 1. **Write Content**: Open the template and write or paste your document content
-2. **Select Paragraphs**: Highlight the paragraph(s) you want to classify
-3. **Apply Style**: From the **Styles gallery (Home tab)**, click the appropriate style:
-   - `Unclassified` (green) - Public information
-   - `Confidential` (blue) - Sensitive business info
-   - `Secret` (orange) - Highly restricted
-   - `TopSecret` (red) - Maximum classification
+2. **Select Text**: Highlight what you want to classify (paragraph OR just a word/phrase)
+3. **Apply Style**: From the **Styles gallery (Home tab)**, click the appropriate style
+
+**For Whole Paragraphs** (Paragraph Styles):
+- `Unclassified` (green) - Public information
+- `Confidential` (blue) - Sensitive business info
+- `Secret` (orange) - Highly restricted
+- `TopSecret` (red) - Maximum classification
+
+**For Individual Words/Phrases** (Character Styles):
+- `Confidential Inline` - Inline sensitive text
+- `Secret Inline` - Inline restricted text
+- `TopSecret Inline` - Inline maximum classification
 
 **That's it!** No Developer tab, no Content Controls, no tags to configure.
 

@@ -119,8 +119,8 @@ async function parseDocxClearanceSections(docxBuffer) {
 
   const doc = await parser.parseStringPromise(documentXml);
 
-  // Load style definitions from styles.xml
-  const styleMap = await loadStyleDefinitions(zip);
+  // Load style definitions from styles.xml (paragraph AND character styles)
+  const { paragraphStyles, characterStyles } = await loadStyleDefinitions(zip);
 
   // Extract metadata from core.xml if available
   const metadata = await extractDocxMetadata(zip);
@@ -130,10 +130,18 @@ async function parseDocxClearanceSections(docxBuffer) {
   let sectionCounter = 0;
   const processedIds = new Set();
 
-  // METHOD 1: Extract paragraphs with clearance styles (User-Friendly)
+  // METHOD 1a: Extract paragraphs with clearance PARAGRAPH styles (whole paragraphs)
   if (doc.document && doc.document.body) {
     for (const bodyContent of doc.document.body) {
-      findStyledParagraphs(bodyContent, styleMap, sections, sectionCounter, processedIds);
+      findStyledParagraphs(bodyContent, paragraphStyles, sections, sectionCounter, processedIds);
+      sectionCounter = sections.length;
+    }
+  }
+
+  // METHOD 1b: Extract inline text with clearance CHARACTER styles (words/phrases)
+  if (Object.keys(characterStyles).length > 0 && doc.document && doc.document.body) {
+    for (const bodyContent of doc.document.body) {
+      findInlineStyledText(bodyContent, characterStyles, sections, sectionCounter, processedIds);
       sectionCounter = sections.length;
     }
   }
@@ -215,15 +223,18 @@ async function parseDocxClearanceSections(docxBuffer) {
 /**
  * Load style definitions from styles.xml
  * Maps style IDs to style names for clearance lookup
+ * Supports both PARAGRAPH styles (whole paragraphs) and CHARACTER styles (inline text)
+ *
  * @param {JSZip} zip - Unzipped DOCX
- * @returns {Promise<Object>} Map of styleId → { name, clearance }
+ * @returns {Promise<Object>} { paragraphStyles, characterStyles } maps
  */
 async function loadStyleDefinitions(zip) {
-  const styleMap = {};
+  const paragraphStyles = {};
+  const characterStyles = {};
 
   try {
     const stylesFile = zip.file('word/styles.xml');
-    if (!stylesFile) return styleMap;
+    if (!stylesFile) return { paragraphStyles, characterStyles };
 
     const stylesXml = await stylesFile.async('string');
     const parser = new xml2js.Parser({
@@ -232,7 +243,7 @@ async function loadStyleDefinitions(zip) {
     });
     const styles = await parser.parseStringPromise(stylesXml);
 
-    // Extract paragraph styles
+    // Extract styles
     if (styles.styles && styles.styles.style) {
       const styleArray = Array.isArray(styles.styles.style)
         ? styles.styles.style
@@ -243,15 +254,21 @@ async function loadStyleDefinitions(zip) {
         const styleName = style.name && style.name[0] && style.name[0].$ && style.name[0].$['w:val'];
         const styleType = style.$ && style.$['w:type'];
 
-        // Only process paragraph styles
-        if (styleId && styleType === 'paragraph') {
-          const clearance = getClearanceFromStyle(styleName || styleId);
-          if (clearance) {
-            styleMap[styleId] = {
-              name: styleName || styleId,
-              clearance
-            };
-          }
+        const clearance = getClearanceFromStyle(styleName || styleId);
+        if (!clearance || !styleId) continue;
+
+        const styleInfo = {
+          name: styleName || styleId,
+          clearance
+        };
+
+        // Paragraph styles for whole paragraphs
+        if (styleType === 'paragraph') {
+          paragraphStyles[styleId] = styleInfo;
+        }
+        // Character styles for inline text (words/phrases)
+        else if (styleType === 'character') {
+          characterStyles[styleId] = styleInfo;
         }
       }
     }
@@ -259,7 +276,7 @@ async function loadStyleDefinitions(zip) {
     console.warn('Failed to load style definitions:', error.message);
   }
 
-  return styleMap;
+  return { paragraphStyles, characterStyles };
 }
 
 /**
@@ -415,6 +432,95 @@ function extractParagraphText(p) {
   }
 
   return textParts.join('');
+}
+
+/**
+ * Find inline text with clearance CHARACTER styles (for word/phrase-level classification)
+ * @param {Object} obj - Parsed XML object to search
+ * @param {Object} characterStyles - Map of styleId → { name, clearance }
+ * @param {Array} sections - Array to add found sections
+ * @param {number} startCounter - Starting section counter
+ * @param {Set} processedIds - Set of already processed section IDs
+ */
+function findInlineStyledText(obj, characterStyles, sections, startCounter, processedIds) {
+  if (!obj || typeof obj !== 'object') return;
+
+  // Check for paragraph elements
+  if (obj.p) {
+    const paragraphs = Array.isArray(obj.p) ? obj.p : [obj.p];
+
+    for (const p of paragraphs) {
+      // Look for runs (r) with character styles
+      if (!p.r) continue;
+
+      const runs = Array.isArray(p.r) ? p.r : [p.r];
+
+      for (const r of runs) {
+        // Check run properties for character style
+        const rPr = r.rPr && r.rPr[0];
+        const rStyleEl = rPr && rPr.rStyle && rPr.rStyle[0];
+        const styleId = rStyleEl && rStyleEl.$ && rStyleEl.$['w:val'];
+
+        if (!styleId || !characterStyles[styleId]) continue;
+
+        // Extract text from this run
+        const textParts = [];
+        if (r.t) {
+          const tElements = Array.isArray(r.t) ? r.t : [r.t];
+          for (const t of tElements) {
+            const text = typeof t === 'string' ? t : (t._ || t);
+            if (text && typeof text === 'string') {
+              textParts.push(text);
+            }
+          }
+        }
+
+        const textContent = textParts.join('');
+        if (!textContent) continue;
+
+        // Create inline section
+        const styleInfo = characterStyles[styleId];
+        let sectionId = `sec-${String(sections.length + startCounter + 1).padStart(3, '0')}`;
+        while (processedIds.has(sectionId)) {
+          sectionId = `sec-${String(sections.length + startCounter + 2).padStart(3, '0')}`;
+        }
+        processedIds.add(sectionId);
+
+        const contentHash = crypto
+          .createHash('sha256')
+          .update(textContent)
+          .digest('hex')
+          .substring(0, 16);
+
+        sections.push({
+          sectionId,
+          clearance: styleInfo.clearance,
+          clearanceLevel: CLEARANCE_LEVELS[styleInfo.clearance],
+          tagName: 'span',
+          isInline: true,  // This is INLINE content (word/phrase level)
+          title: `${styleInfo.clearance} Inline`,
+          content: `<span data-clearance="${styleInfo.clearance}">${escapeHtml(textContent)}</span>`,
+          textLength: textContent.length,
+          contentHash,
+          attributes: {},
+          sourceFormat: 'docx-character-style'
+        });
+      }
+    }
+  }
+
+  // Recursively search other elements
+  for (const key of Object.keys(obj)) {
+    if (key !== 'p') {
+      if (Array.isArray(obj[key])) {
+        for (const item of obj[key]) {
+          findInlineStyledText(item, characterStyles, sections, startCounter, processedIds);
+        }
+      } else if (typeof obj[key] === 'object') {
+        findInlineStyledText(obj[key], characterStyles, sections, startCounter, processedIds);
+      }
+    }
+  }
 }
 
 /**

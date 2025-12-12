@@ -64,7 +64,7 @@ const CLEARANCE_STYLES = {
 };
 
 /**
- * Build paragraph style definitions for Word
+ * Build paragraph style definitions for Word (whole paragraphs)
  */
 function buildParagraphStyles() {
   const styles = [];
@@ -97,6 +97,32 @@ function buildParagraphStyles() {
             size: 24,
             space: 4
           }
+        }
+      }
+    });
+  }
+
+  return styles;
+}
+
+/**
+ * Build character style definitions for Word (inline text - words/phrases)
+ */
+function buildCharacterStyles() {
+  const styles = [];
+
+  for (const [key, style] of Object.entries(CLEARANCE_STYLES)) {
+    styles.push({
+      id: `${style.id}Inline`,
+      name: `${style.name} Inline`,
+      basedOn: 'DefaultParagraphFont',
+      quickFormat: true,
+      run: {
+        color: style.color,
+        bold: true,
+        shading: {
+          type: ShadingType.SOLID,
+          color: style.bgColor
         }
       }
     });
@@ -280,7 +306,106 @@ function createInstructions() {
           size: 24
         })
       ],
-      spacing: { after: 200 }
+      spacing: { after: 300 }
+    }),
+
+    // Inline styles section
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'For Individual Words/Phrases (Inline Styles)',
+          bold: true,
+          size: 28,
+          color: '7B1FA2'
+        })
+      ],
+      heading: HeadingLevel.HEADING_2,
+      spacing: { before: 200, after: 150 }
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Need to classify just a word or phrase within a paragraph? Use the ',
+          size: 24
+        }),
+        new TextRun({
+          text: 'Inline',
+          bold: true,
+          size: 24
+        }),
+        new TextRun({
+          text: ' styles:',
+          size: 24
+        })
+      ],
+      spacing: { after: 100 }
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: '    \u2022 Confidential Inline',
+          bold: true,
+          color: CLEARANCE_STYLES.Confidential.borderColor,
+          size: 24
+        }),
+        new TextRun({
+          text: ', ',
+          size: 24
+        }),
+        new TextRun({
+          text: 'Secret Inline',
+          bold: true,
+          color: CLEARANCE_STYLES.Secret.borderColor,
+          size: 24
+        }),
+        new TextRun({
+          text: ', ',
+          size: 24
+        }),
+        new TextRun({
+          text: 'TopSecret Inline',
+          bold: true,
+          color: CLEARANCE_STYLES.TopSecret.borderColor,
+          size: 24
+        })
+      ],
+      spacing: { after: 150 }
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Example: "The meeting is at ',
+          size: 22,
+          color: '666666'
+        }),
+        new TextRun({
+          text: '3pm in Room 42',
+          bold: true,
+          color: CLEARANCE_STYLES.Secret.color,
+          size: 22
+        }),
+        new TextRun({
+          text: ' - bring coffee."',
+          size: 22,
+          color: '666666'
+        })
+      ],
+      spacing: { after: 100 }
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: '(Select "3pm in Room 42" \u2192 Apply "Secret Inline" style)',
+          size: 20,
+          italics: true,
+          color: '999999'
+        })
+      ],
+      spacing: { after: 250 }
     }),
 
     // Tip
@@ -533,10 +658,11 @@ function createExampleContent() {
 async function generateTemplate() {
   const doc = new Document({
     title: 'Classified Document Template',
-    description: 'Template with clearance paragraph styles for easy classification',
+    description: 'Template with clearance styles for easy classification (paragraphs AND inline text)',
     creator: 'Company Admin Portal',
     styles: {
-      paragraphStyles: buildParagraphStyles()
+      paragraphStyles: buildParagraphStyles(),
+      characterStyles: buildCharacterStyles()
     },
     sections: [
       {
@@ -556,7 +682,7 @@ async function generateTemplate() {
  * Main function
  */
 async function main() {
-  console.log('Generating Word template with PARAGRAPH STYLES (user-friendly approach)...\n');
+  console.log('Generating Word template with PARAGRAPH + CHARACTER STYLES...\n');
 
   try {
     const doc = await generateTemplate();
@@ -575,11 +701,17 @@ async function main() {
     console.log(`   Output: ${outputPath}`);
     console.log(`   Size: ${Math.round(buffer.length / 1024)} KB\n`);
 
-    console.log('Included clearance styles:');
+    console.log('PARAGRAPH STYLES (for whole paragraphs):');
     console.log('   \u2022 Unclassified (green)  - Level 1 - Public info');
-    console.log('   \u2022 Confidential (blue)   - Level 2 - Sensitive business info');
-    console.log('   \u2022 Secret (orange)       - Level 3 - Highly restricted');
-    console.log('   \u2022 TopSecret (red)       - Level 4 - Maximum classification\n');
+    console.log('   \u2022 Confidential (blue)   - Level 2 - Sensitive');
+    console.log('   \u2022 Secret (orange)       - Level 3 - Restricted');
+    console.log('   \u2022 TopSecret (red)       - Level 4 - Maximum\n');
+
+    console.log('CHARACTER STYLES (for words/phrases within text):');
+    console.log('   \u2022 Unclassified Inline   - Inline public info');
+    console.log('   \u2022 Confidential Inline   - Inline sensitive');
+    console.log('   \u2022 Secret Inline         - Inline restricted');
+    console.log('   \u2022 TopSecret Inline      - Inline maximum\n');
 
     console.log('How users apply styles:');
     console.log('   1. Open this template in Microsoft Word');
