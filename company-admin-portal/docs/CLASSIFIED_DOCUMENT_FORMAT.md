@@ -97,28 +97,56 @@ The `data-clearance` attribute can be applied to **any** HTML element:
 
 ### Microsoft Word Format (DOCX)
 
-For Word documents, use **Content Controls** with clearance tags.
+For Word documents, use **Paragraph Styles** - the easiest and most user-friendly approach.
 
-#### How to Create in Word
+#### How to Create in Word (3 Easy Steps!)
 
-1. **Enable Developer Tab**: File → Options → Customize Ribbon → Check "Developer"
-2. **Select Content**: Highlight the text/content to classify
-3. **Insert Content Control**: Developer → Rich Text Content Control
-4. **Set Tag**: Click "Properties" → Set Tag to `clearance:LEVEL`
+1. **Write Content**: Open the template and write or paste your document content
+2. **Select Paragraphs**: Highlight the paragraph(s) you want to classify
+3. **Apply Style**: From the **Styles gallery (Home tab)**, click the appropriate style:
+   - `Unclassified` (green) - Public information
+   - `Confidential` (blue) - Sensitive business info
+   - `Secret` (orange) - Highly restricted
+   - `TopSecret` (red) - Maximum classification
 
-#### Tag Format
+**That's it!** No Developer tab, no Content Controls, no tags to configure.
 
-Use the format `clearance:LEVEL` where LEVEL is:
-- `clearance:UNCLASSIFIED`
-- `clearance:CONFIDENTIAL`
-- `clearance:SECRET`
-- `clearance:TOP_SECRET`
+#### Visual Example
+
+When you apply a style, your paragraph will be visually formatted:
+
+| Style | Appearance |
+|-------|------------|
+| Unclassified | Green left border, light green background |
+| Confidential | Blue left border, light blue background |
+| Secret | Orange left border, light orange background |
+| TopSecret | Red left border, light red background |
+
+#### Finding the Styles
+
+The clearance styles appear in Word's **Styles gallery** (Home tab → Styles section):
+- If you don't see them, click the small arrow at bottom-right of the Styles section
+- This opens the full Styles pane where all styles are listed
 
 #### Template Download
 
 Download the pre-configured Word template from the Employee Portal:
 - Navigate to: Employee Portal → Create Classified Document
 - Click: "Download Word Template (.docx)"
+
+The template includes:
+- All four clearance styles pre-configured
+- Instructions and example content
+- Visual formatting for each clearance level
+
+#### Alternative: Content Controls (Advanced)
+
+For complex documents, you can also use Content Controls with tags:
+1. Enable Developer Tab: File → Options → Customize Ribbon → Check "Developer"
+2. Select content and insert Rich Text Content Control
+3. Set Tag to: `clearance:CONFIDENTIAL`, `clearance:SECRET`, or `clearance:TOP_SECRET`
+
+*Note: Paragraph Styles are recommended for most users.*
 
 ## Uploading Documents
 

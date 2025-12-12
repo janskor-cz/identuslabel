@@ -1,16 +1,28 @@
 /**
  * DocxClearanceParser.js
  *
- * Parses Microsoft Word (DOCX) documents with clearance-level markers
- * using Content Controls (Structured Document Tags / SDTs).
+ * Parses Microsoft Word (DOCX) documents with clearance-level markers.
+ * Supports TWO methods for marking classified content:
  *
- * Users mark sections in Word by:
+ * METHOD 1: PARAGRAPH STYLES (Recommended - User-Friendly)
+ * =========================================================
+ * Users apply predefined paragraph styles from Word's style dropdown:
+ * - "Unclassified" or "Public" → UNCLASSIFIED
+ * - "Confidential" → CONFIDENTIAL
+ * - "Secret" → SECRET
+ * - "TopSecret" or "Top_Secret" → TOP_SECRET
+ *
+ * Simply: Select text → Apply style from dropdown. Done!
+ *
+ * METHOD 2: CONTENT CONTROLS (Advanced)
+ * =====================================
+ * For complex documents, use Content Controls with tags:
  * 1. Select content
  * 2. Developer Tab → Rich Text Content Control
  * 3. Properties → Tag: "clearance:CONFIDENTIAL"
  *
- * This parser extracts SDTs with clearance tags and converts to
- * the same section format used by ClearanceDocumentParser.
+ * This parser extracts both paragraph styles and SDTs with clearance
+ * tags and converts to the same section format used by ClearanceDocumentParser.
  */
 
 const JSZip = require('jszip');
@@ -26,8 +38,71 @@ const WORD_NS = {
   r: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 };
 
+// Style name to clearance level mapping (case-insensitive)
+// Users apply these styles from Word's style dropdown
+const STYLE_CLEARANCE_MAP = {
+  // Unclassified styles
+  'unclassified': 'UNCLASSIFIED',
+  'public': 'UNCLASSIFIED',
+  'clearance_unclassified': 'UNCLASSIFIED',
+  'clearanceunclassified': 'UNCLASSIFIED',
+
+  // Confidential styles
+  'confidential': 'CONFIDENTIAL',
+  'clearance_confidential': 'CONFIDENTIAL',
+  'clearanceconfidential': 'CONFIDENTIAL',
+
+  // Secret styles
+  'secret': 'SECRET',
+  'clearance_secret': 'SECRET',
+  'clearancesecret': 'SECRET',
+
+  // Top Secret styles
+  'topsecret': 'TOP_SECRET',
+  'top_secret': 'TOP_SECRET',
+  'top-secret': 'TOP_SECRET',
+  'clearance_topsecret': 'TOP_SECRET',
+  'clearance_top_secret': 'TOP_SECRET',
+  'clearancetopsecret': 'TOP_SECRET'
+};
+
 /**
- * Parse a DOCX file and extract clearance sections from Content Controls
+ * Get clearance level from a paragraph style name
+ * @param {string} styleName - Word paragraph style name
+ * @returns {string|null} Clearance level or null if not a clearance style
+ */
+function getClearanceFromStyle(styleName) {
+  if (!styleName) return null;
+
+  // Normalize style name: lowercase, remove spaces
+  const normalized = styleName.toLowerCase().replace(/\s+/g, '');
+
+  // Direct lookup
+  if (STYLE_CLEARANCE_MAP[normalized]) {
+    return STYLE_CLEARANCE_MAP[normalized];
+  }
+
+  // Try with underscores replaced by empty string
+  const noUnderscores = normalized.replace(/_/g, '');
+  if (STYLE_CLEARANCE_MAP[noUnderscores]) {
+    return STYLE_CLEARANCE_MAP[noUnderscores];
+  }
+
+  // Check if style name contains a clearance keyword
+  for (const [key, value] of Object.entries(STYLE_CLEARANCE_MAP)) {
+    if (normalized.includes(key) || key.includes(normalized)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Parse a DOCX file and extract clearance sections from both:
+ * 1. Paragraph Styles (user-friendly - recommended)
+ * 2. Content Controls / SDTs (advanced method)
+ *
  * @param {Buffer} docxBuffer - The DOCX file buffer
  * @returns {Promise<Object>} Parsed document with metadata and sections
  */
@@ -44,14 +119,26 @@ async function parseDocxClearanceSections(docxBuffer) {
 
   const doc = await parser.parseStringPromise(documentXml);
 
+  // Load style definitions from styles.xml
+  const styleMap = await loadStyleDefinitions(zip);
+
   // Extract metadata from core.xml if available
   const metadata = await extractDocxMetadata(zip);
 
-  // Find all Structured Document Tags (SDTs) with clearance tags
+  // Find all sections (from styles and SDTs)
   const sections = [];
   let sectionCounter = 0;
   const processedIds = new Set();
 
+  // METHOD 1: Extract paragraphs with clearance styles (User-Friendly)
+  if (doc.document && doc.document.body) {
+    for (const bodyContent of doc.document.body) {
+      findStyledParagraphs(bodyContent, styleMap, sections, sectionCounter, processedIds);
+      sectionCounter = sections.length;
+    }
+  }
+
+  // METHOD 2: Extract SDT Content Controls (Advanced)
   // Recursive function to find SDTs
   function findSDTs(obj, path = '') {
     if (!obj || typeof obj !== 'object') return;
@@ -81,7 +168,7 @@ async function parseDocxClearanceSections(docxBuffer) {
     }
   }
 
-  // Start searching from document body
+  // Start searching from document body (for SDTs)
   if (doc.document && doc.document.body) {
     for (const bodyContent of doc.document.body) {
       findSDTs(bodyContent);
@@ -123,6 +210,211 @@ async function parseDocxClearanceSections(docxBuffer) {
     sections,
     parsedAt: new Date().toISOString()
   };
+}
+
+/**
+ * Load style definitions from styles.xml
+ * Maps style IDs to style names for clearance lookup
+ * @param {JSZip} zip - Unzipped DOCX
+ * @returns {Promise<Object>} Map of styleId → { name, clearance }
+ */
+async function loadStyleDefinitions(zip) {
+  const styleMap = {};
+
+  try {
+    const stylesFile = zip.file('word/styles.xml');
+    if (!stylesFile) return styleMap;
+
+    const stylesXml = await stylesFile.async('string');
+    const parser = new xml2js.Parser({
+      explicitArray: true,
+      tagNameProcessors: [xml2js.processors.stripPrefix]
+    });
+    const styles = await parser.parseStringPromise(stylesXml);
+
+    // Extract paragraph styles
+    if (styles.styles && styles.styles.style) {
+      const styleArray = Array.isArray(styles.styles.style)
+        ? styles.styles.style
+        : [styles.styles.style];
+
+      for (const style of styleArray) {
+        const styleId = style.$ && style.$['w:styleId'];
+        const styleName = style.name && style.name[0] && style.name[0].$ && style.name[0].$['w:val'];
+        const styleType = style.$ && style.$['w:type'];
+
+        // Only process paragraph styles
+        if (styleId && styleType === 'paragraph') {
+          const clearance = getClearanceFromStyle(styleName || styleId);
+          if (clearance) {
+            styleMap[styleId] = {
+              name: styleName || styleId,
+              clearance
+            };
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to load style definitions:', error.message);
+  }
+
+  return styleMap;
+}
+
+/**
+ * Find paragraphs with clearance styles
+ * @param {Object} obj - Parsed XML object to search
+ * @param {Object} styleMap - Map of styleId → { name, clearance }
+ * @param {Array} sections - Array to add found sections
+ * @param {number} startCounter - Starting section counter
+ * @param {Set} processedIds - Set of already processed section IDs
+ */
+function findStyledParagraphs(obj, styleMap, sections, startCounter, processedIds) {
+  if (!obj || typeof obj !== 'object') return;
+
+  // Check for paragraph elements
+  if (obj.p) {
+    const paragraphs = Array.isArray(obj.p) ? obj.p : [obj.p];
+
+    // Group consecutive paragraphs with the same clearance
+    let currentClearance = null;
+    let currentParagraphs = [];
+
+    for (const p of paragraphs) {
+      // Get paragraph style
+      const pPr = p.pPr && p.pPr[0];
+      const pStyleEl = pPr && pPr.pStyle && pPr.pStyle[0];
+      const styleId = pStyleEl && pStyleEl.$ && pStyleEl.$['w:val'];
+
+      // Check if this style has a clearance
+      const styleInfo = styleMap[styleId];
+      const clearance = styleInfo ? styleInfo.clearance : null;
+
+      if (clearance) {
+        if (clearance === currentClearance) {
+          // Same clearance - add to current group
+          currentParagraphs.push(p);
+        } else {
+          // Different clearance - finalize previous group and start new one
+          if (currentClearance && currentParagraphs.length > 0) {
+            addStyledSection(currentParagraphs, currentClearance, styleMap[styleId]?.name || currentClearance,
+              sections, sections.length + startCounter, processedIds);
+          }
+          currentClearance = clearance;
+          currentParagraphs = [p];
+        }
+      } else if (currentClearance && currentParagraphs.length > 0) {
+        // Non-clearance paragraph - finalize current group
+        addStyledSection(currentParagraphs, currentClearance, styleMap[styleId]?.name || currentClearance,
+          sections, sections.length + startCounter, processedIds);
+        currentClearance = null;
+        currentParagraphs = [];
+      }
+    }
+
+    // Finalize any remaining group
+    if (currentClearance && currentParagraphs.length > 0) {
+      addStyledSection(currentParagraphs, currentClearance, currentClearance,
+        sections, sections.length + startCounter, processedIds);
+    }
+  }
+
+  // Recursively search other elements (but not paragraphs again)
+  for (const key of Object.keys(obj)) {
+    if (key !== 'p') {
+      if (Array.isArray(obj[key])) {
+        for (const item of obj[key]) {
+          findStyledParagraphs(item, styleMap, sections, startCounter, processedIds);
+        }
+      } else if (typeof obj[key] === 'object') {
+        findStyledParagraphs(obj[key], styleMap, sections, startCounter, processedIds);
+      }
+    }
+  }
+}
+
+/**
+ * Add a section from styled paragraphs
+ * @param {Array} paragraphs - Array of paragraph XML objects
+ * @param {string} clearance - Clearance level
+ * @param {string} styleName - Style name for title
+ * @param {Array} sections - Array to add section to
+ * @param {number} counter - Section counter
+ * @param {Set} processedIds - Set of processed IDs
+ */
+function addStyledSection(paragraphs, clearance, styleName, sections, counter, processedIds) {
+  // Generate section ID
+  let sectionId = `sec-${String(counter + 1).padStart(3, '0')}`;
+  while (processedIds.has(sectionId)) {
+    sectionId = `sec-${String(++counter + 1).padStart(3, '0')}`;
+  }
+  processedIds.add(sectionId);
+
+  // Extract text content from paragraphs
+  const textParts = [];
+  const htmlParts = [];
+
+  for (const p of paragraphs) {
+    const pText = extractParagraphText(p);
+    if (pText) {
+      textParts.push(pText);
+      htmlParts.push(`<p>${escapeHtml(pText)}</p>`);
+    }
+  }
+
+  const textContent = textParts.join('\n');
+  const htmlContent = htmlParts.join('\n') || '<p></p>';
+
+  // Calculate content hash
+  const contentHash = crypto
+    .createHash('sha256')
+    .update(htmlContent)
+    .digest('hex')
+    .substring(0, 16);
+
+  sections.push({
+    sectionId,
+    clearance,
+    clearanceLevel: CLEARANCE_LEVELS[clearance],
+    tagName: 'section',
+    isInline: false,
+    title: `${styleName} Section`,
+    content: htmlContent,
+    textLength: textContent.length,
+    contentHash,
+    attributes: {},
+    sourceFormat: 'docx-style'
+  });
+}
+
+/**
+ * Extract text from a paragraph element
+ * @param {Object} p - Paragraph XML object
+ * @returns {string} Text content
+ */
+function extractParagraphText(p) {
+  if (!p) return '';
+
+  const textParts = [];
+
+  // Handle runs (r elements)
+  if (p.r) {
+    const runs = Array.isArray(p.r) ? p.r : [p.r];
+    for (const r of runs) {
+      if (r.t) {
+        const tElements = Array.isArray(r.t) ? r.t : [r.t];
+        for (const t of tElements) {
+          const text = typeof t === 'string' ? t : (t._ || t);
+          if (text && typeof text === 'string') {
+            textParts.push(text);
+          }
+        }
+      }
+    }
+  }
+
+  return textParts.join('');
 }
 
 /**
