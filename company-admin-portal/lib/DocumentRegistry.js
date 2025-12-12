@@ -493,14 +493,356 @@ class DocumentRegistry {
                 CONFIDENTIAL: 0,
                 SECRET: 0,
                 TOP_SECRET: 0
-            }
+            },
+            classifiedDocuments: 0,
+            totalSections: 0
         };
 
         for (const doc of this.documents.values()) {
             stats.byClassification[doc.classificationLevel]++;
+            if (doc.sectionMetadata) {
+                stats.classifiedDocuments++;
+                stats.totalSections += doc.sectionMetadata.sectionCount || 0;
+            }
         }
 
         return stats;
+    }
+
+    /**
+     * Register a classified document with section-level encryption
+     *
+     * @param {Object} classifiedDocumentData
+     * @param {string} classifiedDocumentData.documentDID - PRISM DID for the document
+     * @param {string} classifiedDocumentData.title - Document title
+     * @param {string} classifiedDocumentData.overallClassification - Overall classification (HIGHEST level in document)
+     * @param {Array<string>} classifiedDocumentData.releasableTo - Array of company DIDs
+     * @param {Object} classifiedDocumentData.encryptedPackage - Encrypted sections package from SectionEncryptionService
+     * @param {Object} classifiedDocumentData.iagonStorage - Iagon storage info (fileId, url, etc.)
+     * @param {Object} classifiedDocumentData.sourceInfo - Original document info (filename, format)
+     * @returns {Promise<Object>} Registration result
+     */
+    async registerClassifiedDocument(classifiedDocumentData) {
+        const {
+            documentDID,
+            title,
+            overallClassification,
+            releasableTo,
+            encryptedPackage,
+            iagonStorage,
+            sourceInfo = {}
+        } = classifiedDocumentData;
+
+        // Validate required fields
+        if (!documentDID || !title || !overallClassification || !releasableTo || !encryptedPackage) {
+            throw new Error('Missing required classified document fields');
+        }
+
+        // Validate classification level
+        const validLevels = ['UNCLASSIFIED', 'CONFIDENTIAL', 'SECRET', 'TOP_SECRET'];
+        if (!validLevels.includes(overallClassification)) {
+            throw new Error(`Invalid classification level: ${overallClassification}`);
+        }
+
+        // Generate Bloom filter for releasableTo companies
+        const bloomFilter = this.generateBloomFilter(releasableTo);
+
+        // Extract section metadata (without actual content)
+        const sectionMetadata = {
+            sectionCount: encryptedPackage.encryptedSections?.length || 0,
+            sections: encryptedPackage.encryptedSections?.map(s => ({
+                sectionId: s.sectionId,
+                clearance: s.clearance,
+                clearanceLevel: s.clearanceLevel,
+                title: s.title,
+                tagName: s.tagName,
+                isInline: s.isInline,
+                textLength: s.textLength
+            })) || [],
+            clearanceLevelsUsed: [...new Set(encryptedPackage.encryptedSections?.map(s => s.clearance) || [])],
+            hasRedactableSections: encryptedPackage.encryptedSections?.some(s => s.clearanceLevel > 1) || false
+        };
+
+        // Encrypt title/metadata for each authorized company
+        const encryptedMetadata = await this.encryptMetadataForCompanies(
+            {
+                title,
+                overallClassification,
+                sectionCount: sectionMetadata.sectionCount,
+                format: sourceInfo.format || 'html',
+                originalFilename: sourceInfo.filename
+            },
+            releasableTo
+        );
+
+        // Create document record with section information
+        const documentRecord = {
+            documentDID,
+            bloomFilter,
+            encryptedMetadata,
+            releasableTo,
+            classificationLevel: overallClassification,
+            contentEncryptionKey: null, // Sections have individual keys
+            metadataVCRecordId: null,
+            iagonStorage,
+            sectionMetadata, // NEW: Section-level metadata
+            sourceInfo: {
+                filename: sourceInfo.filename,
+                format: sourceInfo.format || 'html',
+                uploadedAt: new Date().toISOString()
+            },
+            documentType: 'classified', // Mark as classified document
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+
+        // Store in registry
+        this.documents.set(documentDID, documentRecord);
+
+        console.log(`[DocumentRegistry] Classified document registered: ${documentDID}`);
+        console.log(`[DocumentRegistry] Overall classification: ${overallClassification}`);
+        console.log(`[DocumentRegistry] Section count: ${sectionMetadata.sectionCount}`);
+        console.log(`[DocumentRegistry] Clearance levels used: ${sectionMetadata.clearanceLevelsUsed.join(', ')}`);
+        console.log(`[DocumentRegistry] Releasable to ${releasableTo.length} companies`);
+
+        // Persist to disk for crash recovery
+        try {
+            await this.persistence.saveRegistry(this.documents);
+        } catch (error) {
+            console.error(`[DocumentRegistry] ⚠️  Failed to persist registry: ${error.message}`);
+        }
+
+        return {
+            success: true,
+            documentDID,
+            overallClassification,
+            sectionCount: sectionMetadata.sectionCount,
+            clearanceLevelsUsed: sectionMetadata.clearanceLevelsUsed,
+            releasableToCount: releasableTo.length
+        };
+    }
+
+    /**
+     * Get classified document with section metadata
+     *
+     * @param {string} documentDID - Document DID
+     * @param {string} requestingCompanyDID - Company DID making the request
+     * @param {string} userClearance - User's clearance level (for section visibility check)
+     * @returns {Promise<Object>} Document details with section info
+     */
+    async getClassifiedDocument(documentDID, requestingCompanyDID, userClearance = 'UNCLASSIFIED') {
+        const documentRecord = this.documents.get(documentDID);
+
+        if (!documentRecord) {
+            throw new Error(`Document not found: ${documentDID}`);
+        }
+
+        // Check authorization
+        if (!documentRecord.releasableTo.includes(requestingCompanyDID)) {
+            throw new Error('Unauthorized: Company not in releasableTo list');
+        }
+
+        // Decrypt metadata
+        const decryptedMetadata = await this.decryptMetadataForCompany(
+            documentRecord.encryptedMetadata,
+            requestingCompanyDID
+        );
+
+        // Calculate section visibility based on user clearance
+        const clearanceLevels = {
+            'UNCLASSIFIED': 1,
+            'CONFIDENTIAL': 2,
+            'SECRET': 3,
+            'TOP_SECRET': 4
+        };
+
+        const userLevel = clearanceLevels[userClearance] || 1;
+
+        let visibleSections = [];
+        let redactedSections = [];
+
+        if (documentRecord.sectionMetadata && documentRecord.sectionMetadata.sections) {
+            for (const section of documentRecord.sectionMetadata.sections) {
+                const sectionLevel = clearanceLevels[section.clearance] || 1;
+                if (sectionLevel <= userLevel) {
+                    visibleSections.push(section);
+                } else {
+                    redactedSections.push(section);
+                }
+            }
+        }
+
+        return {
+            documentDID,
+            title: decryptedMetadata.title,
+            overallClassification: documentRecord.classificationLevel,
+            iagonStorage: documentRecord.iagonStorage,
+            sourceInfo: documentRecord.sourceInfo,
+            sectionSummary: {
+                totalSections: documentRecord.sectionMetadata?.sectionCount || 0,
+                visibleCount: visibleSections.length,
+                redactedCount: redactedSections.length,
+                visibleSections: visibleSections.map(s => ({
+                    sectionId: s.sectionId,
+                    clearance: s.clearance,
+                    title: s.title
+                })),
+                redactedSections: redactedSections.map(s => ({
+                    sectionId: s.sectionId,
+                    clearance: s.clearance
+                }))
+            },
+            documentType: documentRecord.documentType || 'standard',
+            createdAt: documentRecord.createdAt,
+            updatedAt: documentRecord.updatedAt,
+            metadata: decryptedMetadata
+        };
+    }
+
+    /**
+     * Query classified documents by issuer DID with section visibility info
+     *
+     * @param {string} issuerDID - Company DID from employee's EmployeeRole VC
+     * @param {string|null} clearanceLevel - Employee's security clearance level
+     * @returns {Promise<Array>} Array of discoverable classified documents
+     */
+    async queryClassifiedDocuments(issuerDID, clearanceLevel = null) {
+        if (!issuerDID) {
+            throw new Error('issuerDID is required');
+        }
+
+        const clearanceLevels = {
+            'UNCLASSIFIED': 1,
+            'CONFIDENTIAL': 2,
+            'SECRET': 3,
+            'TOP_SECRET': 4
+        };
+
+        const userLevel = clearanceLevel ? clearanceLevels[clearanceLevel] : 1;
+        const classifiedDocuments = [];
+
+        for (const [documentDID, documentRecord] of this.documents.entries()) {
+            // Only include classified documents
+            if (documentRecord.documentType !== 'classified') {
+                continue;
+            }
+
+            // Check Bloom filter and authorization
+            if (this.checkBloomFilter(documentRecord.bloomFilter, issuerDID)) {
+                if (documentRecord.releasableTo.includes(issuerDID)) {
+                    // Decrypt metadata
+                    const decryptedMetadata = await this.decryptMetadataForCompany(
+                        documentRecord.encryptedMetadata,
+                        issuerDID
+                    );
+
+                    // Calculate section visibility
+                    let visibleCount = 0;
+                    let redactedCount = 0;
+
+                    if (documentRecord.sectionMetadata && documentRecord.sectionMetadata.sections) {
+                        for (const section of documentRecord.sectionMetadata.sections) {
+                            const sectionLevel = clearanceLevels[section.clearance] || 1;
+                            if (sectionLevel <= userLevel) {
+                                visibleCount++;
+                            } else {
+                                redactedCount++;
+                            }
+                        }
+                    }
+
+                    classifiedDocuments.push({
+                        documentDID,
+                        title: decryptedMetadata.title,
+                        overallClassification: documentRecord.classificationLevel,
+                        iagonStorage: documentRecord.iagonStorage,
+                        sourceInfo: documentRecord.sourceInfo,
+                        sectionSummary: {
+                            totalSections: documentRecord.sectionMetadata?.sectionCount || 0,
+                            visibleCount,
+                            redactedCount,
+                            clearanceLevelsUsed: documentRecord.sectionMetadata?.clearanceLevelsUsed || []
+                        },
+                        createdAt: documentRecord.createdAt
+                    });
+                }
+            }
+        }
+
+        console.log(`[DocumentRegistry] Classified documents query for issuer: ${issuerDID}`);
+        console.log(`[DocumentRegistry] User clearance: ${clearanceLevel || 'UNCLASSIFIED'}`);
+        console.log(`[DocumentRegistry] Found: ${classifiedDocuments.length} classified documents`);
+
+        return classifiedDocuments;
+    }
+
+    /**
+     * Find document by document ID (internal lookup without DID resolution)
+     *
+     * @param {string} documentId - Document ID from encryptedPackage
+     * @returns {Object|null} Document record or null
+     */
+    findByDocumentId(documentId) {
+        if (!documentId) {
+            return null;
+        }
+
+        for (const [documentDID, documentRecord] of this.documents.entries()) {
+            // Check if this is a classified document with matching ID in iagonStorage
+            if (documentRecord.iagonStorage && documentRecord.iagonStorage.documentId === documentId) {
+                return documentRecord;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Update section access metadata (e.g., after viewing)
+     *
+     * @param {string} documentDID - Document DID
+     * @param {string} userDID - User who accessed the document
+     * @param {Array<string>} sectionsViewed - Section IDs that were viewed
+     * @returns {Promise<Object>} Update result
+     */
+    async recordSectionAccess(documentDID, userDID, sectionsViewed) {
+        const documentRecord = this.documents.get(documentDID);
+
+        if (!documentRecord) {
+            return { success: false, error: 'Document not found' };
+        }
+
+        // Initialize access log if not present
+        if (!documentRecord.accessLog) {
+            documentRecord.accessLog = [];
+        }
+
+        // Add access record
+        documentRecord.accessLog.push({
+            userDID,
+            sectionsViewed,
+            timestamp: new Date().toISOString()
+        });
+
+        // Keep only last 100 access records
+        if (documentRecord.accessLog.length > 100) {
+            documentRecord.accessLog = documentRecord.accessLog.slice(-100);
+        }
+
+        documentRecord.updatedAt = new Date().toISOString();
+
+        // Persist changes
+        try {
+            await this.persistence.saveRegistry(this.documents);
+        } catch (error) {
+            console.error(`[DocumentRegistry] Failed to persist access log: ${error.message}`);
+        }
+
+        return {
+            success: true,
+            documentDID,
+            sectionsViewed: sectionsViewed.length
+        };
     }
 }
 

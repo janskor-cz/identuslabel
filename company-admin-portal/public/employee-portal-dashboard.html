@@ -944,6 +944,165 @@
                 <span id="errorMessage">Failed to create document.</span>
             </div>
         </div>
+
+        <!-- Create Classified Document Card (Section-Level Clearance) -->
+        <div class="dashboard-card" id="createClassifiedDocumentCard">
+            <div class="card-header">
+                <div class="card-icon" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">🔐</div>
+                <h2 class="card-title">Create Classified Document</h2>
+                <span style="background: #805ad5; color: white; padding: 4px 10px; border-radius: 12px; font-size: 11px; margin-left: 10px;">Section-Level Clearance</span>
+            </div>
+
+            <div style="margin-bottom: 20px; padding: 15px; background: #f0f4ff; border-radius: 8px; border: 1px solid #c3dafe;">
+                <p style="font-size: 14px; color: #4a5568; margin-bottom: 10px;">
+                    📋 Create documents with <strong>section-level clearance</strong>. Different sections can have different classification levels.
+                    Sections above the viewer's clearance will be <strong>redacted (blacked out)</strong>.
+                </p>
+                <div style="display: flex; gap: 10px; margin-top: 12px;">
+                    <a href="/company-admin/templates/classified-document-template.html" download
+                       style="background: #4299e1; color: white; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; display: inline-flex; align-items: center; gap: 5px;">
+                        📄 Download HTML Template
+                    </a>
+                    <a href="/company-admin/templates/classified-document-template.docx" download
+                       style="background: #2b6cb0; color: white; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; display: inline-flex; align-items: center; gap: 5px;">
+                        📝 Download Word Template
+                    </a>
+                </div>
+            </div>
+
+            <form id="createClassifiedDocumentForm" onsubmit="handleCreateClassifiedDocument(event)">
+                <div style="display: grid; gap: 20px;">
+                    <!-- Document Title -->
+                    <div>
+                        <label for="classifiedDocTitle" style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            Document Title (Optional - extracted from file if not provided)
+                        </label>
+                        <input
+                            type="text"
+                            id="classifiedDocTitle"
+                            name="title"
+                            placeholder="Leave empty to use title from document file"
+                            style="width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; background: white;"
+                        />
+                    </div>
+
+                    <!-- File Upload -->
+                    <div>
+                        <label style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            Classified Document File <span style="color: #e53e3e;">*</span>
+                        </label>
+                        <div id="classifiedDropZone" style="background: #faf5ff; border: 2px dashed #805ad5; border-radius: 8px; padding: 30px; text-align: center; transition: all 0.2s; cursor: pointer;">
+                            <input
+                                type="file"
+                                id="classifiedDocFile"
+                                name="file"
+                                accept=".html,.htm,.docx"
+                                required
+                                style="display: none;"
+                                onchange="handleClassifiedFileSelect(this)"
+                            />
+                            <label for="classifiedDocFile" style="cursor: pointer; display: block;">
+                                <div style="font-size: 48px; margin-bottom: 10px;">🔐</div>
+                                <div style="color: #805ad5; font-weight: 600; margin-bottom: 5px;">
+                                    Click to select HTML or Word file with clearance markers
+                                </div>
+                                <div style="font-size: 12px; color: #a0aec0;">
+                                    Supported: .html, .htm (with data-clearance attributes), .docx (with Content Controls)
+                                </div>
+                            </label>
+                        </div>
+
+                        <!-- File Preview -->
+                        <div id="classifiedFilePreview" class="hidden" style="margin-top: 15px; padding: 15px; background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <span id="classifiedFileIcon" style="font-size: 28px;">📄</span>
+                                    <div>
+                                        <div id="classifiedFileName" style="font-weight: 600; color: #2d3748;"></div>
+                                        <div id="classifiedFileSize" style="font-size: 12px; color: #718096;"></div>
+                                    </div>
+                                </div>
+                                <button type="button" onclick="clearClassifiedFile()" style="background: #fc8181; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;">
+                                    ✕ Remove
+                                </button>
+                            </div>
+
+                            <!-- Section Analysis -->
+                            <div id="sectionAnalysis" class="hidden" style="border-top: 1px solid #e2e8f0; padding-top: 15px;">
+                                <div style="font-weight: 600; color: #2d3748; margin-bottom: 10px;">Section Analysis</div>
+                                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">
+                                    <div style="text-align: center; padding: 10px; background: #c6f6d5; border-radius: 6px;">
+                                        <div style="font-size: 20px; font-weight: bold; color: #22543d;" id="unclassifiedCount">0</div>
+                                        <div style="font-size: 11px; color: #22543d;">UNCLASSIFIED</div>
+                                    </div>
+                                    <div style="text-align: center; padding: 10px; background: #feebc8; border-radius: 6px;">
+                                        <div style="font-size: 20px; font-weight: bold; color: #7c2d12;" id="confidentialCount">0</div>
+                                        <div style="font-size: 11px; color: #7c2d12;">CONFIDENTIAL</div>
+                                    </div>
+                                    <div style="text-align: center; padding: 10px; background: #fed7d7; border-radius: 6px;">
+                                        <div style="font-size: 20px; font-weight: bold; color: #742a2a;" id="secretCount">0</div>
+                                        <div style="font-size: 11px; color: #742a2a;">SECRET</div>
+                                    </div>
+                                    <div style="text-align: center; padding: 10px; background: #e9d5ff; border-radius: 6px;">
+                                        <div style="font-size: 20px; font-weight: bold; color: #4c1d95;" id="topSecretCount">0</div>
+                                        <div style="font-size: 11px; color: #4c1d95;">TOP SECRET</div>
+                                    </div>
+                                </div>
+                                <div style="margin-top: 10px; padding: 8px 12px; background: #805ad5; color: white; border-radius: 6px; display: inline-flex; align-items: center; gap: 5px;">
+                                    <span>Overall Classification:</span>
+                                    <strong id="overallClassification">UNCLASSIFIED</strong>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Releasability -->
+                    <div>
+                        <label style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            Releasable To
+                        </label>
+                        <div style="background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px;">
+                            <div style="display: grid; gap: 10px;">
+                                <label style="display: flex; align-items: center; cursor: pointer;">
+                                    <input type="checkbox" name="classifiedReleasableTo" value="TechCorp Corporation" checked
+                                           style="width: 18px; height: 18px; margin-right: 10px; cursor: pointer;" />
+                                    <span style="font-size: 14px; color: #2d3748;">TechCorp Corporation</span>
+                                </label>
+                                <label style="display: flex; align-items: center; cursor: pointer;">
+                                    <input type="checkbox" name="classifiedReleasableTo" value="ACME Corporation"
+                                           style="width: 18px; height: 18px; margin-right: 10px; cursor: pointer;" />
+                                    <span style="font-size: 14px; color: #2d3748;">ACME Corporation</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 10px;">
+                        <button type="button" onclick="document.getElementById('createClassifiedDocumentForm').reset(); clearClassifiedFile();"
+                                style="background: #e2e8f0; color: #2d3748; border: none; padding: 12px 24px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer;">
+                            Reset Form
+                        </button>
+                        <button type="submit" id="createClassifiedDocBtn"
+                                style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer;">
+                            🔐 Upload Classified Document
+                        </button>
+                    </div>
+                </div>
+            </form>
+
+            <!-- Success Message -->
+            <div id="classifiedDocSuccess" class="hidden" style="margin-top: 20px; padding: 15px; background: #c6f6d5; border: 1px solid #48bb78; border-radius: 8px; color: #22543d;">
+                <strong>✓ Success!</strong>
+                <span id="classifiedSuccessMessage">Classified document uploaded and encrypted.</span>
+            </div>
+
+            <!-- Error Message -->
+            <div id="classifiedDocError" class="hidden" style="margin-top: 20px; padding: 15px; background: #fed7d7; border: 1px solid #fc8181; border-radius: 8px; color: #c53030;">
+                <strong>✗ Error:</strong>
+                <span id="classifiedErrorMessage">Failed to upload document.</span>
+            </div>
+        </div>
     </div>
 
     <!-- PDF Viewer Modal -->
