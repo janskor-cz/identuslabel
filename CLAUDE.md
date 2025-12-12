@@ -26,6 +26,43 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ PDF.js Secure Viewer with CORS Session Support (Dec 12, 2025)
+
+**STATUS**: ✅ **PRODUCTION READY** - Documents display in secure modal with download prevention
+
+Implemented PDF.js-based document viewer that renders PDFs to canvas, preventing downloads while allowing secure viewing. Also fixed cross-origin session authentication for wallet-to-server communication.
+
+**Key Features**:
+- **PDF.js Canvas Rendering**: Documents rendered as pixels on HTML5 canvas (no native PDF controls)
+- **Download Prevention**: No download button, right-click disabled, Ctrl+S/Ctrl+P blocked
+- **Page Navigation**: Prev/Next buttons with page counter for multi-page documents
+- **Auto-scaling**: PDF scaled to fit container width while maintaining aspect ratio
+- **CORS Session Support**: Wallet can now authenticate with server via `X-Session-ID` header
+- **View-once Restriction Removed**: Documents can be viewed multiple times in modal
+
+**Security Measures**:
+```
+- Canvas rendering (no downloadable PDF object)
+- Context menu disabled on modal
+- Keyboard shortcuts blocked (save, print)
+- Text selection disabled
+- Blob URL revoked on close
+```
+
+**Architecture Change**:
+```
+Before: <object> tag → Browser PDF viewer → Download possible
+After:  PDF.js → Canvas rendering → View-only (no download)
+```
+
+**Files Modified**:
+- `/root/company-admin-portal/public/employee-portal-dashboard.html` - PDF.js modal with canvas
+- `/root/company-admin-portal/public/js/employee-portal-dashboard.js` - PDF.js viewer functions
+- `/root/company-admin-portal/server.js` - CORS middleware for X-Session-ID header
+- `/root/company-admin-portal/lib/ReEncryptionService.js` - Disabled view-once restriction
+
+---
+
 ### ✅ PDF Blob Corruption Fix for Document Display (Dec 11, 2025)
 
 **STATUS**: ✅ **PRODUCTION READY** - PDF documents now display correctly after decryption
@@ -722,8 +759,8 @@ This documentation has been reorganized to improve maintainability and AI perfor
 
 ---
 
-**Document Version**: 6.3 (Dec 11, 2025 - PDF Blob Corruption Fix)
-**Last Updated**: 2025-12-11
+**Document Version**: 6.4 (Dec 12, 2025 - PDF.js Secure Viewer)
+**Last Updated**: 2025-12-12
 **Status**: Production-Ready - Streamlined for AI Performance
 **File Size**: ~590 lines (with detailed feature docs in subdocuments)
 **Maintained By**: Hyperledger Identus SSI Infrastructure Team

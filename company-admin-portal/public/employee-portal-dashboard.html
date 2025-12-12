@@ -485,6 +485,78 @@
             font-size: 48px;
             margin-bottom: 15px;
         }
+
+        /* PDF Viewer Modal */
+        .pdf-viewer-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .pdf-viewer-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 20px;
+            background: #2d3748;
+            color: white;
+            flex-shrink: 0;
+        }
+
+        .pdf-viewer-header .pdf-title {
+            font-size: 16px;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: calc(100% - 120px);
+        }
+
+        .pdf-viewer-header .close-btn {
+            background: #e53e3e;
+            border: none;
+            color: white;
+            font-size: 20px;
+            cursor: pointer;
+            padding: 8px 16px;
+            border-radius: 6px;
+            transition: background 0.2s;
+        }
+
+        .pdf-viewer-header .close-btn:hover {
+            background: #c53030;
+        }
+
+        .pdf-viewer-container {
+            flex: 1;
+            overflow: hidden;
+            background: #1a202c;
+        }
+
+        .pdf-viewer-container iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+
+        .pdf-viewer-notice {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: #a0aec0;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 12px;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
@@ -874,6 +946,26 @@
         </div>
     </div>
 
-    <script src="/company-admin/js/employee-portal-dashboard.js?v=20251206"></script>
+    <!-- PDF Viewer Modal -->
+    <div id="pdfViewerModal" class="pdf-viewer-modal" style="display: none;">
+        <div class="pdf-viewer-header">
+            <span id="pdfViewerTitle" class="pdf-title">Document Viewer</span>
+            <div style="display: flex; align-items: center; gap: 15px;">
+                <div id="pdfPageInfo" style="font-size: 14px; color: #a0aec0;">Page <span id="currentPage">1</span> of <span id="totalPages">1</span></div>
+                <button onclick="pdfPrevPage()" class="pdf-nav-btn" style="background: #4a5568; border: none; color: white; padding: 6px 12px; border-radius: 4px; cursor: pointer;">◀ Prev</button>
+                <button onclick="pdfNextPage()" class="pdf-nav-btn" style="background: #4a5568; border: none; color: white; padding: 6px 12px; border-radius: 4px; cursor: pointer;">Next ▶</button>
+                <button onclick="closePdfViewer()" class="close-btn">&times;</button>
+            </div>
+        </div>
+        <div class="pdf-viewer-container" style="display: flex; justify-content: center; align-items: flex-start; overflow: auto; padding: 20px;">
+            <canvas id="pdfCanvas" style="max-width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.5);"></canvas>
+        </div>
+        <div class="pdf-viewer-notice">🔒 Secure View-only mode - Downloads disabled</div>
+    </div>
+
+    <!-- PDF.js Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+    <script src="/company-admin/js/employee-portal-dashboard.js?v=20251212"></script>
 </body>
 </html>
