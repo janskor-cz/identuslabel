@@ -5050,6 +5050,589 @@ setInterval(() => {
 }, 60 * 1000); // Run every minute
 
 // ============================================================================
+// Classified Document with Section-Level Clearance
+// ============================================================================
+
+// Import new services (add to top of file requires section in production)
+const ClearanceDocumentParser = require('./lib/ClearanceDocumentParser');
+const DocxClearanceParser = require('./lib/DocxClearanceParser');
+const SectionEncryptionService = require('./lib/SectionEncryptionService');
+const RedactionEngine = require('./lib/RedactionEngine');
+const EphemeralDIDService = require('./lib/EphemeralDIDService');
+const DocumentCopyVCIssuer = require('./lib/DocumentCopyVCIssuer');
+const { getIagonClient } = require('./lib/IagonStorageClient');
+const nacl = require('tweetnacl');
+
+// Company secret for key derivation (in production, use secure key management)
+const COMPANY_SECRET = process.env.COMPANY_SECRET || 'default-company-secret-change-in-production';
+
+// In-memory storage for ephemeral DIDs (in production, use persistent storage)
+const ephemeralDIDStore = new Map();
+
+/**
+ * POST /api/classified-documents/upload
+ * Upload a classified document with section-level clearance markers
+ *
+ * Supports:
+ * - HTML files with data-clearance attributes
+ * - DOCX files with Content Controls tagged clearance:LEVEL
+ *
+ * Request: multipart/form-data
+ * - file: HTML or DOCX file with clearance markers
+ * - title: Document title (optional, extracted from file if not provided)
+ * - releasableTo: JSON array of company names or issuer DIDs
+ * - department: Originating department
+ */
+app.post('/api/classified-documents/upload', requireEmployeeSession, upload.single('file'), async (req, res) => {
+  const session = req.employeeSession;
+
+  console.log('\n' + '='.repeat(80));
+  console.log('[ClassifiedUpload] New classified document upload');
+  console.log('   Employee:', session.email);
+  console.log('   Department:', session.department);
+  console.log('='.repeat(80));
+
+  try {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'File is required'
+      });
+    }
+
+    const { title, releasableTo, department } = req.body;
+
+    // Determine file type
+    const filename = file.originalname.toLowerCase();
+    const isHtml = filename.endsWith('.html') || filename.endsWith('.htm');
+    const isDocx = filename.endsWith('.docx');
+
+    if (!isHtml && !isDocx) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'File must be HTML (.html) or Word (.docx)'
+      });
+    }
+
+    // Parse the document based on type
+    let parsedDocument;
+
+    if (isHtml) {
+      const htmlContent = file.buffer.toString('utf8');
+      const validation = ClearanceDocumentParser.validateDocument(htmlContent);
+
+      if (!validation.valid) {
+        return res.status(400).json({
+          success: false,
+          error: 'ValidationError',
+          message: 'Invalid HTML document',
+          errors: validation.errors,
+          warnings: validation.warnings
+        });
+      }
+
+      parsedDocument = ClearanceDocumentParser.parseClearanceSections(htmlContent);
+      console.log(`   [ClassifiedUpload] Parsed HTML: ${parsedDocument.sections.length} sections`);
+
+    } else {
+      // DOCX file
+      const isValid = await DocxClearanceParser.isValidDocx(file.buffer);
+      if (!isValid) {
+        return res.status(400).json({
+          success: false,
+          error: 'ValidationError',
+          message: 'Invalid DOCX file'
+        });
+      }
+
+      parsedDocument = await DocxClearanceParser.parseDocxClearanceSections(file.buffer);
+      console.log(`   [ClassifiedUpload] Parsed DOCX: ${parsedDocument.sections.length} sections`);
+    }
+
+    // Override title if provided
+    if (title) {
+      parsedDocument.metadata.title = title;
+    }
+
+    // Log section statistics
+    const stats = parsedDocument.metadata.clearanceLevelStats;
+    console.log('   Section breakdown:');
+    console.log(`     UNCLASSIFIED: ${stats.UNCLASSIFIED}`);
+    console.log(`     CONFIDENTIAL: ${stats.CONFIDENTIAL}`);
+    console.log(`     SECRET: ${stats.SECRET}`);
+    console.log(`     TOP_SECRET: ${stats.TOP_SECRET}`);
+    console.log(`   Overall classification: ${parsedDocument.metadata.overallClassification}`);
+
+    // Encrypt sections
+    const encryptedPackage = SectionEncryptionService.encryptSections(
+      parsedDocument,
+      COMPANY_SECRET
+    );
+
+    console.log(`   [ClassifiedUpload] Encrypted ${encryptedPackage.encryptedSections.length} sections`);
+    console.log(`   Document ID: ${encryptedPackage.documentId}`);
+
+    // Parse releasableTo
+    let releasableArray = [];
+    if (releasableTo) {
+      try {
+        releasableArray = typeof releasableTo === 'string' ? JSON.parse(releasableTo) : releasableTo;
+      } catch (e) {
+        releasableArray = [releasableTo];
+      }
+    }
+
+    // Convert company names to DIDs if needed
+    const releasableDIDs = releasableArray.map(item => {
+      if (item.startsWith('did:')) return item;
+      const companyDID = COMPANY_ISSUER_DIDS[item];
+      return companyDID || item;
+    }).filter(Boolean);
+
+    // Upload encrypted package to Iagon
+    const packageJson = JSON.stringify(encryptedPackage);
+    const packageBuffer = Buffer.from(packageJson, 'utf8');
+
+    const iagonClient = getIagonClient();
+    const iagonResult = await iagonClient.uploadFile(
+      packageBuffer,
+      `${encryptedPackage.documentId}.json`,
+      { classificationLevel: parsedDocument.metadata.overallClassification }
+    );
+
+    console.log(`   [ClassifiedUpload] Uploaded to Iagon: ${iagonResult.fileId}`);
+
+    // Create Document DID (simplified - use existing EnterpriseDocumentManager in production)
+    const documentDID = `did:prism:classified:${encryptedPackage.documentId}`;
+
+    // Register in DocumentRegistry
+    const registryEntry = {
+      documentDID,
+      title: parsedDocument.metadata.title,
+      overallClassification: parsedDocument.metadata.overallClassification,
+      sectionCount: encryptedPackage.encryptedSections.length,
+      sectionMetadata: SectionEncryptionService.getSectionMetadata(encryptedPackage),
+      releasableTo: releasableDIDs,
+      iagonStorage: {
+        fileId: iagonResult.fileId,
+        nodeId: iagonResult.nodeId,
+        url: iagonResult.url
+      },
+      createdBy: session.email,
+      createdByDID: session.prismDID,
+      department: department || session.department,
+      createdAt: new Date().toISOString()
+    };
+
+    // Store in DocumentRegistry (add to existing registry)
+    if (typeof documentRegistry !== 'undefined') {
+      documentRegistry.registerDocument(registryEntry);
+    }
+
+    console.log(`   [ClassifiedUpload] Registered document: ${documentDID}`);
+
+    res.json({
+      success: true,
+      documentDID,
+      title: parsedDocument.metadata.title,
+      overallClassification: parsedDocument.metadata.overallClassification,
+      sectionCount: encryptedPackage.encryptedSections.length,
+      clearanceLevelStats: parsedDocument.metadata.clearanceLevelStats,
+      iagonFileId: iagonResult.fileId,
+      message: 'Classified document uploaded and encrypted successfully'
+    });
+
+  } catch (error) {
+    console.error('[ClassifiedUpload] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to upload classified document'
+    });
+  }
+});
+
+/**
+ * POST /api/classified-documents/download
+ * Download a classified document with section-level redaction
+ * Creates an ephemeral DID with 1-hour TTL and delivers encrypted document to wallet
+ *
+ * Request Body:
+ * - documentDID: The document's DID
+ * - recipientDID: Recipient's PRISM DID (optional, from session if not provided)
+ * - recipientPublicKey: Base64-encoded X25519 public key for encryption
+ * - connectionId: DIDComm connection ID for sending document (optional)
+ *
+ * Flow:
+ * 1. Validate user authorization and clearance
+ * 2. Download encrypted package from Iagon
+ * 3. Decrypt sections user is authorized to see
+ * 4. Generate redacted HTML for unauthorized sections
+ * 5. Create ephemeral DID with 1-hour TTL
+ * 6. Encrypt document for recipient's wallet
+ * 7. Return encrypted document (or send via DIDComm if connectionId provided)
+ */
+app.post('/api/classified-documents/download', requireEmployeeSession, async (req, res) => {
+  const session = req.employeeSession;
+
+  console.log('\n' + '='.repeat(80));
+  console.log('[ClassifiedDownload] Document download request');
+  console.log('   Employee:', session.email);
+  console.log('   Clearance:', session.clearanceLevel || 'UNCLASSIFIED');
+  console.log('='.repeat(80));
+
+  try {
+    const { documentDID, recipientDID, recipientPublicKey, connectionId } = req.body;
+
+    if (!documentDID || !recipientPublicKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'documentDID and recipientPublicKey are required'
+      });
+    }
+
+    // Get user clearance from session
+    const userClearance = session.clearanceLevel || 'UNCLASSIFIED';
+    const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] || 1;
+    const employeeIssuerDID = session.issuerDID;
+
+    console.log(`   Document DID: ${documentDID}`);
+    console.log(`   User clearance: ${userClearance} (level ${userClearanceLevel})`);
+
+    // =========================================================================
+    // STEP 1: Get document from registry and verify authorization
+    // =========================================================================
+    let documentRecord;
+    try {
+      documentRecord = await DocumentRegistry.getClassifiedDocument(
+        documentDID,
+        employeeIssuerDID,
+        userClearance
+      );
+    } catch (error) {
+      if (error.message.includes('not found')) {
+        console.log('[ClassifiedDownload] ❌ Document not found');
+        return res.status(404).json({
+          success: false,
+          error: 'DocumentNotFound',
+          message: 'Document not found in registry'
+        });
+      }
+      if (error.message.includes('Unauthorized')) {
+        console.log('[ClassifiedDownload] ❌ Access denied - company not authorized');
+        return res.status(403).json({
+          success: false,
+          error: 'AccessDenied',
+          message: 'Your company is not authorized to access this document'
+        });
+      }
+      throw error;
+    }
+
+    console.log(`   [ClassifiedDownload] Document found: ${documentRecord.title}`);
+    console.log(`   Overall classification: ${documentRecord.overallClassification}`);
+    console.log(`   Visible sections: ${documentRecord.sectionSummary.visibleCount}`);
+    console.log(`   Redacted sections: ${documentRecord.sectionSummary.redactedCount}`);
+
+    // =========================================================================
+    // STEP 2: Download encrypted package from Iagon
+    // =========================================================================
+    if (!documentRecord.iagonStorage || !documentRecord.iagonStorage.fileId) {
+      console.log('[ClassifiedDownload] ❌ Document has no Iagon storage');
+      return res.status(404).json({
+        success: false,
+        error: 'NoStorageMetadata',
+        message: 'Document has no file stored on Iagon'
+      });
+    }
+
+    console.log(`   [ClassifiedDownload] Downloading from Iagon: ${documentRecord.iagonStorage.fileId}`);
+
+    let encryptedPackage;
+    try {
+      const iagonClient = getIagonClient();
+      const packageBuffer = await iagonClient.downloadFile(documentRecord.iagonStorage.fileId);
+      encryptedPackage = JSON.parse(packageBuffer.toString('utf8'));
+      console.log(`   [ClassifiedDownload] Downloaded encrypted package (${encryptedPackage.encryptedSections?.length || 0} sections)`);
+    } catch (iagonError) {
+      console.error('[ClassifiedDownload] ❌ Failed to download from Iagon:', iagonError.message);
+      return res.status(500).json({
+        success: false,
+        error: 'DownloadFailed',
+        message: 'Failed to download document from storage'
+      });
+    }
+
+    // =========================================================================
+    // STEP 3: Decrypt authorized sections
+    // =========================================================================
+    console.log(`   [ClassifiedDownload] Decrypting sections for ${userClearance} clearance...`);
+
+    const decryptionResult = SectionEncryptionService.decryptSectionsForUser(
+      encryptedPackage,
+      userClearance,
+      COMPANY_SECRET
+    );
+
+    console.log(`   [ClassifiedDownload] Decrypted ${decryptionResult.decryptedSections.length} sections`);
+    console.log(`   [ClassifiedDownload] Redacted ${decryptionResult.redactedSections.length} sections`);
+
+    // =========================================================================
+    // STEP 4: Generate redacted HTML document
+    // =========================================================================
+    console.log(`   [ClassifiedDownload] Generating redacted document...`);
+
+    const redactedDocument = RedactionEngine.generateRedactedDocument({
+      metadata: encryptedPackage.metadata,
+      decryptedSections: decryptionResult.decryptedSections,
+      redactedSections: decryptionResult.redactedSections,
+      userClearance
+    });
+
+    console.log(`   [ClassifiedDownload] Generated HTML document (${redactedDocument.length} bytes)`);
+
+    // =========================================================================
+    // STEP 5: Create ephemeral DID with 1-hour TTL
+    // =========================================================================
+    const redactedSectionIds = decryptionResult.redactedSections.map(s => ({
+      sectionId: s.sectionId,
+      clearance: s.clearance
+    }));
+
+    const { didDocument, metadata: ephemeralMetadata } = EphemeralDIDService.createEphemeralDID({
+      originalDocumentDID: documentDID,
+      recipientDID: recipientDID || session.prismDID,
+      recipientPublicKey,
+      clearanceLevel: userClearance,
+      redactedSections: redactedSectionIds,
+      ttlMs: EphemeralDIDService.DEFAULT_TTL_MS, // 1 hour
+      viewsAllowed: -1, // Unlimited views within TTL
+      issuerDID: session.issuerDID
+    });
+
+    // Store ephemeral DID metadata for status checking
+    ephemeralDIDStore.set(ephemeralMetadata.ephemeralDID, ephemeralMetadata);
+
+    console.log(`   [ClassifiedDownload] Created ephemeral DID: ${ephemeralMetadata.ephemeralDID.substring(0, 50)}...`);
+    console.log(`   Expires at: ${ephemeralMetadata.expiresAt}`);
+
+    // =========================================================================
+    // STEP 6: Encrypt document for recipient's wallet using X25519
+    // =========================================================================
+    console.log(`   [ClassifiedDownload] Encrypting document for wallet...`);
+
+    // Generate server ephemeral X25519 key pair for this delivery
+    const serverKeyPair = nacl.box.keyPair();
+
+    // Decode recipient's public key
+    let recipientPubKeyBytes;
+    try {
+      recipientPubKeyBytes = Buffer.from(recipientPublicKey, 'base64');
+      if (recipientPubKeyBytes.length !== 32) {
+        throw new Error('Invalid key length');
+      }
+    } catch (keyErr) {
+      return res.status(400).json({
+        success: false,
+        error: 'InvalidPublicKey',
+        message: 'recipientPublicKey must be a valid Base64-encoded 32-byte X25519 public key'
+      });
+    }
+
+    // Encrypt document content
+    const documentBytes = Buffer.from(redactedDocument, 'utf8');
+    const nonce = nacl.randomBytes(24);
+
+    const encryptedDocument = nacl.box(
+      documentBytes,
+      nonce,
+      recipientPubKeyBytes,
+      serverKeyPair.secretKey
+    );
+
+    // Prepare encryption info for recipient
+    const encryptionInfo = {
+      algorithm: 'x25519-xsalsa20-poly1305',
+      serverPublicKey: Buffer.from(serverKeyPair.publicKey).toString('base64'),
+      nonce: Buffer.from(nonce).toString('base64')
+    };
+
+    console.log(`   [ClassifiedDownload] Encrypted document (${encryptedDocument.length} bytes)`);
+
+    // =========================================================================
+    // STEP 7: Generate content hash and prepare response
+    // =========================================================================
+    const contentHash = DocumentCopyVCIssuer.generateContentHash(documentBytes);
+
+    // Prepare document copy data for response/DIDComm
+    const documentCopyData = {
+      originalDocumentDID: documentDID,
+      ephemeralDID: ephemeralMetadata.ephemeralDID,
+      title: documentRecord.title,
+      overallClassification: documentRecord.overallClassification,
+      clearanceLevelGranted: userClearance,
+      sectionSummary: {
+        totalSections: (decryptionResult.decryptedSections.length + decryptionResult.redactedSections.length),
+        visibleCount: decryptionResult.decryptedSections.length,
+        redactedCount: decryptionResult.redactedSections.length
+      },
+      sourceInfo: {
+        filename: documentRecord.sourceInfo?.filename || 'classified-document.html',
+        format: 'html',
+        originalSize: documentBytes.length
+      },
+      accessRights: {
+        expiresAt: ephemeralMetadata.expiresAt,
+        viewsAllowed: -1,
+        downloadAllowed: false,
+        printAllowed: false
+      },
+      contentHash,
+      encryptionKeyId: `${ephemeralMetadata.ephemeralDID}#key-1`
+    };
+
+    // =========================================================================
+    // STEP 8: Send via DIDComm if connectionId provided, otherwise return directly
+    // =========================================================================
+    if (connectionId && session.connectionId) {
+      console.log(`   [ClassifiedDownload] Sending document via DIDComm to connection: ${connectionId}`);
+
+      try {
+        // Get department API key for DIDComm
+        const departmentApiKey = DEPARTMENT_API_KEYS[session.department] || DEPARTMENT_API_KEYS['IT'];
+
+        await DocumentCopyVCIssuer.issueAndSendDocument({
+          holderDID: recipientDID || session.prismDID,
+          connectionId: connectionId || session.connectionId,
+          encryptedContent: Buffer.from(encryptedDocument),
+          encryptionInfo,
+          documentCopyData,
+          apiKey: departmentApiKey,
+          skipVC: true // Skip VC issuance for now (requires proper schema setup)
+        });
+
+        console.log(`   [ClassifiedDownload] ✅ Document sent via DIDComm`);
+      } catch (didcommError) {
+        console.error('[ClassifiedDownload] ⚠️ DIDComm send failed, returning document directly:', didcommError.message);
+        // Fall through to direct response
+      }
+    }
+
+    // Generate access token for status checking
+    const accessToken = EphemeralDIDService.generateAccessToken(ephemeralMetadata);
+
+    // Record access in registry
+    try {
+      await DocumentRegistry.recordSectionAccess(documentDID, session.prismDID || session.email,
+        decryptionResult.decryptedSections.map(s => s.sectionId));
+    } catch (logErr) {
+      console.warn('[ClassifiedDownload] Failed to record access:', logErr.message);
+    }
+
+    console.log('='.repeat(80));
+    console.log('✅ [ClassifiedDownload] Document prepared successfully');
+    console.log(`   Ephemeral DID: ${ephemeralMetadata.ephemeralDID.substring(0, 50)}...`);
+    console.log(`   Visible sections: ${decryptionResult.decryptedSections.length}`);
+    console.log(`   Redacted sections: ${decryptionResult.redactedSections.length}`);
+    console.log(`   Expires: ${ephemeralMetadata.expiresAt}`);
+    console.log('='.repeat(80) + '\n');
+
+    res.json({
+      success: true,
+      ephemeralDID: ephemeralMetadata.ephemeralDID,
+      didDocument,
+      expiresAt: ephemeralMetadata.expiresAt,
+      ttlMinutes: 60,
+      accessToken,
+      userClearance,
+      documentCopy: documentCopyData,
+      encryptedDocument: Buffer.from(encryptedDocument).toString('base64'),
+      encryptionInfo,
+      message: 'Document prepared. Decrypt with your wallet private key.',
+      sectionSummary: {
+        total: decryptionResult.decryptedSections.length + decryptionResult.redactedSections.length,
+        visible: decryptionResult.decryptedSections.length,
+        redacted: decryptionResult.redactedSections.length,
+        redactedSections: redactedSectionIds
+      }
+    });
+
+  } catch (error) {
+    console.error('[ClassifiedDownload] Error:', error);
+    console.error('[ClassifiedDownload] Stack:', error.stack);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to process download request'
+    });
+  }
+});
+
+/**
+ * GET /api/classified-documents/templates
+ * Get available document templates
+ */
+app.get('/api/classified-documents/templates', (req, res) => {
+  res.json({
+    success: true,
+    templates: [
+      {
+        name: 'HTML Template',
+        description: 'HTML document with data-clearance attributes',
+        format: 'html',
+        downloadUrl: '/templates/classified-document-template.html',
+        instructions: 'Add data-clearance="LEVEL" attribute to any HTML element'
+      },
+      {
+        name: 'Word Template',
+        description: 'Microsoft Word document with Content Controls',
+        format: 'docx',
+        downloadUrl: '/templates/classified-document-template.docx',
+        instructions: 'Use Content Controls with tag clearance:LEVEL'
+      }
+    ],
+    clearanceLevels: [
+      { level: 1, name: 'UNCLASSIFIED', description: 'Public information' },
+      { level: 2, name: 'CONFIDENTIAL', description: 'Sensitive business information' },
+      { level: 3, name: 'SECRET', description: 'Highly restricted information' },
+      { level: 4, name: 'TOP_SECRET', description: 'Classified information (highest)' }
+    ]
+  });
+});
+
+/**
+ * GET /api/classified-documents/:ephemeralDID/status
+ * Check status of an ephemeral document access
+ */
+app.get('/api/classified-documents/:ephemeralDID/status', (req, res) => {
+  const { ephemeralDID } = req.params;
+
+  const metadata = ephemeralDIDStore.get(ephemeralDID);
+
+  if (!metadata) {
+    return res.status(404).json({
+      success: false,
+      error: 'NotFound',
+      message: 'Ephemeral DID not found'
+    });
+  }
+
+  const validity = EphemeralDIDService.checkEphemeralDIDValidity(metadata);
+
+  res.json({
+    success: true,
+    ephemeralDID,
+    documentDID: metadata.originalDocumentDID,
+    status: validity.valid ? 'active' : 'expired',
+    ...validity
+  });
+});
+
+// ============================================================================
 // Error Handling
 // ============================================================================
 

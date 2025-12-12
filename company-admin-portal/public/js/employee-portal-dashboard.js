@@ -715,7 +715,14 @@ function displayDocuments(documents) {
     // Show documents list
     if (listEl) {
         listEl.classList.remove('hidden');
-        listEl.innerHTML = documents.map(doc => `
+        listEl.innerHTML = documents.map(doc => {
+            // Check if this is a classified document with sections
+            const hasClassifiedSections = doc.sectionSummary?.totalSections > 0;
+            const sectionInfo = hasClassifiedSections
+                ? `<span title="${doc.sectionSummary.visibleCount} visible, ${doc.sectionSummary.redactedCount} redacted">📑 ${doc.sectionSummary.totalSections} sections</span>`
+                : '';
+
+            return `
             <div class="document-item">
                 <div class="document-info">
                     <div class="document-title">${escapeHtml(doc.title)}</div>
@@ -725,13 +732,22 @@ function displayDocuments(documents) {
                         </span>
                         ${doc.metadata?.category ? `<span>📁 ${escapeHtml(doc.metadata.category)}</span>` : ''}
                         ${doc.metadata?.version ? `<span>🔖 ${escapeHtml(doc.metadata.version)}</span>` : ''}
+                        ${sectionInfo}
                     </div>
                 </div>
-                <button class="view-document-btn" onclick="viewDocument('${escapeHtml(doc.documentDID)}')">
-                    View
-                </button>
+                <div style="display: flex; gap: 8px;">
+                    <button class="view-document-btn" onclick="viewDocument('${escapeHtml(doc.documentDID)}')">
+                        View
+                    </button>
+                    ${hasClassifiedSections ? `
+                    <button class="download-wallet-btn" onclick="downloadToWallet('${escapeHtml(doc.documentDID)}', '${escapeHtml(doc.title)}')"
+                        style="background: #9f7aea; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;">
+                        📱 To Wallet
+                    </button>
+                    ` : ''}
+                </div>
             </div>
-        `).join('');
+        `}).join('');
     }
 
     console.log(`[Documents] Displayed ${documents.length} document(s)`);
@@ -1605,6 +1621,409 @@ async function requestDocumentAccess(documentDID) {
     });
 }
 
+// ============================================================================
+// Download to Wallet - Classified Documents with Redaction
+// ============================================================================
+
+/**
+ * Download a classified document to the user's wallet
+ * The document will be encrypted and sent with section-level redaction
+ *
+ * @param {string} documentDID - Document's DID
+ * @param {string} title - Document title for display
+ */
+async function downloadToWallet(documentDID, title) {
+    console.log('[DownloadToWallet] Starting download:', documentDID);
+
+    // Show loading state
+    const btn = event.target;
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '⏳ Preparing...';
+    btn.disabled = true;
+
+    try {
+        const sessionToken = getSessionToken();
+        if (!sessionToken) {
+            throw new Error('Not authenticated. Please log in again.');
+        }
+
+        // Get user's X25519 public key from wallet
+        // For now, we'll generate a temporary one or prompt user to get from wallet
+        // In production, this would be retrieved from the wallet via postMessage
+        const recipientPublicKey = await getWalletPublicKey();
+
+        if (!recipientPublicKey) {
+            throw new Error('Could not get wallet encryption key. Please ensure your wallet is connected.');
+        }
+
+        // Request document download from server
+        const response = await fetch('/company-admin/api/classified-documents/download', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Session-ID': sessionToken
+            },
+            body: JSON.stringify({
+                documentDID,
+                recipientPublicKey
+            })
+        });
+
+        const result = await response.json();
+
+        if (!result.success) {
+            throw new Error(result.message || 'Failed to download document');
+        }
+
+        console.log('[DownloadToWallet] Document prepared:', {
+            ephemeralDID: result.ephemeralDID,
+            expiresAt: result.expiresAt,
+            sections: result.sectionSummary
+        });
+
+        // Send encrypted document to wallet for storage
+        const stored = await sendDocumentToWallet({
+            ephemeralDID: result.ephemeralDID,
+            originalDocumentDID: documentDID,
+            title: title,
+            overallClassification: result.documentCopy.overallClassification,
+            encryptedContent: result.encryptedDocument,
+            encryptionInfo: result.encryptionInfo,
+            sectionSummary: result.sectionSummary,
+            expiresAt: result.expiresAt,
+            accessRights: result.documentCopy.accessRights,
+            sourceInfo: result.documentCopy.sourceInfo
+        });
+
+        if (stored) {
+            // Success!
+            btn.innerHTML = '✅ Sent to Wallet';
+            btn.style.background = '#48bb78';
+
+            // Show success message
+            alert(`Document "${title}" sent to your wallet.\n\nThe document will expire in 1 hour.\nVisible sections: ${result.sectionSummary.visible}\nRedacted sections: ${result.sectionSummary.redacted}\n\nOpen your wallet's "My Documents" page to view it.`);
+
+            // Reset button after 3 seconds
+            setTimeout(() => {
+                btn.innerHTML = originalText;
+                btn.style.background = '#9f7aea';
+                btn.disabled = false;
+            }, 3000);
+        }
+
+    } catch (error) {
+        console.error('[DownloadToWallet] Error:', error);
+        btn.innerHTML = '❌ Failed';
+        btn.style.background = '#fc8181';
+        alert(`Failed to download document: ${error.message}`);
+
+        // Reset button after 2 seconds
+        setTimeout(() => {
+            btn.innerHTML = originalText;
+            btn.style.background = '#9f7aea';
+            btn.disabled = false;
+        }, 2000);
+    }
+}
+
+/**
+ * Get user's X25519 public key from the wallet
+ * Opens wallet popup if needed and requests the key
+ */
+async function getWalletPublicKey() {
+    // For now, use localStorage or prompt for key
+    // In production, this would use postMessage to communicate with wallet
+
+    // Check if we have a stored key from a previous clearance verification
+    const storedKey = localStorage.getItem('wallet-x25519-publicKey');
+    if (storedKey) {
+        console.log('[WalletKey] Using stored X25519 public key');
+        return storedKey;
+    }
+
+    // Prompt user to provide their wallet's public key
+    // This is a temporary solution - in production, use postMessage
+    const key = prompt(
+        'Enter your wallet\'s X25519 public key (Base64):\n\n' +
+        'You can find this in your wallet\'s Security settings or Key Management page.\n\n' +
+        '(This key is used to encrypt the document so only your wallet can decrypt it)'
+    );
+
+    if (key && key.trim()) {
+        // Validate key format (should be 44 chars base64 for 32 bytes)
+        const trimmedKey = key.trim();
+        if (trimmedKey.length >= 40 && trimmedKey.length <= 50) {
+            localStorage.setItem('wallet-x25519-publicKey', trimmedKey);
+            return trimmedKey;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Send encrypted document to wallet for storage
+ * Uses postMessage if wallet window is open, otherwise stores for pickup
+ */
+async function sendDocumentToWallet(documentData) {
+    // Check if wallet window is open
+    if (walletWindow && !walletWindow.closed) {
+        return new Promise((resolve, reject) => {
+            const requestId = 'doc-' + Date.now();
+
+            const timeout = setTimeout(() => {
+                reject(new Error('Wallet did not respond'));
+            }, 30000);
+
+            // Listen for response
+            const handler = (event) => {
+                if (event.origin !== WALLET_ORIGIN) return;
+                if (event.data?.requestId !== requestId) return;
+
+                window.removeEventListener('message', handler);
+                clearTimeout(timeout);
+
+                if (event.data.type === 'DOCUMENT_STORED') {
+                    resolve(true);
+                } else {
+                    reject(new Error(event.data.error || 'Failed to store document'));
+                }
+            };
+
+            window.addEventListener('message', handler);
+
+            // Send document to wallet
+            walletWindow.postMessage({
+                type: 'STORE_CLASSIFIED_DOCUMENT',
+                requestId,
+                document: documentData,
+                timestamp: Date.now()
+            }, WALLET_ORIGIN);
+        });
+    }
+
+    // Wallet not open - store in localStorage for pickup
+    console.log('[SendToWallet] Wallet not open, storing for pickup');
+    const pendingDocs = JSON.parse(localStorage.getItem('pending-wallet-documents') || '[]');
+    pendingDocs.push({
+        ...documentData,
+        pendingAt: Date.now()
+    });
+    localStorage.setItem('pending-wallet-documents', JSON.stringify(pendingDocs));
+
+    // Optionally open wallet
+    const openWallet = confirm('Document encrypted and ready!\n\nWould you like to open your wallet to receive it?\n\n(The document is stored securely and will be available when you open your wallet)');
+
+    if (openWallet) {
+        const walletUrl = 'https://identuslabel.cz/alice/my-documents';
+        window.open(walletUrl, 'identus-wallet');
+    }
+
+    return true;
+}
+
+// ============================================================================
+// Classified Document Upload - Section-Level Clearance
+// ============================================================================
+
+let selectedClassifiedFile = null;
+
+/**
+ * Handle classified file selection
+ */
+function handleClassifiedFileSelect(input) {
+    const file = input.files[0];
+    if (!file) return;
+
+    const filename = file.name.toLowerCase();
+    const isValid = filename.endsWith('.html') || filename.endsWith('.htm') || filename.endsWith('.docx');
+
+    if (!isValid) {
+        alert('Please select an HTML (.html, .htm) or Word (.docx) file.');
+        input.value = '';
+        return;
+    }
+
+    selectedClassifiedFile = file;
+
+    // Show preview
+    document.getElementById('classifiedFilePreview').classList.remove('hidden');
+    document.getElementById('classifiedDropZone').style.display = 'none';
+    document.getElementById('classifiedFileName').textContent = file.name;
+    document.getElementById('classifiedFileSize').textContent = formatFileSize(file.size);
+
+    // Set icon based on type
+    const icon = filename.endsWith('.docx') ? '📝' : '📄';
+    document.getElementById('classifiedFileIcon').textContent = icon;
+
+    // If HTML, analyze sections client-side
+    if (filename.endsWith('.html') || filename.endsWith('.htm')) {
+        analyzeHtmlSections(file);
+    } else {
+        // For DOCX, we'll analyze server-side
+        document.getElementById('sectionAnalysis').classList.add('hidden');
+    }
+}
+
+/**
+ * Analyze HTML file for clearance sections (client-side preview)
+ */
+async function analyzeHtmlSections(file) {
+    try {
+        const content = await file.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(content, 'text/html');
+
+        // Count sections by clearance level
+        const counts = {
+            UNCLASSIFIED: 0,
+            CONFIDENTIAL: 0,
+            SECRET: 0,
+            TOP_SECRET: 0
+        };
+
+        const classifiedElements = doc.querySelectorAll('[data-clearance]');
+        classifiedElements.forEach(el => {
+            const clearance = el.getAttribute('data-clearance').toUpperCase().replace('-', '_');
+            if (counts.hasOwnProperty(clearance)) {
+                counts[clearance]++;
+            }
+        });
+
+        // Count unmarked elements as UNCLASSIFIED
+        // (simplified - actual parsing is more complex)
+        const totalMarked = classifiedElements.length;
+        if (totalMarked === 0) {
+            counts.UNCLASSIFIED = 1; // Whole document is unclassified
+        }
+
+        // Update UI
+        document.getElementById('unclassifiedCount').textContent = counts.UNCLASSIFIED;
+        document.getElementById('confidentialCount').textContent = counts.CONFIDENTIAL;
+        document.getElementById('secretCount').textContent = counts.SECRET;
+        document.getElementById('topSecretCount').textContent = counts.TOP_SECRET;
+
+        // Determine overall classification (lowest in doc for discovery purposes)
+        let overall = 'UNCLASSIFIED';
+        if (counts.CONFIDENTIAL > 0) overall = 'CONFIDENTIAL';
+        if (counts.SECRET > 0) overall = 'SECRET';
+        if (counts.TOP_SECRET > 0) overall = 'TOP_SECRET';
+
+        document.getElementById('overallClassification').textContent = overall;
+        document.getElementById('sectionAnalysis').classList.remove('hidden');
+
+    } catch (error) {
+        console.error('[SectionAnalysis] Error:', error);
+        document.getElementById('sectionAnalysis').classList.add('hidden');
+    }
+}
+
+/**
+ * Clear selected classified file
+ */
+function clearClassifiedFile() {
+    selectedClassifiedFile = null;
+    document.getElementById('classifiedDocFile').value = '';
+    document.getElementById('classifiedFilePreview').classList.add('hidden');
+    document.getElementById('classifiedDropZone').style.display = 'block';
+    document.getElementById('sectionAnalysis').classList.add('hidden');
+}
+
+/**
+ * Handle classified document upload
+ */
+async function handleCreateClassifiedDocument(event) {
+    event.preventDefault();
+
+    if (!selectedClassifiedFile) {
+        alert('Please select a file to upload.');
+        return;
+    }
+
+    const sessionToken = getSessionToken();
+    if (!sessionToken) {
+        alert('Session expired. Please log in again.');
+        window.location.href = '/company-admin/employee-portal-login.html';
+        return;
+    }
+
+    const form = event.target;
+    const btn = document.getElementById('createClassifiedDocBtn');
+    const originalText = btn.innerHTML;
+
+    // Disable button and show loading
+    btn.disabled = true;
+    btn.innerHTML = '⏳ Uploading...';
+
+    // Hide messages
+    document.getElementById('classifiedDocSuccess').classList.add('hidden');
+    document.getElementById('classifiedDocError').classList.add('hidden');
+
+    try {
+        const formData = new FormData();
+        formData.append('file', selectedClassifiedFile);
+
+        const title = document.getElementById('classifiedDocTitle').value.trim();
+        if (title) {
+            formData.append('title', title);
+        }
+
+        // Get releasableTo
+        const releasableCheckboxes = document.querySelectorAll('input[name="classifiedReleasableTo"]:checked');
+        const releasableTo = Array.from(releasableCheckboxes).map(cb => cb.value);
+        formData.append('releasableTo', JSON.stringify(releasableTo));
+
+        const response = await fetch('/company-admin/api/classified-documents/upload', {
+            method: 'POST',
+            headers: {
+                'X-Session-ID': sessionToken
+            },
+            body: formData
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            // Show success message
+            document.getElementById('classifiedSuccessMessage').textContent =
+                `Document "${result.title}" uploaded successfully! ` +
+                `${result.sectionCount} sections encrypted. ` +
+                `Overall classification: ${result.overallClassification}`;
+            document.getElementById('classifiedDocSuccess').classList.remove('hidden');
+
+            // Reset form
+            form.reset();
+            clearClassifiedFile();
+
+            // Refresh document list
+            const profile = await loadProfile();
+            if (profile) {
+                await loadDocuments(profile);
+            }
+
+        } else {
+            throw new Error(result.message || 'Upload failed');
+        }
+
+    } catch (error) {
+        console.error('[ClassifiedUpload] Error:', error);
+        document.getElementById('classifiedErrorMessage').textContent = error.message;
+        document.getElementById('classifiedDocError').classList.remove('hidden');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    }
+}
+
+/**
+ * Format file size for display
+ */
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' bytes';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
 // Export functions for inline onclick handlers
 window.copyToClipboard = copyToClipboard;
 window.handleLogout = handleLogout;
@@ -1615,3 +2034,7 @@ window.openClearanceModal = openClearanceModal;
 window.initiateClearanceVerification = initiateClearanceVerification;
 window.submitClearanceVerification = submitClearanceVerification;
 window.closeClearanceModal = closeClearanceModal;
+window.downloadToWallet = downloadToWallet;
+window.handleClassifiedFileSelect = handleClassifiedFileSelect;
+window.clearClassifiedFile = clearClassifiedFile;
+window.handleCreateClassifiedDocument = handleCreateClassifiedDocument;
