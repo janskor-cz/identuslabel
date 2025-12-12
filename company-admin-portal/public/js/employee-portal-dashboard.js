@@ -748,6 +748,222 @@ function showDocumentsError(message) {
     }
 }
 
+// ============================================================================
+// PDF Viewer Modal Functions (In-Browser Viewing - No Download)
+// ============================================================================
+
+let currentBlobUrl = null;
+
+// ============================================================================
+// PDF.js Secure Viewer - No downloads allowed
+// ============================================================================
+
+let pdfDoc = null;
+let pdfCurrentPage = 1;
+let pdfTotalPages = 0;
+let pdfScale = 1.5;
+
+/**
+ * Opens the PDF viewer modal with the given blob URL using PDF.js
+ * @param {string} blobUrl - The blob URL of the PDF
+ * @param {string} filename - The filename to display in the title
+ */
+async function openPdfViewer(blobUrl, filename) {
+    const modal = document.getElementById('pdfViewerModal');
+    const canvas = document.getElementById('pdfCanvas');
+    const title = document.getElementById('pdfViewerTitle');
+
+    if (!modal || !canvas || !title) {
+        console.error('[PDF Viewer] Modal elements not found');
+        alert('PDF viewer not available');
+        return;
+    }
+
+    // Store for cleanup
+    currentBlobUrl = blobUrl;
+
+    // Set title
+    title.textContent = filename || 'Document Viewer';
+
+    // Show modal immediately with loading state
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    // Disable right-click on modal
+    modal.addEventListener('contextmenu', preventContextMenu);
+
+    // Disable keyboard shortcuts (Ctrl+S, Ctrl+P)
+    document.addEventListener('keydown', preventSaveShortcuts);
+
+    // Disable text selection on canvas
+    canvas.style.userSelect = 'none';
+    canvas.style.webkitUserSelect = 'none';
+
+    console.log('[PDF Viewer] Loading PDF with PDF.js...');
+
+    try {
+        // Configure PDF.js worker
+        if (typeof pdfjsLib !== 'undefined') {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        } else {
+            throw new Error('PDF.js library not loaded');
+        }
+
+        // Load the PDF document
+        const loadingTask = pdfjsLib.getDocument(blobUrl);
+        pdfDoc = await loadingTask.promise;
+        pdfTotalPages = pdfDoc.numPages;
+        pdfCurrentPage = 1;
+
+        console.log(`[PDF Viewer] PDF loaded: ${pdfTotalPages} pages`);
+
+        // Update page counter
+        document.getElementById('totalPages').textContent = pdfTotalPages;
+        document.getElementById('currentPage').textContent = pdfCurrentPage;
+
+        // Render the first page
+        await renderPdfPage(pdfCurrentPage);
+
+    } catch (error) {
+        console.error('[PDF Viewer] Error loading PDF:', error);
+        alert('Failed to load PDF: ' + error.message);
+        closePdfViewer();
+    }
+}
+
+/**
+ * Renders a specific page of the PDF
+ * @param {number} pageNum - Page number to render
+ */
+async function renderPdfPage(pageNum) {
+    if (!pdfDoc) {
+        console.error('[PDF Viewer] No PDF document loaded');
+        return;
+    }
+
+    const canvas = document.getElementById('pdfCanvas');
+    const ctx = canvas.getContext('2d');
+
+    try {
+        const page = await pdfDoc.getPage(pageNum);
+
+        // Calculate scale to fit container width while maintaining aspect ratio
+        const container = document.querySelector('.pdf-viewer-container');
+        const containerWidth = container.clientWidth - 40; // Account for padding
+        const viewport = page.getViewport({ scale: 1 });
+
+        // Scale to fit width, but cap at 1.5x for readability
+        const fitScale = Math.min(containerWidth / viewport.width, 1.5);
+        const scaledViewport = page.getViewport({ scale: fitScale });
+
+        canvas.height = scaledViewport.height;
+        canvas.width = scaledViewport.width;
+
+        const renderContext = {
+            canvasContext: ctx,
+            viewport: scaledViewport
+        };
+
+        await page.render(renderContext).promise;
+
+        // Update page counter
+        document.getElementById('currentPage').textContent = pageNum;
+
+        console.log(`[PDF Viewer] Rendered page ${pageNum}/${pdfTotalPages}`);
+
+    } catch (error) {
+        console.error('[PDF Viewer] Error rendering page:', error);
+    }
+}
+
+/**
+ * Navigate to previous page
+ */
+function pdfPrevPage() {
+    if (pdfCurrentPage <= 1) return;
+    pdfCurrentPage--;
+    renderPdfPage(pdfCurrentPage);
+}
+
+/**
+ * Navigate to next page
+ */
+function pdfNextPage() {
+    if (pdfCurrentPage >= pdfTotalPages) return;
+    pdfCurrentPage++;
+    renderPdfPage(pdfCurrentPage);
+}
+
+/**
+ * Closes the PDF viewer modal and cleans up resources
+ */
+function closePdfViewer() {
+    const modal = document.getElementById('pdfViewerModal');
+    const canvas = document.getElementById('pdfCanvas');
+
+    if (!modal) {
+        console.error('[PDF Viewer] Modal element not found');
+        return;
+    }
+
+    // Clear canvas
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    // Reset PDF state
+    pdfDoc = null;
+    pdfCurrentPage = 1;
+    pdfTotalPages = 0;
+
+    // Hide modal
+    modal.style.display = 'none';
+
+    // Cleanup blob URL to free memory
+    if (currentBlobUrl) {
+        URL.revokeObjectURL(currentBlobUrl);
+        console.log('[PDF Viewer] Blob URL revoked');
+        currentBlobUrl = null;
+    }
+
+    // Remove event listeners
+    modal.removeEventListener('contextmenu', preventContextMenu);
+    document.removeEventListener('keydown', preventSaveShortcuts);
+
+    // Restore body scroll
+    document.body.style.overflow = '';
+
+    console.log('[PDF Viewer] Modal closed');
+}
+
+/**
+ * Prevents right-click context menu
+ */
+function preventContextMenu(e) {
+    e.preventDefault();
+    return false;
+}
+
+/**
+ * Prevents save/print keyboard shortcuts
+ */
+function preventSaveShortcuts(e) {
+    // Prevent Ctrl+S (save), Ctrl+P (print), Ctrl+Shift+S (save as)
+    if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S' || e.key === 'p' || e.key === 'P')) {
+        e.preventDefault();
+        console.log('[PDF Viewer] Blocked save/print shortcut');
+        return false;
+    }
+}
+
+// Export functions for global access (onclick handlers in HTML)
+window.closePdfViewer = closePdfViewer;
+window.pdfPrevPage = pdfPrevPage;
+window.pdfNextPage = pdfNextPage;
+
+// ============================================================================
+
 /**
  * View/Download a document using the wallet postMessage bridge
  *
@@ -791,27 +1007,20 @@ async function viewDocument(documentDID) {
 
         const blobUrl = URL.createObjectURL(blob);
 
-        // Open in new tab
-        const newWindow = window.open(blobUrl, '_blank');
+        // Open in modal viewer instead of new tab (prevents download)
+        openPdfViewer(blobUrl, filename);
 
-        // Clean up blob URL after a delay (browser needs time to load it)
-        setTimeout(() => {
-            URL.revokeObjectURL(blobUrl);
-        }, 60000); // 1 minute
-
-        if (!newWindow) {
-            // Fallback: download link if popup blocked
-            const link = document.createElement('a');
-            link.href = blobUrl;
-            link.download = filename || 'document.pdf';
-            link.click();
-        }
-
-        console.log('[Documents] Document displayed successfully');
+        console.log('[Documents] Document displayed in modal viewer');
 
     } catch (error) {
         console.error('[Documents] Error viewing document:', error);
-        showError(`Failed to view document: ${error.message}`);
+
+        // Check for already-accessed error (view-once restriction)
+        if (error.message && error.message.includes('already been viewed')) {
+            showError('This document has already been viewed. Contact your administrator to request re-access.');
+        } else {
+            showError(`Failed to view document: ${error.message}`);
+        }
     } finally {
         showLoading(false);
     }

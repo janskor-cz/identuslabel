@@ -6,10 +6,17 @@
  * integration to Hyperledger Identus multitenancy Cloud Agent (port 8200).
  */
 
+// PERMANENT FIX: Load .env file automatically at startup
+// This ensures ENTERPRISE_DB_PASSWORD and other env vars are always available
+// regardless of how the server is started (manual, script, systemd, etc.)
+const path = require('path');
+const dotenvPath = path.join(__dirname, '.env');
+require('dotenv').config({ path: dotenvPath });
+
 const express = require('express');
 const session = require('express-session');
 const fetch = require('node-fetch');
-const path = require('path');
+// path already required above for dotenv
 const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -192,6 +199,30 @@ global.softDeletedConnections = loadSoftDeletedConnections();
 global.employeeConnectionMappings = loadEmployeeMappings();
 
 // Middleware
+
+// CORS configuration - Allow wallet (cross-origin) to send X-Session-ID header
+app.use((req, res, next) => {
+  // Allow requests from wallet origins
+  const allowedOrigins = [
+    'https://identuslabel.cz',
+    'http://91.99.4.54:3001',
+    'http://localhost:3001'
+  ];
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Session-ID, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -3501,10 +3532,25 @@ app.post('/api/ephemeral-documents/access', async (req, res) => {
     // SECURITY FIX: Get clearance from VP-verified session, NOT client request
     // The client's clearance was verified during login via VP verification
     const sessionToken = req.query.sessionId || req.headers['x-session-id'];
+
+    // Debug logging for session lookup
+    console.log('[EphemeralAccess] Session lookup:');
+    console.log(`   Header x-session-id: ${req.headers['x-session-id'] ? req.headers['x-session-id'].substring(0, 20) + '...' : 'NOT PRESENT'}`);
+    console.log(`   Query sessionId: ${req.query.sessionId ? req.query.sessionId.substring(0, 20) + '...' : 'NOT PRESENT'}`);
+    console.log(`   Active sessions: ${employeeSessions.size}`);
+
     const session = employeeSessions.get(sessionToken);
 
     if (!session) {
       console.log('[EphemeralAccess] DENIED: No valid session');
+      console.log(`   Token used for lookup: ${sessionToken ? sessionToken.substring(0, 20) + '...' : 'NONE'}`);
+      // List active session tokens (first 20 chars) for debugging
+      if (employeeSessions.size > 0) {
+        console.log('   Active session tokens:');
+        for (const [token] of employeeSessions) {
+          console.log(`     - ${token.substring(0, 20)}...`);
+        }
+      }
       return res.status(401).json({
         success: false,
         error: 'Unauthorized',
