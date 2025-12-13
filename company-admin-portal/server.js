@@ -1615,7 +1615,8 @@ async function checkCISTrainingStatus(prismDid) {
  * Validates session token and checks expiration
  */
 function requireEmployeeSession(req, res, next) {
-  const token = req.headers['x-session-token'];
+  // Accept both X-Session-Token and X-Session-ID for compatibility
+  const token = req.headers['x-session-token'] || req.headers['x-session-id'];
 
   if (!token) {
     return res.status(401).json({
@@ -3623,6 +3624,7 @@ app.post('/api/ephemeral-documents/access', async (req, res) => {
       nonce: result.nonce,
       serverPublicKey: result.serverPublicKey,
       filename: result.filename,
+      mimeType: result.mimeType,
       classificationLevel: result.classificationLevel,
       accessedAt: result.accessedAt
     });
@@ -3722,6 +3724,86 @@ app.get('/api/ephemeral-documents/metadata/:documentDID', async (req, res) => {
       success: false,
       error: 'InternalServerError',
       message: error.message || 'Failed to get document metadata'
+    });
+  }
+});
+
+/**
+ * GET /api/ephemeral-documents/content/:ephemeralId
+ * Service endpoint for retrieving encrypted document content by ephemeral ID.
+ *
+ * This is the service endpoint URL embedded in the ephemeral DID.
+ * The document is already encrypted for the specific wallet's X25519 key.
+ *
+ * SSI Architecture:
+ * - DocumentCopy VC delivered via DIDComm (contains ephemeralDID with this URL)
+ * - Browser wallet fetches encrypted content from this endpoint
+ * - Browser wallet decrypts locally using its X25519 private key
+ *
+ * No authentication required - document is encrypted for specific wallet.
+ *
+ * @param {string} ephemeralId - UUID portion of did:ephemeral:{uuid}
+ * @returns {Object} { encryptedContent, nonce, serverPublicKey, contentType }
+ */
+app.get('/api/ephemeral-documents/content/:ephemeralId', async (req, res) => {
+  const EphemeralDocumentStore = require('./lib/EphemeralDocumentStore');
+
+  try {
+    const { ephemeralId } = req.params;
+
+    console.log(`[EphemeralContent] Service endpoint request for: ${ephemeralId}`);
+
+    // Validate ephemeral ID format (should be UUID)
+    if (!ephemeralId || ephemeralId.length < 10) {
+      return res.status(400).json({
+        success: false,
+        error: 'InvalidRequest',
+        message: 'Valid ephemeral ID is required'
+      });
+    }
+
+    // Get encrypted document from store
+    const document = await EphemeralDocumentStore.get(ephemeralId);
+
+    if (!document) {
+      console.log(`[EphemeralContent] Document not found or expired: ${ephemeralId}`);
+      return res.status(404).json({
+        success: false,
+        error: 'NotFound',
+        message: 'Document not found or expired'
+      });
+    }
+
+    // Check expiry
+    if (new Date(document.expiresAt) < new Date()) {
+      console.log(`[EphemeralContent] Document expired: ${ephemeralId}`);
+      await EphemeralDocumentStore.delete(ephemeralId);
+      return res.status(410).json({
+        success: false,
+        error: 'Expired',
+        message: 'Document has expired'
+      });
+    }
+
+    console.log(`[EphemeralContent] Serving encrypted document: ${ephemeralId}`);
+    console.log(`[EphemeralContent] Content type: ${document.contentType}, Size: ${document.contentSize} bytes`);
+
+    // Return encrypted document for client-side decryption
+    res.json({
+      success: true,
+      encryptedContent: document.encryptedContent,
+      nonce: document.nonce,
+      serverPublicKey: document.serverPublicKey,
+      contentType: document.contentType || 'text/html',
+      expiresAt: document.expiresAt
+    });
+
+  } catch (error) {
+    console.error('[EphemeralContent] Error serving document:', error);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to serve document'
     });
   }
 });
@@ -5056,6 +5138,7 @@ setInterval(() => {
 // Import new services (add to top of file requires section in production)
 const ClearanceDocumentParser = require('./lib/ClearanceDocumentParser');
 const DocxClearanceParser = require('./lib/DocxClearanceParser');
+const DocxRedactionService = require('./lib/DocxRedactionService');
 const SectionEncryptionService = require('./lib/SectionEncryptionService');
 const RedactionEngine = require('./lib/RedactionEngine');
 const EphemeralDIDService = require('./lib/EphemeralDIDService');
@@ -5102,12 +5185,19 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
       });
     }
 
-    const { title, releasableTo, department } = req.body;
+    const { releasableTo, department } = req.body;
 
     // Determine file type
     const filename = file.originalname.toLowerCase();
     const isHtml = filename.endsWith('.html') || filename.endsWith('.htm');
     const isDocx = filename.endsWith('.docx');
+
+    console.log(`   [ClassifiedUpload] ===== FILE TYPE DETECTION =====`);
+    console.log(`   [ClassifiedUpload] Original filename: ${file.originalname}`);
+    console.log(`   [ClassifiedUpload] Lowercase filename: ${filename}`);
+    console.log(`   [ClassifiedUpload] isHtml: ${isHtml}`);
+    console.log(`   [ClassifiedUpload] isDocx: ${isDocx}`);
+    console.log(`   [ClassifiedUpload] File buffer size: ${file.buffer?.length || 0} bytes`);
 
     if (!isHtml && !isDocx) {
       return res.status(400).json({
@@ -5152,10 +5242,10 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
       console.log(`   [ClassifiedUpload] Parsed DOCX: ${parsedDocument.sections.length} sections`);
     }
 
-    // Override title if provided
-    if (title) {
-      parsedDocument.metadata.title = title;
-    }
+    // Always use original filename as title (no title input field in employee dashboard)
+    const filenameWithoutExt = file.originalname.replace(/\.(docx|html?)$/i, '');
+    parsedDocument.metadata.title = filenameWithoutExt;
+    parsedDocument.metadata.originalFilename = file.originalname;
 
     // Log section statistics
     const stats = parsedDocument.metadata.clearanceLevelStats;
@@ -5203,7 +5293,32 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
       { classificationLevel: parsedDocument.metadata.overallClassification }
     );
 
-    console.log(`   [ClassifiedUpload] Uploaded to Iagon: ${iagonResult.fileId}`);
+    console.log(`   [ClassifiedUpload] Uploaded encrypted package to Iagon: ${iagonResult.fileId}`);
+
+    // For DOCX files, also upload the original file for full-fidelity redacted viewing
+    let originalDocxResult = null;
+    console.log(`   [ClassifiedUpload] ===== ORIGINAL DOCX UPLOAD CHECK =====`);
+    console.log(`   [ClassifiedUpload] isDocx value: ${isDocx}`);
+    if (isDocx) {
+      console.log(`   [ClassifiedUpload] ✅ DOCX detected - uploading original for redacted viewing...`);
+      try {
+        originalDocxResult = await iagonClient.uploadFile(
+          file.buffer,
+          `original-${encryptedPackage.documentId}.docx`,
+          {
+            classificationLevel: parsedDocument.metadata.overallClassification,
+            contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          }
+        );
+        console.log(`   [ClassifiedUpload] ✅ Uploaded original DOCX: ${originalDocxResult?.fileId}`);
+        console.log(`   [ClassifiedUpload] Full result:`, JSON.stringify(originalDocxResult, null, 2));
+      } catch (docxUploadError) {
+        console.error(`   [ClassifiedUpload] ❌ Failed to upload original DOCX:`, docxUploadError.message);
+        // Continue without original - will fall back to HTML rendering
+      }
+    } else {
+      console.log(`   [ClassifiedUpload] Not DOCX - skipping original upload`);
+    }
 
     // Create Document DID (simplified - use existing EnterpriseDocumentManager in production)
     const documentDID = `did:prism:classified:${encryptedPackage.documentId}`;
@@ -5212,25 +5327,34 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
     const registryEntry = {
       documentDID,
       title: parsedDocument.metadata.title,
-      overallClassification: parsedDocument.metadata.overallClassification,
-      sectionCount: encryptedPackage.encryptedSections.length,
-      sectionMetadata: SectionEncryptionService.getSectionMetadata(encryptedPackage),
+      classificationLevel: parsedDocument.metadata.overallClassification, // DocumentRegistry requires this field name
+      contentEncryptionKey: encryptedPackage.keyring?.UNCLASSIFIED || 'classified-section-keys', // Required by registry
       releasableTo: releasableDIDs,
+      metadata: {
+        sectionCount: encryptedPackage.encryptedSections.length,
+        sectionMetadata: SectionEncryptionService.getSectionMetadata(encryptedPackage),
+        createdBy: session.email,
+        createdByDID: session.prismDID,
+        department: department || session.department,
+        sourceFormat: isDocx ? 'docx' : 'html',
+        originalFilename: file.originalname
+      },
       iagonStorage: {
         fileId: iagonResult.fileId,
         nodeId: iagonResult.nodeId,
-        url: iagonResult.url
-      },
-      createdBy: session.email,
-      createdByDID: session.prismDID,
-      department: department || session.department,
-      createdAt: new Date().toISOString()
+        url: iagonResult.url,
+        // For DOCX: store original file ID for full-fidelity redacted viewing
+        originalDocxFileId: originalDocxResult?.fileId || null
+      }
     };
 
+    console.log(`   [ClassifiedUpload] ===== REGISTRY ENTRY =====`);
+    console.log(`   [ClassifiedUpload] iagonStorage:`, JSON.stringify(registryEntry.iagonStorage, null, 2));
+    console.log(`   [ClassifiedUpload] metadata.sourceFormat: ${registryEntry.metadata.sourceFormat}`);
+    console.log(`   [ClassifiedUpload] originalDocxFileId: ${registryEntry.iagonStorage.originalDocxFileId}`);
+
     // Store in DocumentRegistry (add to existing registry)
-    if (typeof documentRegistry !== 'undefined') {
-      documentRegistry.registerDocument(registryEntry);
-    }
+    await DocumentRegistry.registerDocument(registryEntry);
 
     console.log(`   [ClassifiedUpload] Registered document: ${documentDID}`);
 
@@ -5339,7 +5463,7 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
     console.log(`   Redacted sections: ${documentRecord.sectionSummary.redactedCount}`);
 
     // =========================================================================
-    // STEP 2: Download encrypted package from Iagon
+    // STEP 2: Determine document format and download accordingly
     // =========================================================================
     if (!documentRecord.iagonStorage || !documentRecord.iagonStorage.fileId) {
       console.log('[ClassifiedDownload] ❌ Document has no Iagon storage');
@@ -5350,50 +5474,100 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
       });
     }
 
-    console.log(`   [ClassifiedDownload] Downloading from Iagon: ${documentRecord.iagonStorage.fileId}`);
+    const iagonClient = getIagonClient();
+    const isDocx = documentRecord.metadata?.sourceFormat === 'docx' &&
+                   documentRecord.iagonStorage.originalDocxFileId;
 
+    let redactedDocument;
+    let documentFormat = 'html';
     let encryptedPackage;
-    try {
-      const iagonClient = getIagonClient();
-      const packageBuffer = await iagonClient.downloadFile(documentRecord.iagonStorage.fileId);
-      encryptedPackage = JSON.parse(packageBuffer.toString('utf8'));
-      console.log(`   [ClassifiedDownload] Downloaded encrypted package (${encryptedPackage.encryptedSections?.length || 0} sections)`);
-    } catch (iagonError) {
-      console.error('[ClassifiedDownload] ❌ Failed to download from Iagon:', iagonError.message);
-      return res.status(500).json({
-        success: false,
-        error: 'DownloadFailed',
-        message: 'Failed to download document from storage'
+    let decryptionResult;
+
+    if (isDocx) {
+      // =========================================================================
+      // DOCX Flow: Full-fidelity redaction on original document
+      // =========================================================================
+      console.log(`   [ClassifiedDownload] DOCX document - using full-fidelity redaction`);
+      console.log(`   [ClassifiedDownload] Downloading original DOCX: ${documentRecord.iagonStorage.originalDocxFileId}`);
+
+      try {
+        // Download original DOCX
+        const originalDocx = await iagonClient.downloadFile(documentRecord.iagonStorage.originalDocxFileId);
+        console.log(`   [ClassifiedDownload] Downloaded original DOCX (${originalDocx.length} bytes)`);
+
+        // Apply redactions in-place
+        redactedDocument = await DocxRedactionService.applyRedactions(
+          originalDocx,
+          userClearance,
+          documentRecord.metadata?.sectionMetadata || []
+        );
+
+        documentFormat = 'docx';
+        console.log(`   [ClassifiedDownload] Generated redacted DOCX (${redactedDocument.length} bytes)`);
+
+        // For section summary, calculate from metadata
+        decryptionResult = {
+          decryptedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
+            s => s.clearanceLevel <= userClearanceLevel
+          ),
+          redactedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
+            s => s.clearanceLevel > userClearanceLevel
+          )
+        };
+
+      } catch (docxError) {
+        console.error('[ClassifiedDownload] ❌ Failed to process DOCX:', docxError.message);
+        return res.status(500).json({
+          success: false,
+          error: 'DocxProcessingFailed',
+          message: 'Failed to apply redactions to DOCX document'
+        });
+      }
+
+    } else {
+      // =========================================================================
+      // HTML Flow: Decrypt sections and generate HTML with redactions
+      // =========================================================================
+      console.log(`   [ClassifiedDownload] HTML document - using section-based redaction`);
+      console.log(`   [ClassifiedDownload] Downloading from Iagon: ${documentRecord.iagonStorage.fileId}`);
+
+      try {
+        const packageBuffer = await iagonClient.downloadFile(documentRecord.iagonStorage.fileId);
+        encryptedPackage = JSON.parse(packageBuffer.toString('utf8'));
+        console.log(`   [ClassifiedDownload] Downloaded encrypted package (${encryptedPackage.encryptedSections?.length || 0} sections)`);
+      } catch (iagonError) {
+        console.error('[ClassifiedDownload] ❌ Failed to download from Iagon:', iagonError.message);
+        return res.status(500).json({
+          success: false,
+          error: 'DownloadFailed',
+          message: 'Failed to download document from storage'
+        });
+      }
+
+      // Decrypt authorized sections
+      console.log(`   [ClassifiedDownload] Decrypting sections for ${userClearance} clearance...`);
+
+      decryptionResult = SectionEncryptionService.decryptSectionsForUser(
+        encryptedPackage,
+        userClearance,
+        COMPANY_SECRET
+      );
+
+      console.log(`   [ClassifiedDownload] Decrypted ${decryptionResult.decryptedSections.length} sections`);
+      console.log(`   [ClassifiedDownload] Redacted ${decryptionResult.redactedSections.length} sections`);
+
+      // Generate redacted HTML document
+      console.log(`   [ClassifiedDownload] Generating redacted HTML...`);
+
+      redactedDocument = RedactionEngine.generateRedactedDocument({
+        metadata: encryptedPackage?.metadata || documentRecord.metadata,
+        decryptedSections: decryptionResult.decryptedSections,
+        redactedSections: decryptionResult.redactedSections,
+        userClearance
       });
+
+      console.log(`   [ClassifiedDownload] Generated HTML document (${redactedDocument.length} bytes)`);
     }
-
-    // =========================================================================
-    // STEP 3: Decrypt authorized sections
-    // =========================================================================
-    console.log(`   [ClassifiedDownload] Decrypting sections for ${userClearance} clearance...`);
-
-    const decryptionResult = SectionEncryptionService.decryptSectionsForUser(
-      encryptedPackage,
-      userClearance,
-      COMPANY_SECRET
-    );
-
-    console.log(`   [ClassifiedDownload] Decrypted ${decryptionResult.decryptedSections.length} sections`);
-    console.log(`   [ClassifiedDownload] Redacted ${decryptionResult.redactedSections.length} sections`);
-
-    // =========================================================================
-    // STEP 4: Generate redacted HTML document
-    // =========================================================================
-    console.log(`   [ClassifiedDownload] Generating redacted document...`);
-
-    const redactedDocument = RedactionEngine.generateRedactedDocument({
-      metadata: encryptedPackage.metadata,
-      decryptedSections: decryptionResult.decryptedSections,
-      redactedSections: decryptionResult.redactedSections,
-      userClearance
-    });
-
-    console.log(`   [ClassifiedDownload] Generated HTML document (${redactedDocument.length} bytes)`);
 
     // =========================================================================
     // STEP 5: Create ephemeral DID with 1-hour TTL
@@ -5444,7 +5618,11 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
     }
 
     // Encrypt document content
-    const documentBytes = Buffer.from(redactedDocument, 'utf8');
+    // For DOCX: redactedDocument is already a Buffer
+    // For HTML: redactedDocument is a string that needs encoding
+    const documentBytes = Buffer.isBuffer(redactedDocument)
+      ? redactedDocument
+      : Buffer.from(redactedDocument, 'utf8');
     const nonce = nacl.randomBytes(24);
 
     const encryptedDocument = nacl.box(
@@ -5481,8 +5659,11 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
         redactedCount: decryptionResult.redactedSections.length
       },
       sourceInfo: {
-        filename: documentRecord.sourceInfo?.filename || 'classified-document.html',
-        format: 'html',
+        filename: documentRecord.metadata?.originalFilename || (documentFormat === 'docx' ? 'classified-document.docx' : 'classified-document.html'),
+        format: documentFormat,
+        contentType: documentFormat === 'docx'
+          ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          : 'text/html',
         originalSize: documentBytes.length
       },
       accessRights: {
@@ -5564,6 +5745,753 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
   } catch (error) {
     console.error('[ClassifiedDownload] Error:', error);
     console.error('[ClassifiedDownload] Stack:', error.stack);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to process download request'
+    });
+  }
+});
+
+// In-memory storage for pending downloads (storageId -> prepared document data)
+// In production, use Redis or database
+const pendingDownloads = new Map();
+
+/**
+ * POST /api/employee-portal/documents/prepare-download/:documentDID
+ *
+ * SSI-COMPLIANT DOCUMENT DELIVERY - STEP 1
+ *
+ * Prepares a document for download and returns storage details.
+ * The wallet should then create an ephemeral DID via Employee Cloud Agent (8300)
+ * with the service endpoint URL provided.
+ *
+ * Returns:
+ * - storageId: Unique ID for this download
+ * - serviceEndpointUrl: URL to embed in ephemeral DID's service endpoint
+ * - documentMetadata: Title, classification, section info
+ * - expiresAt: When this prepared download expires
+ */
+app.post('/api/employee-portal/documents/prepare-download/:documentDID', requireEmployeeSession, async (req, res) => {
+  const session = req.employeeSession;
+  const { documentDID } = req.params;
+
+  console.log('\n' + '='.repeat(80));
+  console.log('[PrepareDownload] SSI-compliant document delivery - Step 1');
+  console.log('   Employee:', session.email);
+  console.log('   Document DID:', documentDID);
+  console.log('   Clearance:', session.clearanceLevel || 'UNCLASSIFIED');
+  console.log('='.repeat(80));
+
+  try {
+    // Get user clearance from session
+    const userClearance = session.clearanceLevel || 'UNCLASSIFIED';
+    const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] || 1;
+    const employeeIssuerDID = session.issuerDID;
+
+    // =========================================================================
+    // STEP 1: Get document from registry and verify authorization
+    // =========================================================================
+    let documentRecord;
+    try {
+      documentRecord = await DocumentRegistry.getClassifiedDocument(
+        documentDID,
+        employeeIssuerDID,
+        userClearance
+      );
+    } catch (error) {
+      if (error.message.includes('not found')) {
+        return res.status(404).json({
+          success: false,
+          error: 'DocumentNotFound',
+          message: 'Document not found in registry'
+        });
+      }
+      if (error.message.includes('Unauthorized')) {
+        return res.status(403).json({
+          success: false,
+          error: 'AccessDenied',
+          message: 'Your company is not authorized to access this document'
+        });
+      }
+      throw error;
+    }
+
+    console.log(`   [PrepareDownload] Document found: ${documentRecord.title}`);
+    console.log(`   Classification: ${documentRecord.overallClassification}`);
+
+    // =========================================================================
+    // STEP 2: Download and prepare redacted document (but don't encrypt yet)
+    // =========================================================================
+    const iagonClient = getIagonClient();
+    const isDocx = documentRecord.metadata?.sourceFormat === 'docx' &&
+                   documentRecord.iagonStorage?.originalDocxFileId;
+
+    let redactedDocument;
+    let documentFormat = 'html';
+    let decryptionResult;
+
+    if (isDocx) {
+      // DOCX Flow
+      const originalDocx = await iagonClient.downloadFile(documentRecord.iagonStorage.originalDocxFileId);
+      redactedDocument = await DocxRedactionService.applyRedactions(
+        originalDocx,
+        userClearance,
+        documentRecord.metadata?.sectionMetadata || []
+      );
+      documentFormat = 'docx';
+      decryptionResult = {
+        decryptedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
+          s => s.clearanceLevel <= userClearanceLevel
+        ),
+        redactedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
+          s => s.clearanceLevel > userClearanceLevel
+        )
+      };
+    } else {
+      // HTML Flow
+      const packageBuffer = await iagonClient.downloadFile(documentRecord.iagonStorage.fileId);
+      const encryptedPackage = JSON.parse(packageBuffer.toString('utf8'));
+      decryptionResult = SectionEncryptionService.decryptSectionsForUser(
+        encryptedPackage,
+        userClearance,
+        COMPANY_SECRET
+      );
+      redactedDocument = RedactionEngine.generateRedactedDocument({
+        metadata: encryptedPackage?.metadata || documentRecord.metadata,
+        decryptedSections: decryptionResult.decryptedSections,
+        redactedSections: decryptionResult.redactedSections,
+        userClearance
+      });
+    }
+
+    console.log(`   [PrepareDownload] Prepared ${documentFormat.toUpperCase()} document`);
+    console.log(`   Visible sections: ${decryptionResult.decryptedSections.length}`);
+    console.log(`   Redacted sections: ${decryptionResult.redactedSections.length}`);
+
+    // =========================================================================
+    // STEP 3: Generate storage ID and service endpoint URL
+    // =========================================================================
+    const storageId = crypto.randomUUID();
+    const baseUrl = process.env.PUBLIC_URL || 'https://identuslabel.cz/company-admin';
+    const serviceEndpointUrl = `${baseUrl}/api/ephemeral-documents/content/${storageId}`;
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour TTL
+
+    console.log(`   [PrepareDownload] Generated storage ID: ${storageId}`);
+    console.log(`   Service endpoint URL: ${serviceEndpointUrl}`);
+
+    // =========================================================================
+    // STEP 4: CREATE EPHEMERAL DID ON SERVER (FIX: Dec 13, 2025)
+    // Server creates the ephemeral DID instead of wallet, because:
+    // - Wallet's ServiceConfiguration VC points to Enterprise Agent (8200)
+    // - 8200 is for company wallets (issues credentials FROM)
+    // - Server has access to Employee Agent (8300) for employee DIDs
+    // =========================================================================
+    const redactedSectionIds = decryptionResult.redactedSections.map(s => ({
+      sectionId: s.sectionId,
+      clearance: s.clearance
+    }));
+
+    const ephemeralDIDResult = EphemeralDIDService.createEphemeralDID({
+      originalDocumentDID: documentDID,
+      recipientDID: session.prismDID,
+      clearanceLevel: userClearance,
+      redactedSections: redactedSectionIds,
+      ttlMs: 60 * 60 * 1000, // 1 hour
+      viewsAllowed: -1, // unlimited views
+      issuerDID: employeeIssuerDID
+    });
+
+    const ephemeralDID = ephemeralDIDResult.metadata.ephemeralDID;
+    const ephemeralX25519PublicKey = ephemeralDIDResult.metadata.keyPair.publicKey;
+
+    console.log(`   [PrepareDownload] Created ephemeral DID: ${ephemeralDID}`);
+    console.log(`   [PrepareDownload] Ephemeral X25519 public key generated`);
+
+    // =========================================================================
+    // STEP 5: Store prepared data temporarily (waiting for wallet to complete)
+    // =========================================================================
+    pendingDownloads.set(storageId, {
+      redactedDocument,
+      documentFormat,
+      documentRecord,
+      decryptionResult,
+      redactedSectionIds,
+      ephemeralDIDResult, // Include ephemeral DID metadata for complete-download
+      session: {
+        email: session.email,
+        prismDID: session.prismDID,
+        clearanceLevel: userClearance,
+        department: session.department,
+        issuerDID: session.issuerDID,
+        connectionId: session.connectionId,
+        companyConnectionId: session.companyConnectionId
+      },
+      documentDID,
+      expiresAt,
+      createdAt: new Date().toISOString()
+    });
+
+    // Auto-cleanup after 10 minutes (wallet has time to complete)
+    setTimeout(() => {
+      if (pendingDownloads.has(storageId)) {
+        console.log(`[PrepareDownload] Cleanup expired pending download: ${storageId}`);
+        pendingDownloads.delete(storageId);
+      }
+    }, 10 * 60 * 1000);
+
+    console.log(`   [PrepareDownload] Server created ephemeral DID - wallet just needs to generate keypair`);
+
+    res.json({
+      success: true,
+      storageId,
+      serviceEndpointUrl,
+      expiresAt,
+      // NEW: Server provides ephemeral DID - wallet doesn't need to create it
+      ephemeralDID,
+      ephemeralX25519PublicKey, // Server's ephemeral key (for reference)
+      documentMetadata: {
+        title: documentRecord.title,
+        classification: documentRecord.overallClassification,
+        format: documentFormat,
+        sectionSummary: {
+          visibleCount: decryptionResult.decryptedSections.length,
+          redactedCount: decryptionResult.redactedSections.length
+        },
+        redactedSections: redactedSectionIds
+      },
+      instructions: 'Generate your own X25519 keypair, then call complete-download with your public key. Server will encrypt document for your key.'
+    });
+
+  } catch (error) {
+    console.error('[PrepareDownload] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'ServerError',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/employee-portal/documents/complete-download/:storageId
+ *
+ * SSI-COMPLIANT DOCUMENT DELIVERY - STEP 2
+ *
+ * Completes the download using server-created ephemeral DID from prepare-download.
+ * Encrypts document for wallet's public key and issues credential offer.
+ *
+ * Request Body:
+ * - x25519PublicKey: Base64-encoded X25519 public key from wallet (for encryption)
+ * - connectionId: (optional) Override connection ID for credential offer
+ *
+ * NOTE (Dec 13, 2025): ephemeralDID is now created by server in prepare-download,
+ * not by wallet. Wallet just provides its X25519 public key for encryption.
+ */
+app.post('/api/employee-portal/documents/complete-download/:storageId', requireEmployeeSession, async (req, res) => {
+  const EphemeralDocumentStore = require('./lib/EphemeralDocumentStore');
+  const { storageId } = req.params;
+  const { x25519PublicKey, connectionId } = req.body;
+
+  console.log('\n' + '='.repeat(80));
+  console.log('[CompleteDownload] SSI-compliant document delivery - Step 2');
+  console.log('   Storage ID:', storageId);
+  console.log('='.repeat(80));
+
+  try {
+    // Validate required fields - only wallet's public key needed now
+    if (!x25519PublicKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'x25519PublicKey is required'
+      });
+    }
+
+    // =========================================================================
+    // STEP 1: Retrieve pending download data (includes server-created ephemeral DID)
+    // =========================================================================
+    const pendingData = pendingDownloads.get(storageId);
+    if (!pendingData) {
+      return res.status(404).json({
+        success: false,
+        error: 'NotFound',
+        message: 'Prepared download not found or expired. Please start over with prepare-download.'
+      });
+    }
+
+    // Verify session matches
+    if (pendingData.session.email !== req.employeeSession.email) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden',
+        message: 'Session mismatch - prepared download belongs to different employee'
+      });
+    }
+
+    console.log(`   [CompleteDownload] Found pending download for: ${pendingData.documentRecord.title}`);
+
+    // Get ephemeral DID from server-created data (Dec 13, 2025 fix)
+    const ephemeralDID = pendingData.ephemeralDIDResult?.metadata?.ephemeralDID;
+    if (!ephemeralDID) {
+      return res.status(500).json({
+        success: false,
+        error: 'InternalError',
+        message: 'Ephemeral DID not found in pending data. Please retry prepare-download.'
+      });
+    }
+    console.log(`   [CompleteDownload] Using server-created ephemeral DID: ${ephemeralDID}`);
+
+    // =========================================================================
+    // STEP 2: Validate X25519 public key
+    // =========================================================================
+    let recipientPubKeyBytes;
+    try {
+      recipientPubKeyBytes = Buffer.from(x25519PublicKey, 'base64');
+      if (recipientPubKeyBytes.length !== 32) {
+        throw new Error('Invalid key length');
+      }
+    } catch (keyErr) {
+      return res.status(400).json({
+        success: false,
+        error: 'InvalidPublicKey',
+        message: 'x25519PublicKey must be a valid Base64-encoded 32-byte X25519 public key'
+      });
+    }
+
+    // =========================================================================
+    // STEP 3: Encrypt document for wallet's public key
+    // =========================================================================
+    const serverKeyPair = nacl.box.keyPair();
+    const documentBytes = Buffer.isBuffer(pendingData.redactedDocument)
+      ? pendingData.redactedDocument
+      : Buffer.from(pendingData.redactedDocument, 'utf8');
+    const nonce = nacl.randomBytes(24);
+
+    const encryptedDocument = nacl.box(
+      documentBytes,
+      nonce,
+      recipientPubKeyBytes,
+      serverKeyPair.secretKey
+    );
+
+    console.log(`   [CompleteDownload] Encrypted document (${encryptedDocument.length} bytes)`);
+
+    // =========================================================================
+    // STEP 4: Store encrypted document in EphemeralDocumentStore
+    // =========================================================================
+    await EphemeralDocumentStore.save(storageId, {
+      encryptedContent: Buffer.from(encryptedDocument).toString('base64'),
+      nonce: Buffer.from(nonce).toString('base64'),
+      serverPublicKey: Buffer.from(serverKeyPair.publicKey).toString('base64'),
+      expiresAt: pendingData.expiresAt,
+      walletDID: pendingData.session.prismDID,
+      documentDID: pendingData.documentDID,
+      ephemeralDID: ephemeralDID,
+      contentType: pendingData.documentFormat === 'docx'
+        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        : 'text/html'
+    });
+
+    console.log(`   [CompleteDownload] Stored encrypted document in EphemeralDocumentStore`);
+
+    // =========================================================================
+    // STEP 5: Build service endpoint URL (same as prepare step)
+    // =========================================================================
+    const baseUrl = process.env.PUBLIC_URL || 'https://identuslabel.cz/company-admin';
+    const serviceEndpointUrl = `${baseUrl}/api/ephemeral-documents/content/${storageId}`;
+
+    // =========================================================================
+    // STEP 6: Issue DocumentCopy VC via Cloud Agent credential offer
+    // =========================================================================
+    const contentHash = DocumentCopyVCIssuer.generateContentHash(documentBytes);
+
+    // Get connection ID for credential offer
+    let targetConnectionId = connectionId || pendingData.session.connectionId;
+    if (!targetConnectionId && pendingData.session.companyConnectionId) {
+      targetConnectionId = pendingData.session.companyConnectionId;
+    }
+
+    let credentialOfferResult = null;
+    if (targetConnectionId) {
+      try {
+        const departmentApiKey = DEPARTMENT_API_KEYS[pendingData.session.department] || DEPARTMENT_API_KEYS['IT'];
+
+        credentialOfferResult = await DocumentCopyVCIssuer.createDocumentCopyCredentialOffer({
+          holderDID: pendingData.session.prismDID,
+          connectionId: targetConnectionId,
+          documentCopyData: {
+            originalDocumentDID: pendingData.documentDID,
+            ephemeralDID: ephemeralDID,
+            ephemeralServiceEndpoint: serviceEndpointUrl,
+            title: pendingData.documentRecord.title,
+            classification: pendingData.documentRecord.overallClassification,
+            clearanceLevelGranted: pendingData.session.clearanceLevel,
+            redactedSections: pendingData.redactedSectionIds,
+            sectionSummary: {
+              visibleCount: pendingData.decryptionResult.decryptedSections.length,
+              redactedCount: pendingData.decryptionResult.redactedSections.length
+            },
+            accessRights: {
+              expiresAt: pendingData.expiresAt,
+              viewsAllowed: -1
+            },
+            contentHash
+          },
+          apiKey: departmentApiKey
+        });
+
+        console.log(`   [CompleteDownload] DocumentCopy credential offer created: ${credentialOfferResult.recordId}`);
+
+      } catch (vcError) {
+        console.warn('[CompleteDownload] Failed to create credential offer:', vcError.message);
+        // Continue - document is still accessible via service endpoint
+      }
+    } else {
+      console.warn('[CompleteDownload] No connection ID - skipping credential offer');
+    }
+
+    // =========================================================================
+    // STEP 7: Cleanup pending download
+    // =========================================================================
+    pendingDownloads.delete(storageId);
+
+    console.log(`   [CompleteDownload] Complete! Document delivery via SSI successful.`);
+
+    res.json({
+      success: true,
+      message: 'Document encrypted and stored. Credential offer sent via DIDComm.',
+      delivery: {
+        method: 'SSI_CREDENTIAL_OFFER',
+        ephemeralDID: ephemeralDID,
+        serviceEndpoint: serviceEndpointUrl,
+        expiresAt: pendingData.expiresAt
+      },
+      credentialOffer: credentialOfferResult ? {
+        recordId: credentialOfferResult.recordId,
+        state: credentialOfferResult.state
+      } : null,
+      document: {
+        title: pendingData.documentRecord.title,
+        classification: pendingData.documentRecord.overallClassification,
+        format: pendingData.documentFormat,
+        sectionSummary: {
+          visibleCount: pendingData.decryptionResult.decryptedSections.length,
+          redactedCount: pendingData.decryptionResult.redactedSections.length
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('[CompleteDownload] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'ServerError',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/employee-portal/documents/download-to-wallet/:documentDID
+ *
+ * LEGACY ENDPOINT (kept for backward compatibility)
+ *
+ * Downloads a classified document and delivers it via proper SSI/DIDComm:
+ * 1. Stores encrypted document on server (indexed by ephemeral ID)
+ * 2. Issues DocumentCopy VC via Cloud Agent credential offer
+ * 3. Wallet receives VC via DIDComm, fetches document from service endpoint
+ *
+ * Request Body:
+ * - recipientPublicKey: Base64-encoded X25519 public key for encryption
+ * - connectionId: (optional) Employee's connection ID to Company Cloud Agent
+ *
+ * Flow:
+ * Company Admin → Cloud Agent (8200) → Employee Cloud Agent (8300) → Browser Wallet
+ */
+app.post('/api/employee-portal/documents/download-to-wallet/:documentDID', requireEmployeeSession, async (req, res) => {
+  const EphemeralDocumentStore = require('./lib/EphemeralDocumentStore');
+  const session = req.employeeSession;
+  const { documentDID } = req.params;
+
+  console.log('\n' + '='.repeat(80));
+  console.log('[DownloadToWallet] SSI-compliant document delivery');
+  console.log('   Employee:', session.email);
+  console.log('   Document DID:', documentDID);
+  console.log('   Clearance:', session.clearanceLevel || 'UNCLASSIFIED');
+  console.log('='.repeat(80));
+
+  try {
+    const { recipientPublicKey, connectionId } = req.body;
+
+    if (!recipientPublicKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'recipientPublicKey is required'
+      });
+    }
+
+    // Get user clearance from session
+    const userClearance = session.clearanceLevel || 'UNCLASSIFIED';
+    const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] || 1;
+    const employeeIssuerDID = session.issuerDID;
+
+    // =========================================================================
+    // STEP 1: Get document from registry and verify authorization
+    // =========================================================================
+    let documentRecord;
+    try {
+      documentRecord = await DocumentRegistry.getClassifiedDocument(
+        documentDID,
+        employeeIssuerDID,
+        userClearance
+      );
+    } catch (error) {
+      if (error.message.includes('not found')) {
+        return res.status(404).json({
+          success: false,
+          error: 'DocumentNotFound',
+          message: 'Document not found in registry'
+        });
+      }
+      if (error.message.includes('Unauthorized')) {
+        return res.status(403).json({
+          success: false,
+          error: 'AccessDenied',
+          message: 'Your company is not authorized to access this document'
+        });
+      }
+      throw error;
+    }
+
+    console.log(`   [DownloadToWallet] Document found: ${documentRecord.title}`);
+    console.log(`   Classification: ${documentRecord.overallClassification}`);
+
+    // =========================================================================
+    // STEP 2: Download and prepare redacted document
+    // =========================================================================
+    const iagonClient = getIagonClient();
+    const isDocx = documentRecord.metadata?.sourceFormat === 'docx' &&
+                   documentRecord.iagonStorage?.originalDocxFileId;
+
+    let redactedDocument;
+    let documentFormat = 'html';
+    let decryptionResult;
+
+    if (isDocx) {
+      // DOCX Flow
+      const originalDocx = await iagonClient.downloadFile(documentRecord.iagonStorage.originalDocxFileId);
+      redactedDocument = await DocxRedactionService.applyRedactions(
+        originalDocx,
+        userClearance,
+        documentRecord.metadata?.sectionMetadata || []
+      );
+      documentFormat = 'docx';
+      decryptionResult = {
+        decryptedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
+          s => s.clearanceLevel <= userClearanceLevel
+        ),
+        redactedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
+          s => s.clearanceLevel > userClearanceLevel
+        )
+      };
+    } else {
+      // HTML Flow
+      const packageBuffer = await iagonClient.downloadFile(documentRecord.iagonStorage.fileId);
+      const encryptedPackage = JSON.parse(packageBuffer.toString('utf8'));
+      decryptionResult = SectionEncryptionService.decryptSectionsForUser(
+        encryptedPackage,
+        userClearance,
+        COMPANY_SECRET
+      );
+      redactedDocument = RedactionEngine.generateRedactedDocument({
+        metadata: encryptedPackage?.metadata || documentRecord.metadata,
+        decryptedSections: decryptionResult.decryptedSections,
+        redactedSections: decryptionResult.redactedSections,
+        userClearance
+      });
+    }
+
+    console.log(`   [DownloadToWallet] Prepared ${documentFormat.toUpperCase()} document`);
+    console.log(`   Visible sections: ${decryptionResult.decryptedSections.length}`);
+    console.log(`   Redacted sections: ${decryptionResult.redactedSections.length}`);
+
+    // =========================================================================
+    // STEP 3: Create ephemeral DID with 1-hour TTL
+    // =========================================================================
+    const redactedSectionIds = decryptionResult.redactedSections.map(s => ({
+      sectionId: s.sectionId,
+      clearance: s.clearance
+    }));
+
+    const { didDocument, metadata: ephemeralMetadata } = EphemeralDIDService.createEphemeralDID({
+      originalDocumentDID: documentDID,
+      recipientDID: session.prismDID,
+      recipientPublicKey,
+      clearanceLevel: userClearance,
+      redactedSections: redactedSectionIds,
+      ttlMs: EphemeralDIDService.DEFAULT_TTL_MS,
+      viewsAllowed: -1,
+      issuerDID: session.issuerDID
+    });
+
+    // Extract ephemeral ID from did:ephemeral:{uuid}
+    const ephemeralId = ephemeralMetadata.ephemeralDID.split(':').pop();
+
+    console.log(`   [DownloadToWallet] Created ephemeral DID: ${ephemeralMetadata.ephemeralDID.substring(0, 50)}...`);
+    console.log(`   Ephemeral ID: ${ephemeralId}`);
+    console.log(`   Expires at: ${ephemeralMetadata.expiresAt}`);
+
+    // =========================================================================
+    // STEP 4: Encrypt document for recipient's wallet using X25519
+    // =========================================================================
+    const serverKeyPair = nacl.box.keyPair();
+    let recipientPubKeyBytes;
+    try {
+      recipientPubKeyBytes = Buffer.from(recipientPublicKey, 'base64');
+      if (recipientPubKeyBytes.length !== 32) {
+        throw new Error('Invalid key length');
+      }
+    } catch (keyErr) {
+      return res.status(400).json({
+        success: false,
+        error: 'InvalidPublicKey',
+        message: 'recipientPublicKey must be a valid Base64-encoded 32-byte X25519 public key'
+      });
+    }
+
+    const documentBytes = Buffer.isBuffer(redactedDocument)
+      ? redactedDocument
+      : Buffer.from(redactedDocument, 'utf8');
+    const nonce = nacl.randomBytes(24);
+
+    const encryptedDocument = nacl.box(
+      documentBytes,
+      nonce,
+      recipientPubKeyBytes,
+      serverKeyPair.secretKey
+    );
+
+    console.log(`   [DownloadToWallet] Encrypted document (${encryptedDocument.length} bytes)`);
+
+    // =========================================================================
+    // STEP 5: Store encrypted document in EphemeralDocumentStore
+    // =========================================================================
+    await EphemeralDocumentStore.save(ephemeralId, {
+      encryptedContent: Buffer.from(encryptedDocument).toString('base64'),
+      nonce: Buffer.from(nonce).toString('base64'),
+      serverPublicKey: Buffer.from(serverKeyPair.publicKey).toString('base64'),
+      expiresAt: ephemeralMetadata.expiresAt,
+      walletDID: session.prismDID,
+      documentDID: documentDID,
+      contentType: documentFormat === 'docx'
+        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        : 'text/html'
+    });
+
+    console.log(`   [DownloadToWallet] Stored encrypted document in EphemeralDocumentStore`);
+
+    // =========================================================================
+    // STEP 6: Build service endpoint URL
+    // =========================================================================
+    const baseUrl = process.env.PUBLIC_URL || 'https://identuslabel.cz/company-admin';
+    const serviceEndpointUrl = `${baseUrl}/api/ephemeral-documents/content/${ephemeralId}`;
+
+    console.log(`   [DownloadToWallet] Service endpoint: ${serviceEndpointUrl}`);
+
+    // =========================================================================
+    // STEP 7: Issue DocumentCopy VC via Cloud Agent credential offer
+    // =========================================================================
+    const contentHash = DocumentCopyVCIssuer.generateContentHash(documentBytes);
+
+    // Get connection ID for credential offer
+    // Priority: request body > session > employee-company connection lookup
+    let targetConnectionId = connectionId || session.connectionId;
+
+    // If no connection ID, try to find employee's connection to company
+    if (!targetConnectionId && session.companyConnectionId) {
+      targetConnectionId = session.companyConnectionId;
+    }
+
+    let credentialOfferResult = null;
+    if (targetConnectionId) {
+      try {
+        // Get department API key for Cloud Agent
+        const departmentApiKey = DEPARTMENT_API_KEYS[session.department] || DEPARTMENT_API_KEYS['IT'];
+
+        credentialOfferResult = await DocumentCopyVCIssuer.createDocumentCopyCredentialOffer({
+          holderDID: session.prismDID,
+          connectionId: targetConnectionId,
+          documentCopyData: {
+            originalDocumentDID: documentDID,
+            ephemeralDID: ephemeralMetadata.ephemeralDID,
+            ephemeralServiceEndpoint: serviceEndpointUrl,
+            title: documentRecord.title,
+            classification: documentRecord.overallClassification,
+            clearanceLevelGranted: userClearance,
+            redactedSections: redactedSectionIds,
+            sectionSummary: {
+              visibleCount: decryptionResult.decryptedSections.length,
+              redactedCount: decryptionResult.redactedSections.length
+            },
+            accessRights: {
+              expiresAt: ephemeralMetadata.expiresAt,
+              viewsAllowed: -1
+            },
+            contentHash
+          },
+          apiKey: departmentApiKey
+        });
+
+        console.log(`   [DownloadToWallet] ✅ Credential offer created: ${credentialOfferResult.recordId}`);
+      } catch (vcError) {
+        console.warn(`   [DownloadToWallet] ⚠️ Credential offer failed: ${vcError.message}`);
+        // Continue without VC - document is still accessible via service endpoint
+      }
+    } else {
+      console.log(`   [DownloadToWallet] ⚠️ No connection ID - skipping credential offer`);
+    }
+
+    // Record access in registry
+    try {
+      await DocumentRegistry.recordSectionAccess(documentDID, session.prismDID || session.email,
+        decryptionResult.decryptedSections.map(s => s.sectionId));
+    } catch (logErr) {
+      console.warn('[DownloadToWallet] Failed to record access:', logErr.message);
+    }
+
+    console.log('='.repeat(80));
+    console.log('✅ [DownloadToWallet] Document delivery initiated via SSI');
+    console.log(`   Ephemeral DID: ${ephemeralMetadata.ephemeralDID.substring(0, 50)}...`);
+    console.log(`   Service endpoint: ${serviceEndpointUrl}`);
+    console.log(`   Credential offer: ${credentialOfferResult ? credentialOfferResult.recordId : 'skipped'}`);
+    console.log('='.repeat(80) + '\n');
+
+    res.json({
+      success: true,
+      message: 'DocumentCopy credential offer sent to wallet via DIDComm',
+      delivery: {
+        method: 'SSI_CREDENTIAL_OFFER',
+        ephemeralDID: ephemeralMetadata.ephemeralDID,
+        serviceEndpoint: serviceEndpointUrl,
+        expiresAt: ephemeralMetadata.expiresAt
+      },
+      credentialOffer: credentialOfferResult ? {
+        recordId: credentialOfferResult.recordId,
+        state: credentialOfferResult.state
+      } : null,
+      sectionSummary: {
+        total: decryptionResult.decryptedSections.length + decryptionResult.redactedSections.length,
+        visible: decryptionResult.decryptedSections.length,
+        redacted: decryptionResult.redactedSections.length
+      },
+      instructions: 'Check your wallet for the DocumentCopy credential. Use the ephemeralServiceEndpoint claim to fetch the encrypted document.'
+    });
+
+  } catch (error) {
+    console.error('[DownloadToWallet] Error:', error);
+    console.error('[DownloadToWallet] Stack:', error.stack);
     res.status(500).json({
       success: false,
       error: 'InternalServerError',

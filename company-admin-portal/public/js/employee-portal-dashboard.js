@@ -716,16 +716,28 @@ function displayDocuments(documents) {
     if (listEl) {
         listEl.classList.remove('hidden');
         listEl.innerHTML = documents.map(doc => {
-            // Check if this is a classified document with sections
+            // Check if this is a classified document
+            // Use SSI flow for: documents with sections, "classified" in DID, or non-UNCLASSIFIED
             const hasClassifiedSections = doc.sectionSummary?.totalSections > 0;
+            const isClassifiedDoc = hasClassifiedSections ||
+                doc.documentDID?.includes('classified') ||
+                (doc.classificationLevel && doc.classificationLevel !== 'UNCLASSIFIED');
+            const isDocx = doc.metadata?.sourceFormat === 'docx';
             const sectionInfo = hasClassifiedSections
                 ? `<span title="${doc.sectionSummary.visibleCount} visible, ${doc.sectionSummary.redactedCount} redacted">📑 ${doc.sectionSummary.totalSections} sections</span>`
                 : '';
+            const formatBadge = isDocx ? '<span style="background:#4299e1;color:white;padding:2px 6px;border-radius:4px;font-size:10px;">DOCX</span>' : '';
+
+            // For classified documents, use SSI-compliant wallet viewing
+            // This creates ephemeral DID and issues DocumentCopy VC via DIDComm
+            const viewAction = isClassifiedDoc
+                ? `viewClassifiedDocument('${escapeHtml(doc.documentDID)}', '${escapeHtml(doc.title)}')`
+                : `viewDocument('${escapeHtml(doc.documentDID)}')`;
 
             return `
             <div class="document-item">
                 <div class="document-info">
-                    <div class="document-title">${escapeHtml(doc.title)}</div>
+                    <div class="document-title">${escapeHtml(doc.title)} ${formatBadge}</div>
                     <div class="document-meta">
                         <span class="classification-badge ${doc.classificationLevel}">
                             ${doc.classificationLevel}
@@ -736,15 +748,9 @@ function displayDocuments(documents) {
                     </div>
                 </div>
                 <div style="display: flex; gap: 8px;">
-                    <button class="view-document-btn" onclick="viewDocument('${escapeHtml(doc.documentDID)}')">
-                        View
+                    <button class="view-document-btn" onclick="${viewAction}">
+                        ${isClassifiedDoc ? '📱 View in Wallet' : 'View'}
                     </button>
-                    ${hasClassifiedSections ? `
-                    <button class="download-wallet-btn" onclick="downloadToWallet('${escapeHtml(doc.documentDID)}', '${escapeHtml(doc.title)}')"
-                        style="background: #9f7aea; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;">
-                        📱 To Wallet
-                    </button>
-                    ` : ''}
                 </div>
             </div>
         `}).join('');
@@ -978,6 +984,240 @@ window.closePdfViewer = closePdfViewer;
 window.pdfPrevPage = pdfPrevPage;
 window.pdfNextPage = pdfNextPage;
 
+/**
+ * Opens HTML document in a secure viewer modal
+ * Renders HTML in a sandboxed iframe with security restrictions
+ * @param {string} blobUrl - Blob URL of the HTML document
+ * @param {string} filename - Filename for the title
+ */
+async function openHtmlViewer(blobUrl, filename) {
+    const modal = document.getElementById('pdfViewerModal');
+    const canvas = document.getElementById('pdfCanvas');
+    const title = document.getElementById('pdfViewerTitle');
+    const pageNav = document.querySelector('.pdf-page-nav');
+
+    if (!modal || !canvas || !title) {
+        console.error('[HTML Viewer] Modal elements not found');
+        alert('HTML viewer not available');
+        return;
+    }
+
+    // Store for cleanup
+    currentBlobUrl = blobUrl;
+
+    // Set title
+    title.textContent = filename || 'Document Viewer (HTML)';
+
+    // Hide canvas and page navigation (not needed for HTML)
+    canvas.style.display = 'none';
+    if (pageNav) pageNav.style.display = 'none';
+
+    // Create iframe for HTML rendering
+    let iframe = document.getElementById('htmlViewerIframe');
+    if (!iframe) {
+        iframe = document.createElement('iframe');
+        iframe.id = 'htmlViewerIframe';
+        iframe.style.cssText = `
+            width: 100%;
+            height: 80vh;
+            border: none;
+            background: white;
+            border-radius: 4px;
+        `;
+        // Sandbox to restrict capabilities (no scripts, no forms, no downloads)
+        iframe.sandbox = 'allow-same-origin';
+        // Insert after canvas
+        canvas.parentNode.insertBefore(iframe, canvas.nextSibling);
+    }
+    iframe.style.display = 'block';
+    iframe.src = blobUrl;
+
+    // Show modal
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    // Disable right-click on modal
+    modal.addEventListener('contextmenu', preventContextMenu);
+
+    // Disable keyboard shortcuts (Ctrl+S, Ctrl+P)
+    document.addEventListener('keydown', preventSaveShortcuts);
+
+    console.log('[HTML Viewer] HTML document displayed in iframe');
+}
+
+/**
+ * Closes the HTML viewer (extends closePdfViewer)
+ * Called automatically by closePdfViewer
+ */
+function closeHtmlViewerElements() {
+    const iframe = document.getElementById('htmlViewerIframe');
+    const canvas = document.getElementById('pdfCanvas');
+    const pageNav = document.querySelector('.pdf-page-nav');
+
+    // Hide iframe if present
+    if (iframe) {
+        iframe.src = 'about:blank';
+        iframe.style.display = 'none';
+    }
+
+    // Restore canvas and page navigation visibility for next PDF
+    if (canvas) canvas.style.display = 'block';
+    if (pageNav) pageNav.style.display = 'flex';
+}
+
+// Extend closePdfViewer to handle HTML cleanup
+const originalClosePdfViewer = closePdfViewer;
+closePdfViewer = function() {
+    closeHtmlViewerElements();
+    originalClosePdfViewer();
+};
+
+// Re-export the extended function
+window.closePdfViewer = closePdfViewer;
+window.openHtmlViewer = openHtmlViewer;
+
+/**
+ * Opens DOCX document in a secure viewer modal using docx-preview library
+ * @param {Blob} blob - Blob containing the DOCX document
+ * @param {string} filename - Filename for the title
+ */
+async function openDocxViewer(blob, filename) {
+    const modal = document.getElementById('pdfViewerModal');
+    const canvas = document.getElementById('pdfCanvas');
+    const docxContainer = document.getElementById('docxViewerContainer');
+    const title = document.getElementById('pdfViewerTitle');
+    const pageNav = document.querySelector('.pdf-page-nav');
+    const pageInfo = document.getElementById('pdfPageInfo');
+
+    if (!modal || !docxContainer || !title) {
+        console.error('[DOCX Viewer] Modal elements not found');
+        alert('DOCX viewer not available');
+        return;
+    }
+
+    // Set title
+    title.textContent = filename || 'Document Viewer (DOCX)';
+
+    // Hide PDF elements
+    if (canvas) canvas.style.display = 'none';
+    if (pageNav) pageNav.style.display = 'none';
+    if (pageInfo) pageInfo.style.display = 'none';
+
+    // Show DOCX container
+    docxContainer.style.display = 'block';
+    docxContainer.innerHTML = '<div style="text-align: center; padding: 40px; color: #666;">Loading document...</div>';
+
+    // Show modal
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    // Disable right-click on modal
+    modal.addEventListener('contextmenu', preventContextMenu);
+
+    // Disable keyboard shortcuts (Ctrl+S, Ctrl+P)
+    document.addEventListener('keydown', preventSaveShortcuts);
+
+    console.log('[DOCX Viewer] Rendering DOCX document...');
+
+    try {
+        // Check if docx-preview is available
+        if (typeof docx === 'undefined' || typeof docx.renderAsync !== 'function') {
+            throw new Error('docx-preview library not loaded');
+        }
+
+        // Clear container
+        docxContainer.innerHTML = '';
+
+        // Render DOCX using docx-preview
+        await docx.renderAsync(blob, docxContainer, null, {
+            className: 'docx-viewer-content',
+            inWrapper: true,
+            ignoreWidth: false,
+            ignoreHeight: false,
+            ignoreFonts: false,
+            breakPages: true,
+            ignoreLastRenderedPageBreak: true,
+            experimental: false,
+            trimXmlDeclaration: true,
+            useBase64URL: true,
+            renderHeaders: true,
+            renderFooters: true,
+            renderFootnotes: true,
+            renderEndnotes: true
+        });
+
+        console.log('[DOCX Viewer] DOCX document rendered successfully');
+
+        // Add some styling to make it look better
+        const style = document.createElement('style');
+        style.textContent = `
+            .docx-viewer-content {
+                font-family: 'Calibri', 'Arial', sans-serif;
+                line-height: 1.5;
+            }
+            .docx-viewer-content p {
+                margin: 0 0 10px 0;
+            }
+            .docx-viewer-content table {
+                border-collapse: collapse;
+                width: 100%;
+            }
+            .docx-viewer-content table td,
+            .docx-viewer-content table th {
+                border: 1px solid #ddd;
+                padding: 8px;
+            }
+            #docxViewerContainer {
+                user-select: none;
+                -webkit-user-select: none;
+            }
+        `;
+        docxContainer.appendChild(style);
+
+    } catch (error) {
+        console.error('[DOCX Viewer] Error rendering DOCX:', error);
+        docxContainer.innerHTML = `
+            <div style="text-align: center; padding: 40px; color: #e53e3e;">
+                <h3>Failed to render document</h3>
+                <p>${error.message}</p>
+                <p style="margin-top: 20px; color: #666;">
+                    The document format may not be supported or the file may be corrupted.
+                </p>
+            </div>
+        `;
+    }
+}
+
+/**
+ * Cleanup DOCX viewer elements when closing modal
+ */
+function closeDocxViewerElements() {
+    const docxContainer = document.getElementById('docxViewerContainer');
+    const canvas = document.getElementById('pdfCanvas');
+    const pageInfo = document.getElementById('pdfPageInfo');
+
+    // Clear and hide DOCX container
+    if (docxContainer) {
+        docxContainer.innerHTML = '';
+        docxContainer.style.display = 'none';
+    }
+
+    // Restore PDF elements visibility for next view
+    if (canvas) canvas.style.display = 'block';
+    if (pageInfo) pageInfo.style.display = 'block';
+}
+
+// Extend closePdfViewer to also handle DOCX cleanup
+const originalClosePdfViewerForDocx = closePdfViewer;
+closePdfViewer = function() {
+    closeDocxViewerElements();
+    originalClosePdfViewerForDocx();
+};
+
+// Export DOCX viewer function
+window.closePdfViewer = closePdfViewer;
+window.openDocxViewer = openDocxViewer;
+
 // ============================================================================
 
 /**
@@ -1009,24 +1249,44 @@ async function viewDocument(documentDID) {
 
         // Request document access via wallet (clearance verified server-side)
         console.log(`[Documents] Requesting document access (clearance verified server-side)`);
-        const { documentBlob, filename } = await requestDocumentAccess(documentDID);
+        const { documentBlob, filename, mimeType } = await requestDocumentAccess(documentDID);
 
         // Create blob URL and display document
-        console.log(`[Documents] Received document: ${filename}, size: ${documentBlob.byteLength || documentBlob.length} bytes`);
+        console.log(`[Documents] Received document: ${filename}, mimeType: ${mimeType}, size: ${documentBlob.byteLength || documentBlob.length} bytes`);
 
         // Convert ArrayBuffer/Array to Blob if needed
         // IMPORTANT: documentBlob from postMessage is a plain array of numbers (from Array.from(Uint8Array))
         // The Blob constructor needs Uint8Array to treat it as binary, not convert array to string
         const blob = documentBlob instanceof Blob
             ? documentBlob
-            : new Blob([new Uint8Array(documentBlob)], { type: 'application/pdf' });
+            : new Blob([new Uint8Array(documentBlob)], { type: mimeType || 'application/octet-stream' });
 
-        const blobUrl = URL.createObjectURL(blob);
+        // Handle different content types
+        const DOCX_MIMETYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
-        // Open in modal viewer instead of new tab (prevents download)
-        openPdfViewer(blobUrl, filename);
-
-        console.log('[Documents] Document displayed in modal viewer');
+        if (mimeType === 'text/html' || mimeType === 'text/htm') {
+            // Open HTML documents in an iframe within the modal
+            const blobUrl = URL.createObjectURL(blob);
+            openHtmlViewer(blobUrl, filename);
+            console.log('[Documents] HTML document displayed in modal viewer');
+        } else if (mimeType === 'application/pdf') {
+            // Open PDF documents in PDF.js viewer
+            const blobUrl = URL.createObjectURL(blob);
+            openPdfViewer(blobUrl, filename);
+            console.log('[Documents] PDF document displayed in modal viewer');
+        } else if (mimeType === DOCX_MIMETYPE || mimeType === 'application/msword' || filename?.toLowerCase().endsWith('.docx') || filename?.toLowerCase().endsWith('.doc')) {
+            // Open DOCX documents using docx-preview library
+            // Note: docx-preview needs the Blob, not the blob URL
+            console.log('[Documents] Opening DOCX document with docx-preview');
+            await openDocxViewer(blob, filename);
+            console.log('[Documents] DOCX document displayed in modal viewer');
+        } else {
+            // For other document types, try PDF viewer first (may work for images)
+            // If it fails, show download option
+            console.log(`[Documents] Unknown mimeType ${mimeType}, attempting PDF viewer`);
+            const blobUrl = URL.createObjectURL(blob);
+            openPdfViewer(blobUrl, filename);
+        }
 
     } catch (error) {
         console.error('[Documents] Error viewing document:', error);
@@ -1499,7 +1759,7 @@ window.addEventListener('message', (event) => {
  * Handle document access response from wallet
  */
 function handleDocumentAccessResponse(data) {
-    const { requestId, success, documentBlob, filename, error, message } = data;
+    const { requestId, success, documentBlob, filename, mimeType, error, message } = data;
 
     const pending = pendingDocumentRequests.get(requestId);
     if (!pending) {
@@ -1517,8 +1777,8 @@ function handleDocumentAccessResponse(data) {
 
     // Check for documentBlob existence (wallet may not send 'success' field)
     if (documentBlob && documentBlob.length > 0) {
-        console.log('[WalletBridge] Document access granted:', filename);
-        pending.resolve({ documentBlob, filename });
+        console.log('[WalletBridge] Document access granted:', filename, 'mimeType:', mimeType);
+        pending.resolve({ documentBlob, filename, mimeType: mimeType || 'application/octet-stream' });
     } else {
         console.error('[WalletBridge] Document access denied:', error || 'No document data', message || '');
         pending.reject(new Error(message || error || 'Document access denied'));
@@ -1622,18 +1882,193 @@ async function requestDocumentAccess(documentDID) {
 }
 
 // ============================================================================
+// Classified Document Viewing via Wallet (Ephemeral DID with TTL)
+// ============================================================================
+
+/**
+ * View a classified document via the wallet (SSI-compliant)
+ *
+ * Flow (Dec 13, 2025 - Server creates ephemeral DID):
+ * 1. Open wallet and send SSI_DOCUMENT_DOWNLOAD_REQUEST
+ * 2. Wallet calls prepare-download → server creates ephemeral DID
+ * 3. Wallet generates X25519 keypair and calls complete-download
+ * 4. Server encrypts document and issues DocumentCopy VC via DIDComm
+ * 5. Document is ready for viewing in wallet
+ *
+ * @param {string} documentDID - Document's DID
+ * @param {string} title - Document title for display
+ */
+async function viewClassifiedDocument(documentDID, title) {
+    console.log('[ViewClassified] Starting SSI-compliant view flow:', documentDID);
+
+    // Show loading modal
+    showViewingProgress('Connecting to wallet...', 10);
+
+    try {
+        const sessionToken = getSessionToken();
+        if (!sessionToken) {
+            throw new Error('Not authenticated. Please log in again.');
+        }
+
+        // Ensure wallet window is open
+        await ensureWalletOpen();
+
+        // Wait for wallet to be ready
+        showViewingProgress('Waiting for wallet...', 20);
+        await waitForWalletReady();
+
+        // Use SSI flow via wallet - server creates ephemeral DID and issues VC
+        showViewingProgress('Preparing SSI document delivery...', 30);
+
+        const result = await requestWalletDocumentDownload({
+            documentDID,
+            title,
+            sessionId: sessionToken,
+            serverBaseUrl: window.location.origin + '/company-admin'
+        });
+
+        console.log('[ViewClassified] SSI flow completed:', {
+            ephemeralDID: result.ephemeralDID,
+            expiresAt: result.expiresAt,
+            credentialOfferId: result.credentialOfferId
+        });
+
+        showViewingProgress('DocumentCopy VC issued!', 100);
+
+        // Show success notification
+        setTimeout(() => {
+            hideViewingProgress();
+            // Show info about VC delivery
+            alert(`✅ Document ready!\n\nEphemeral DID: ${result.ephemeralDID?.substring(0, 40)}...\nExpires: ${new Date(result.expiresAt).toLocaleString()}\n\n${result.message}`);
+        }, 1000);
+
+    } catch (error) {
+        console.error('[ViewClassified] Error:', error);
+        hideViewingProgress();
+        showError(`Failed to view document: ${error.message}`);
+    }
+}
+
+/**
+ * Show viewing progress modal
+ */
+function showViewingProgress(message, percent) {
+    let modal = document.getElementById('viewingProgressModal');
+    if (!modal) {
+        // Create modal if it doesn't exist
+        modal = document.createElement('div');
+        modal.id = 'viewingProgressModal';
+        modal.style.cssText = `
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7); display: flex; align-items: center;
+            justify-content: center; z-index: 10000;
+        `;
+        modal.innerHTML = `
+            <div style="background: white; padding: 30px 50px; border-radius: 12px; text-align: center; min-width: 300px;">
+                <div style="font-size: 40px; margin-bottom: 15px;">📄</div>
+                <div id="viewingProgressMessage" style="font-size: 16px; font-weight: 500; margin-bottom: 15px;"></div>
+                <div style="background: #e2e8f0; border-radius: 10px; height: 8px; overflow: hidden;">
+                    <div id="viewingProgressBar" style="background: linear-gradient(90deg, #667eea, #764ba2); height: 100%; transition: width 0.3s;"></div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    }
+
+    document.getElementById('viewingProgressMessage').textContent = message;
+    document.getElementById('viewingProgressBar').style.width = `${percent}%`;
+    modal.style.display = 'flex';
+}
+
+/**
+ * Hide viewing progress modal
+ */
+function hideViewingProgress() {
+    const modal = document.getElementById('viewingProgressModal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+}
+
+/**
+ * Request wallet to open and display a document
+ * @param {string} ephemeralDID - The ephemeral DID of the document copy
+ * @param {string} title - Document title
+ * @param {object} sourceInfo - Document source info (format, contentType)
+ */
+async function openDocumentInWallet(ephemeralDID, title, sourceInfo) {
+    return new Promise((resolve, reject) => {
+        const requestId = crypto.randomUUID();
+
+        // Set timeout (30 seconds)
+        const timeout = setTimeout(() => {
+            reject(new Error('Wallet did not respond'));
+        }, 30000);
+
+        // Listen for response
+        const handler = (event) => {
+            if (event.origin !== WALLET_ORIGIN) return;
+            if (event.data?.type === 'DOCUMENT_VIEWER_OPENED' && event.data?.requestId === requestId) {
+                clearTimeout(timeout);
+                window.removeEventListener('message', handler);
+                resolve(true);
+            }
+        };
+        window.addEventListener('message', handler);
+
+        // Send open document request to wallet
+        if (walletWindow && !walletWindow.closed) {
+            walletWindow.postMessage({
+                type: 'OPEN_DOCUMENT',
+                requestId,
+                ephemeralDID,
+                title,
+                sourceInfo,
+                timestamp: Date.now()
+            }, WALLET_ORIGIN);
+
+            // Focus wallet window
+            walletWindow.focus();
+        } else {
+            // Open wallet with document parameter
+            const walletUrl = `${WALLET_ORIGIN}/my-documents?open=${encodeURIComponent(ephemeralDID)}`;
+            walletWindow = window.open(walletUrl, 'alice-wallet');
+
+            if (walletWindow) {
+                // Consider it success if window opened
+                clearTimeout(timeout);
+                window.removeEventListener('message', handler);
+                resolve(true);
+            } else {
+                clearTimeout(timeout);
+                window.removeEventListener('message', handler);
+                reject(new Error('Could not open wallet. Please check popup blocker settings.'));
+            }
+        }
+    });
+}
+
+// Export for global access
+window.viewClassifiedDocument = viewClassifiedDocument;
+
+// ============================================================================
 // Download to Wallet - Classified Documents with Redaction
 // ============================================================================
 
 /**
- * Download a classified document to the user's wallet
- * The document will be encrypted and sent with section-level redaction
+ * Download a classified document to the user's wallet (SSI-compliant)
+ *
+ * Uses two-step process where wallet creates ephemeral DID:
+ * 1. Dashboard requests download via wallet
+ * 2. Wallet creates ephemeral DID via Employee CA (8300)
+ * 3. Wallet completes download with server
+ * 4. Server issues DocumentCopy VC via DIDComm
  *
  * @param {string} documentDID - Document's DID
  * @param {string} title - Document title for display
  */
 async function downloadToWallet(documentDID, title) {
-    console.log('[DownloadToWallet] Starting download:', documentDID);
+    console.log('[DownloadToWallet] Starting SSI-compliant download:', documentDID);
 
     // Show loading state
     const btn = event.target;
@@ -1647,61 +2082,40 @@ async function downloadToWallet(documentDID, title) {
             throw new Error('Not authenticated. Please log in again.');
         }
 
-        // Get user's X25519 public key from wallet
-        // For now, we'll generate a temporary one or prompt user to get from wallet
-        // In production, this would be retrieved from the wallet via postMessage
-        const recipientPublicKey = await getWalletPublicKey();
+        // Ensure wallet window is open
+        if (!walletWindow || walletWindow.closed) {
+            walletWindow = window.open(
+                `${WALLET_ORIGIN}/my-documents`,
+                'identus-wallet',
+                'width=600,height=800'
+            );
 
-        if (!recipientPublicKey) {
-            throw new Error('Could not get wallet encryption key. Please ensure your wallet is connected.');
+            // Wait for wallet to initialize
+            await new Promise(resolve => setTimeout(resolve, 3000));
         }
 
-        // Request document download from server
-        const response = await fetch('/company-admin/api/classified-documents/download', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Session-ID': sessionToken
-            },
-            body: JSON.stringify({
-                documentDID,
-                recipientPublicKey
-            })
+        btn.innerHTML = '⏳ Wallet creating DID...';
+
+        // Request wallet to perform SSI-compliant document download
+        // Wallet will:
+        // 1. Call prepare-download endpoint
+        // 2. Create ephemeral DID via Employee CA (8300)
+        // 3. Call complete-download endpoint with ephemeral DID + public key
+        // 4. Receive DocumentCopy VC via DIDComm
+        const result = await requestWalletDocumentDownload({
+            documentDID,
+            title,
+            sessionId: sessionToken,
+            serverBaseUrl: window.location.origin + '/company-admin'
         });
 
-        const result = await response.json();
-
-        if (!result.success) {
-            throw new Error(result.message || 'Failed to download document');
-        }
-
-        console.log('[DownloadToWallet] Document prepared:', {
-            ephemeralDID: result.ephemeralDID,
-            expiresAt: result.expiresAt,
-            sections: result.sectionSummary
-        });
-
-        // Send encrypted document to wallet for storage
-        const stored = await sendDocumentToWallet({
-            ephemeralDID: result.ephemeralDID,
-            originalDocumentDID: documentDID,
-            title: title,
-            overallClassification: result.documentCopy.overallClassification,
-            encryptedContent: result.encryptedDocument,
-            encryptionInfo: result.encryptionInfo,
-            sectionSummary: result.sectionSummary,
-            expiresAt: result.expiresAt,
-            accessRights: result.documentCopy.accessRights,
-            sourceInfo: result.documentCopy.sourceInfo
-        });
-
-        if (stored) {
+        if (result.success) {
             // Success!
             btn.innerHTML = '✅ Sent to Wallet';
             btn.style.background = '#48bb78';
 
             // Show success message
-            alert(`Document "${title}" sent to your wallet.\n\nThe document will expire in 1 hour.\nVisible sections: ${result.sectionSummary.visible}\nRedacted sections: ${result.sectionSummary.redacted}\n\nOpen your wallet's "My Documents" page to view it.`);
+            alert(`Document "${title}" download initiated.\n\n${result.message}\n\nThe DocumentCopy credential will be delivered to your wallet via DIDComm.\n\nOpen your wallet's "My Documents" page to view it.`);
 
             // Reset button after 3 seconds
             setTimeout(() => {
@@ -1724,6 +2138,60 @@ async function downloadToWallet(documentDID, title) {
             btn.disabled = false;
         }, 2000);
     }
+}
+
+/**
+ * Request wallet to perform SSI-compliant document download
+ * The wallet creates the ephemeral DID and handles the two-step process
+ *
+ * @param {Object} params - Download parameters
+ * @returns {Promise<Object>} Download result
+ */
+async function requestWalletDocumentDownload(params) {
+    return new Promise((resolve, reject) => {
+        const requestId = 'ssi-download-' + Date.now();
+        const timeout = setTimeout(() => {
+            window.removeEventListener('message', handler);
+            reject(new Error('Wallet did not respond. Please ensure your wallet is open and has an Enterprise configuration.'));
+        }, 60000); // 60 seconds timeout for SSI operations
+
+        const handler = (event) => {
+            // Check origin
+            if (event.origin !== WALLET_ORIGIN) return;
+            if (event.data?.requestId !== requestId) return;
+
+            window.removeEventListener('message', handler);
+            clearTimeout(timeout);
+
+            if (event.data.type === 'SSI_DOCUMENT_DOWNLOAD_RESPONSE') {
+                if (event.data.success) {
+                    resolve({
+                        success: true,
+                        ephemeralDID: event.data.ephemeralDID,
+                        credentialOfferId: event.data.credentialOfferId,
+                        expiresAt: event.data.expiresAt,
+                        message: event.data.message || 'DocumentCopy VC will be delivered via DIDComm'
+                    });
+                } else {
+                    reject(new Error(event.data.error || 'Wallet failed to download document'));
+                }
+            }
+        };
+
+        window.addEventListener('message', handler);
+
+        // Send request to wallet
+        console.log('[DownloadToWallet] Sending SSI download request to wallet:', params.documentDID);
+        walletWindow.postMessage({
+            type: 'SSI_DOCUMENT_DOWNLOAD_REQUEST',
+            requestId,
+            documentDID: params.documentDID,
+            title: params.title,
+            sessionId: params.sessionId,
+            serverBaseUrl: params.serverBaseUrl,
+            timestamp: Date.now()
+        }, WALLET_ORIGIN);
+    });
 }
 
 /**
@@ -1783,7 +2251,8 @@ async function sendDocumentToWallet(documentData) {
                 window.removeEventListener('message', handler);
                 clearTimeout(timeout);
 
-                if (event.data.type === 'DOCUMENT_STORED') {
+                // Wallet sends DOCUMENT_STORAGE_RESPONSE on success
+                if (event.data.type === 'DOCUMENT_STORAGE_RESPONSE' && event.data.success) {
                     resolve(true);
                 } else {
                     reject(new Error(event.data.error || 'Failed to store document'));
@@ -1792,11 +2261,21 @@ async function sendDocumentToWallet(documentData) {
 
             window.addEventListener('message', handler);
 
-            // Send document to wallet
+            // Send document to wallet using correct message type: DOCUMENT_STORAGE_REQUEST
+            // Fields go directly on the message, not wrapped in 'document'
             walletWindow.postMessage({
-                type: 'STORE_CLASSIFIED_DOCUMENT',
+                type: 'DOCUMENT_STORAGE_REQUEST',
                 requestId,
-                document: documentData,
+                ephemeralDID: documentData.ephemeralDID,
+                originalDocumentDID: documentData.originalDocumentDID,
+                title: documentData.title,
+                overallClassification: documentData.overallClassification,
+                encryptedContent: documentData.encryptedContent,
+                encryptionInfo: documentData.encryptionInfo,
+                sectionSummary: documentData.sectionSummary,
+                expiresAt: documentData.expiresAt,
+                accessRights: documentData.accessRights,
+                sourceInfo: documentData.sourceInfo,
                 timestamp: Date.now()
             }, WALLET_ORIGIN);
         });

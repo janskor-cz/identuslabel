@@ -1,8 +1,15 @@
 /**
  * generateDocxTemplate.js
  *
- * Generates a Microsoft Word template with pre-configured Content Controls
- * for clearance-level document creation.
+ * Generates a Microsoft Word template with PARAGRAPH STYLES for clearance marking.
+ * This is the USER-FRIENDLY approach - users simply select text and apply a style
+ * from Word's Style dropdown (Home tab).
+ *
+ * Styles created:
+ * - Unclassified (green) - Public information
+ * - Confidential (blue) - Sensitive business info
+ * - Secret (orange) - Highly restricted
+ * - TopSecret (red) - Maximum classification
  *
  * Run: node scripts/generateDocxTemplate.js
  */
@@ -12,101 +19,146 @@ const {
   Paragraph,
   TextRun,
   HeadingLevel,
-  Table,
-  TableRow,
-  TableCell,
-  WidthType,
+  AlignmentType,
   BorderStyle,
   ShadingType,
-  AlignmentType,
   Packer
 } = require('docx');
 const fs = require('fs');
 const path = require('path');
 
-// Clearance level colors (RGB values for Word)
-const COLORS = {
-  UNCLASSIFIED: { bg: 'E8F5E9', text: '1B5E20', label: '4CAF50' },
-  CONFIDENTIAL: { bg: 'E3F2FD', text: '0D47A1', label: '2196F3' },
-  SECRET: { bg: 'FFF3E0', text: 'E65100', label: 'FF9800' },
-  TOP_SECRET: { bg: 'FFEBEE', text: 'B71C1C', label: 'F44336' }
+// Clearance level visual styles
+const CLEARANCE_STYLES = {
+  Unclassified: {
+    id: 'Unclassified',
+    name: 'Unclassified',
+    color: '1B5E20', // Dark green text
+    bgColor: 'E8F5E9', // Light green background
+    borderColor: '4CAF50', // Green border
+    description: 'Public information accessible to all'
+  },
+  Confidential: {
+    id: 'Confidential',
+    name: 'Confidential',
+    color: '0D47A1', // Dark blue text
+    bgColor: 'E3F2FD', // Light blue background
+    borderColor: '2196F3', // Blue border
+    description: 'Sensitive business information'
+  },
+  Secret: {
+    id: 'Secret',
+    name: 'Secret',
+    color: 'E65100', // Dark orange text
+    bgColor: 'FFF3E0', // Light orange background
+    borderColor: 'FF9800', // Orange border
+    description: 'Highly restricted information'
+  },
+  TopSecret: {
+    id: 'TopSecret',
+    name: 'TopSecret',
+    color: 'B71C1C', // Dark red text
+    bgColor: 'FFEBEE', // Light red background
+    borderColor: 'F44336', // Red border
+    description: 'Classified information (highest level)'
+  }
 };
 
 /**
- * Create a clearance section with styled content
- * Note: True Content Controls (SDTs) require direct XML manipulation
- * This creates visually styled sections with instructions for manual SDT creation
+ * Build paragraph style definitions for Word (whole paragraphs)
  */
-function createClearanceSection(level, title, contentParagraphs) {
-  const color = COLORS[level];
+function buildParagraphStyles() {
+  const styles = [];
 
-  const paragraphs = [
-    // Section header with clearance label
-    new Paragraph({
-      children: [
-        new TextRun({
-          text: `[${level}] `,
-          bold: true,
-          color: color.label,
-          size: 20
-        }),
-        new TextRun({
-          text: title,
-          bold: true,
-          size: 28,
-          color: color.text
-        })
-      ],
-      shading: {
-        type: ShadingType.SOLID,
-        color: color.bg
+  for (const [key, style] of Object.entries(CLEARANCE_STYLES)) {
+    styles.push({
+      id: style.id,
+      name: style.name,
+      basedOn: 'Normal',
+      next: 'Normal',
+      quickFormat: true,
+      run: {
+        color: style.color,
+        size: 24
       },
-      spacing: { before: 400, after: 200 }
-    })
-  ];
-
-  // Add content paragraphs
-  for (const content of contentParagraphs) {
-    paragraphs.push(
-      new Paragraph({
-        children: [
-          new TextRun({
-            text: content,
-            size: 24
-          })
-        ],
+      paragraph: {
         shading: {
           type: ShadingType.SOLID,
-          color: color.bg
+          color: style.bgColor
         },
-        spacing: { after: 100 }
-      })
-    );
+        spacing: {
+          before: 120,
+          after: 120,
+          line: 276
+        },
+        border: {
+          left: {
+            color: style.borderColor,
+            style: BorderStyle.SINGLE,
+            size: 24,
+            space: 4
+          }
+        }
+      }
+    });
   }
 
-  // Add spacing after section
-  paragraphs.push(
-    new Paragraph({
-      text: '',
-      spacing: { after: 200 }
-    })
-  );
-
-  return paragraphs;
+  return styles;
 }
 
 /**
- * Create the instructions section
+ * Build character style definitions for Word (inline text - words/phrases)
+ */
+function buildCharacterStyles() {
+  const styles = [];
+
+  for (const [key, style] of Object.entries(CLEARANCE_STYLES)) {
+    styles.push({
+      id: `${style.id}Inline`,
+      name: `${style.name} Inline`,
+      basedOn: 'DefaultParagraphFont',
+      quickFormat: true,
+      run: {
+        color: style.color,
+        bold: true,
+        shading: {
+          type: ShadingType.SOLID,
+          color: style.bgColor
+        }
+      }
+    });
+  }
+
+  return styles;
+}
+
+/**
+ * Create instructions section
  */
 function createInstructions() {
   return [
+    // Title
     new Paragraph({
       children: [
         new TextRun({
-          text: 'HOW TO USE THIS TEMPLATE',
+          text: 'CLASSIFIED DOCUMENT TEMPLATE',
+          bold: true,
+          size: 40,
+          color: '333333'
+        })
+      ],
+      heading: HeadingLevel.TITLE,
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 400 }
+    }),
+
+    // How to use
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'How to Use This Template (EASY!)',
           bold: true,
           size: 32,
-          color: '666666'
+          color: '1565C0'
         })
       ],
       heading: HeadingLevel.HEADING_1,
@@ -116,100 +168,288 @@ function createInstructions() {
     new Paragraph({
       children: [
         new TextRun({
-          text: 'This template demonstrates section-level security classification for documents.',
+          text: 'This template uses ',
+          size: 24
+        }),
+        new TextRun({
+          text: 'Paragraph Styles',
+          bold: true,
+          size: 24
+        }),
+        new TextRun({
+          text: ' - the easiest way to mark classified content. Just 3 steps:',
           size: 24
         })
       ],
       spacing: { after: 200 }
     }),
 
+    // Step 1
     new Paragraph({
       children: [
         new TextRun({
-          text: 'To Create Content Controls with Clearance Tags:',
+          text: 'Step 1: ',
           bold: true,
+          size: 24,
+          color: '1565C0'
+        }),
+        new TextRun({
+          text: 'Write your document content (or paste it here)',
           size: 24
         })
       ],
-      spacing: { before: 200, after: 100 }
+      spacing: { after: 100 }
     }),
 
+    // Step 2
     new Paragraph({
       children: [
-        new TextRun({ text: '1. Enable Developer Tab: File > Options > Customize Ribbon > Check "Developer"', size: 22 })
+        new TextRun({
+          text: 'Step 2: ',
+          bold: true,
+          size: 24,
+          color: '1565C0'
+        }),
+        new TextRun({
+          text: 'Select the paragraph(s) you want to classify',
+          size: 24
+        })
+      ],
+      spacing: { after: 100 }
+    }),
+
+    // Step 3
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Step 3: ',
+          bold: true,
+          size: 24,
+          color: '1565C0'
+        }),
+        new TextRun({
+          text: 'From the ',
+          size: 24
+        }),
+        new TextRun({
+          text: 'Styles gallery (Home tab)',
+          bold: true,
+          size: 24
+        }),
+        new TextRun({
+          text: ', click one of these styles:',
+          size: 24
+        })
+      ],
+      spacing: { after: 150 }
+    }),
+
+    // Style list
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: '    \u2022 Unclassified',
+          bold: true,
+          color: CLEARANCE_STYLES.Unclassified.borderColor,
+          size: 24
+        }),
+        new TextRun({
+          text: ' - Public information',
+          size: 24
+        })
       ],
       spacing: { after: 50 }
-    }),
-
-    new Paragraph({
-      children: [
-        new TextRun({ text: '2. Select the content you want to classify', size: 22 })
-      ],
-      spacing: { after: 50 }
-    }),
-
-    new Paragraph({
-      children: [
-        new TextRun({ text: '3. Developer Tab > Rich Text Content Control', size: 22 })
-      ],
-      spacing: { after: 50 }
-    }),
-
-    new Paragraph({
-      children: [
-        new TextRun({ text: '4. Click Properties > Set Tag to: clearance:LEVEL', size: 22 })
-      ],
-      spacing: { after: 50 }
-    }),
-
-    new Paragraph({
-      children: [
-        new TextRun({ text: '   Example tags: clearance:UNCLASSIFIED, clearance:CONFIDENTIAL, clearance:SECRET, clearance:TOP_SECRET', size: 20, italics: true })
-      ],
-      spacing: { after: 200 }
     }),
 
     new Paragraph({
       children: [
         new TextRun({
-          text: 'Clearance Levels (from lowest to highest):',
+          text: '    \u2022 Confidential',
           bold: true,
+          color: CLEARANCE_STYLES.Confidential.borderColor,
+          size: 24
+        }),
+        new TextRun({
+          text: ' - Sensitive business info',
           size: 24
         })
       ],
-      spacing: { before: 200, after: 100 }
+      spacing: { after: 50 }
     }),
 
-    // Clearance level descriptions
     new Paragraph({
       children: [
-        new TextRun({ text: 'UNCLASSIFIED', bold: true, color: COLORS.UNCLASSIFIED.label }),
-        new TextRun({ text: ' - Public information, no restrictions', size: 22 })
+        new TextRun({
+          text: '    \u2022 Secret',
+          bold: true,
+          color: CLEARANCE_STYLES.Secret.borderColor,
+          size: 24
+        }),
+        new TextRun({
+          text: ' - Highly restricted',
+          size: 24
+        })
       ],
       spacing: { after: 50 }
     }),
 
     new Paragraph({
       children: [
-        new TextRun({ text: 'CONFIDENTIAL', bold: true, color: COLORS.CONFIDENTIAL.label }),
-        new TextRun({ text: ' - Sensitive business information', size: 22 })
+        new TextRun({
+          text: '    \u2022 TopSecret',
+          bold: true,
+          color: CLEARANCE_STYLES.TopSecret.borderColor,
+          size: 24
+        }),
+        new TextRun({
+          text: ' - Maximum classification',
+          size: 24
+        })
       ],
-      spacing: { after: 50 }
+      spacing: { after: 300 }
+    }),
+
+    // Inline styles section
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'For Individual Words/Phrases (Inline Styles)',
+          bold: true,
+          size: 28,
+          color: '7B1FA2'
+        })
+      ],
+      heading: HeadingLevel.HEADING_2,
+      spacing: { before: 200, after: 150 }
     }),
 
     new Paragraph({
       children: [
-        new TextRun({ text: 'SECRET', bold: true, color: COLORS.SECRET.label }),
-        new TextRun({ text: ' - Highly restricted information', size: 22 })
+        new TextRun({
+          text: 'Need to classify just a word or phrase within a paragraph? Use the ',
+          size: 24
+        }),
+        new TextRun({
+          text: 'Inline',
+          bold: true,
+          size: 24
+        }),
+        new TextRun({
+          text: ' styles:',
+          size: 24
+        })
       ],
-      spacing: { after: 50 }
+      spacing: { after: 100 }
     }),
 
     new Paragraph({
       children: [
-        new TextRun({ text: 'TOP_SECRET', bold: true, color: COLORS.TOP_SECRET.label }),
-        new TextRun({ text: ' - Classified information (highest restriction)', size: 22 })
+        new TextRun({
+          text: '    \u2022 Confidential Inline',
+          bold: true,
+          color: CLEARANCE_STYLES.Confidential.borderColor,
+          size: 24
+        }),
+        new TextRun({
+          text: ', ',
+          size: 24
+        }),
+        new TextRun({
+          text: 'Secret Inline',
+          bold: true,
+          color: CLEARANCE_STYLES.Secret.borderColor,
+          size: 24
+        }),
+        new TextRun({
+          text: ', ',
+          size: 24
+        }),
+        new TextRun({
+          text: 'TopSecret Inline',
+          bold: true,
+          color: CLEARANCE_STYLES.TopSecret.borderColor,
+          size: 24
+        })
       ],
+      spacing: { after: 150 }
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Example: "The meeting is at ',
+          size: 22,
+          color: '666666'
+        }),
+        new TextRun({
+          text: '3pm in Room 42',
+          bold: true,
+          color: CLEARANCE_STYLES.Secret.color,
+          size: 22
+        }),
+        new TextRun({
+          text: ' - bring coffee."',
+          size: 22,
+          color: '666666'
+        })
+      ],
+      spacing: { after: 100 }
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: '(Select "3pm in Room 42" \u2192 Apply "Secret Inline" style)',
+          size: 20,
+          italics: true,
+          color: '999999'
+        })
+      ],
+      spacing: { after: 250 }
+    }),
+
+    // Tip
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'TIP: ',
+          bold: true,
+          size: 22,
+          color: '666666'
+        }),
+        new TextRun({
+          text: 'If you don\'t see the styles in the gallery, click the small arrow at the bottom-right of the Styles section to expand the full list.',
+          size: 22,
+          italics: true,
+          color: '666666'
+        })
+      ],
+      spacing: { after: 300 }
+    }),
+
+    // Separator
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: '\u2500'.repeat(70),
+          color: 'CCCCCC'
+        })
+      ],
+      alignment: AlignmentType.CENTER,
+      spacing: { before: 200, after: 200 }
+    }),
+
+    // Delete notice
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: '\u26A0 DELETE THESE INSTRUCTIONS BEFORE UPLOADING \u26A0',
+          bold: true,
+          color: 'CC0000',
+          size: 26
+        })
+      ],
+      alignment: AlignmentType.CENTER,
       spacing: { after: 200 }
     }),
 
@@ -217,33 +457,8 @@ function createInstructions() {
     new Paragraph({
       children: [
         new TextRun({
-          text: '═══════════════════════════════════════════════════════════════════',
-          color: '999999'
-        })
-      ],
-      alignment: AlignmentType.CENTER,
-      spacing: { before: 400, after: 400 }
-    }),
-
-    new Paragraph({
-      children: [
-        new TextRun({
-          text: 'DELETE THE INSTRUCTIONS ABOVE BEFORE UPLOADING',
-          bold: true,
-          color: 'CC0000',
-          size: 24
-        })
-      ],
-      alignment: AlignmentType.CENTER,
-      spacing: { after: 400 }
-    }),
-
-    // Another separator
-    new Paragraph({
-      children: [
-        new TextRun({
-          text: '═══════════════════════════════════════════════════════════════════',
-          color: '999999'
+          text: '\u2500'.repeat(70),
+          color: 'CCCCCC'
         })
       ],
       alignment: AlignmentType.CENTER,
@@ -253,199 +468,202 @@ function createInstructions() {
 }
 
 /**
- * Create the example document content
+ * Create example document with styled paragraphs
  */
 function createExampleContent() {
-  const sections = [];
-
-  // Document title
-  sections.push(
+  return [
+    // Document title
     new Paragraph({
       children: [
         new TextRun({
           text: 'Q4 Financial Report - TechCorp',
           bold: true,
-          size: 48
+          size: 48,
+          color: '333333'
         })
       ],
       heading: HeadingLevel.TITLE,
       spacing: { after: 400 }
-    })
-  );
+    }),
 
-  // UNCLASSIFIED section
-  sections.push(...createClearanceSection(
-    'UNCLASSIFIED',
-    'Public Metrics',
-    [
-      'This section contains publicly available information that anyone can view.',
-      'Total projects completed: 45',
-      'Customer satisfaction rating: 92%',
-      'Employee count: 250',
-      'Office locations: 3 (Prague, Berlin, London)'
-    ]
-  ));
-
-  // CONFIDENTIAL section
-  sections.push(...createClearanceSection(
-    'CONFIDENTIAL',
-    'Financial Performance',
-    [
-      'This section requires CONFIDENTIAL clearance or higher to view.',
-      'Q4 Revenue: $2.3M (15% increase YoY)',
-      'Operating margin: 42%',
-      'EBITDA: $980K',
-      'Cash reserves: $4.2M'
-    ]
-  ));
-
-  // SECRET section
-  sections.push(...createClearanceSection(
-    'SECRET',
-    'Strategic Initiatives',
-    [
-      'This section requires SECRET clearance or higher to view.',
-      'M&A discussions with ACME Corporation are in advanced stages.',
-      'Expected acquisition value: $15M',
-      'Due diligence completion: Q1 2026',
-      'Regulatory approval timeline: 6-9 months'
-    ]
-  ));
-
-  // TOP_SECRET section
-  sections.push(...createClearanceSection(
-    'TOP_SECRET',
-    'Board-Level Strategy',
-    [
-      'This section requires TOP_SECRET clearance to view.',
-      'Executive authorization code: ALPHA-7392',
-      'Classified project: Operation Phoenix',
-      'Special budget allocation: $5M (separate accounting)'
-    ]
-  ));
-
-  // Example table
-  sections.push(
+    // Unclassified section header
     new Paragraph({
       children: [
         new TextRun({
-          text: 'Department Budgets',
+          text: 'Public Metrics',
           bold: true,
-          size: 32
+          size: 28
         })
       ],
-      heading: HeadingLevel.HEADING_1,
-      spacing: { before: 400, after: 200 }
-    })
-  );
+      style: 'Unclassified'
+    }),
 
-  // Create table
-  const table = new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    rows: [
-      // Header row
-      new TableRow({
-        children: [
-          new TableCell({
-            children: [new Paragraph({ children: [new TextRun({ text: 'Department', bold: true })] })],
-            shading: { type: ShadingType.SOLID, color: 'F5F5F5' }
-          }),
-          new TableCell({
-            children: [new Paragraph({ children: [new TextRun({ text: 'Budget', bold: true })] })],
-            shading: { type: ShadingType.SOLID, color: 'F5F5F5' }
-          }),
-          new TableCell({
-            children: [new Paragraph({ children: [new TextRun({ text: 'Classification', bold: true })] })],
-            shading: { type: ShadingType.SOLID, color: 'F5F5F5' }
-          })
-        ]
-      }),
-      // Data rows
-      new TableRow({
-        children: [
-          new TableCell({ children: [new Paragraph('Marketing')] }),
-          new TableCell({ children: [new Paragraph('$500K')] }),
-          new TableCell({ children: [new Paragraph('Public')] })
-        ]
-      }),
-      new TableRow({
-        children: [
-          new TableCell({
-            children: [new Paragraph('R&D')],
-            shading: { type: ShadingType.SOLID, color: COLORS.CONFIDENTIAL.bg }
-          }),
-          new TableCell({
-            children: [new Paragraph('$1.2M')],
-            shading: { type: ShadingType.SOLID, color: COLORS.CONFIDENTIAL.bg }
-          }),
-          new TableCell({
-            children: [new Paragraph({ children: [new TextRun({ text: 'CONFIDENTIAL', color: COLORS.CONFIDENTIAL.label })] })],
-            shading: { type: ShadingType.SOLID, color: COLORS.CONFIDENTIAL.bg }
-          })
-        ]
-      }),
-      new TableRow({
-        children: [
-          new TableCell({
-            children: [new Paragraph('Special Projects')],
-            shading: { type: ShadingType.SOLID, color: COLORS.SECRET.bg }
-          }),
-          new TableCell({
-            children: [new Paragraph('$3.5M')],
-            shading: { type: ShadingType.SOLID, color: COLORS.SECRET.bg }
-          }),
-          new TableCell({
-            children: [new Paragraph({ children: [new TextRun({ text: 'SECRET', color: COLORS.SECRET.label })] })],
-            shading: { type: ShadingType.SOLID, color: COLORS.SECRET.bg }
-          })
-        ]
-      }),
-      new TableRow({
-        children: [
-          new TableCell({
-            children: [new Paragraph('Black Ops')],
-            shading: { type: ShadingType.SOLID, color: COLORS.TOP_SECRET.bg }
-          }),
-          new TableCell({
-            children: [new Paragraph('$5M')],
-            shading: { type: ShadingType.SOLID, color: COLORS.TOP_SECRET.bg }
-          }),
-          new TableCell({
-            children: [new Paragraph({ children: [new TextRun({ text: 'TOP_SECRET', color: COLORS.TOP_SECRET.label })] })],
-            shading: { type: ShadingType.SOLID, color: COLORS.TOP_SECRET.bg }
-          })
-        ]
-      })
-    ]
-  });
-
-  sections.push(table);
-
-  sections.push(
     new Paragraph({
       children: [
         new TextRun({
-          text: 'Note: To properly classify table rows, wrap each row content in a Content Control with the appropriate tag.',
+          text: 'This is public information that anyone can view.',
+          size: 24
+        })
+      ],
+      style: 'Unclassified'
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Total projects completed: 45 | Customer satisfaction: 92% | Employees: 250',
+          size: 24
+        })
+      ],
+      style: 'Unclassified'
+    }),
+
+    // Normal paragraph (space between sections)
+    new Paragraph({
+      text: '',
+      spacing: { after: 200 }
+    }),
+
+    // Confidential section
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Financial Performance',
+          bold: true,
+          size: 28
+        })
+      ],
+      style: 'Confidential'
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'This requires CONFIDENTIAL clearance or higher to view.',
+          size: 24
+        })
+      ],
+      style: 'Confidential'
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Q4 Revenue: $2.3M (15% YoY) | Operating margin: 42% | Cash reserves: $4.2M',
+          size: 24
+        })
+      ],
+      style: 'Confidential'
+    }),
+
+    // Normal paragraph (space)
+    new Paragraph({
+      text: '',
+      spacing: { after: 200 }
+    }),
+
+    // Secret section
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Strategic Initiatives',
+          bold: true,
+          size: 28
+        })
+      ],
+      style: 'Secret'
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'This requires SECRET clearance or higher to view.',
+          size: 24
+        })
+      ],
+      style: 'Secret'
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'M&A target: ACME Corporation | Expected value: $15M | Timeline: Q1 2026',
+          size: 24
+        })
+      ],
+      style: 'Secret'
+    }),
+
+    // Normal paragraph (space)
+    new Paragraph({
+      text: '',
+      spacing: { after: 200 }
+    }),
+
+    // Top Secret section
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Board-Level Strategy',
+          bold: true,
+          size: 28
+        })
+      ],
+      style: 'TopSecret'
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'This requires TOP SECRET clearance to view.',
+          size: 24
+        })
+      ],
+      style: 'TopSecret'
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'Authorization code: ALPHA-7392 | Project: Operation Phoenix | Budget: $5M',
+          size: 24
+        })
+      ],
+      style: 'TopSecret'
+    }),
+
+    // Final note
+    new Paragraph({
+      text: '',
+      spacing: { after: 400 }
+    }),
+
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: 'End of Document',
           italics: true,
           size: 20,
-          color: '666666'
+          color: '999999'
         })
       ],
-      spacing: { before: 100, after: 400 }
+      alignment: AlignmentType.CENTER
     })
-  );
-
-  return sections;
+  ];
 }
 
 /**
- * Generate the complete template document
+ * Generate the complete template
  */
 async function generateTemplate() {
   const doc = new Document({
     title: 'Classified Document Template',
-    description: 'Template for creating documents with section-level security classification',
+    description: 'Template with clearance styles for easy classification (paragraphs AND inline text)',
     creator: 'Company Admin Portal',
+    styles: {
+      paragraphStyles: buildParagraphStyles(),
+      characterStyles: buildCharacterStyles()
+    },
     sections: [
       {
         properties: {},
@@ -464,18 +682,43 @@ async function generateTemplate() {
  * Main function
  */
 async function main() {
-  console.log('Generating Word template with clearance sections...');
+  console.log('Generating Word template with PARAGRAPH + CHARACTER STYLES...\n');
 
   try {
     const doc = await generateTemplate();
 
-    const outputPath = path.join(__dirname, '..', 'public', 'templates', 'classified-document-template.docx');
+    // Ensure templates directory exists
+    const outputDir = path.join(__dirname, '..', 'public', 'templates');
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
 
+    const outputPath = path.join(outputDir, 'classified-document-template.docx');
     const buffer = await Packer.toBuffer(doc);
     fs.writeFileSync(outputPath, buffer);
 
-    console.log(`Template generated successfully: ${outputPath}`);
-    console.log(`File size: ${Math.round(buffer.length / 1024)} KB`);
+    console.log('\u2705 Template generated successfully!');
+    console.log(`   Output: ${outputPath}`);
+    console.log(`   Size: ${Math.round(buffer.length / 1024)} KB\n`);
+
+    console.log('PARAGRAPH STYLES (for whole paragraphs):');
+    console.log('   \u2022 Unclassified (green)  - Level 1 - Public info');
+    console.log('   \u2022 Confidential (blue)   - Level 2 - Sensitive');
+    console.log('   \u2022 Secret (orange)       - Level 3 - Restricted');
+    console.log('   \u2022 TopSecret (red)       - Level 4 - Maximum\n');
+
+    console.log('CHARACTER STYLES (for words/phrases within text):');
+    console.log('   \u2022 Unclassified Inline   - Inline public info');
+    console.log('   \u2022 Confidential Inline   - Inline sensitive');
+    console.log('   \u2022 Secret Inline         - Inline restricted');
+    console.log('   \u2022 TopSecret Inline      - Inline maximum\n');
+
+    console.log('How users apply styles:');
+    console.log('   1. Open this template in Microsoft Word');
+    console.log('   2. Write or paste document content');
+    console.log('   3. Select paragraph(s) to classify');
+    console.log('   4. Click style name in Home tab > Styles gallery');
+    console.log('   5. Upload to Employee Portal\n');
 
   } catch (error) {
     console.error('Error generating template:', error);

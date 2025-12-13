@@ -1118,6 +1118,8 @@
         </div>
         <div class="pdf-viewer-container" style="display: flex; justify-content: center; align-items: flex-start; overflow: auto; padding: 20px;">
             <canvas id="pdfCanvas" style="max-width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,0.5);"></canvas>
+            <!-- DOCX Viewer Container (hidden by default) -->
+            <div id="docxViewerContainer" style="display: none; width: 100%; max-width: 900px; background: white; padding: 40px; border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); max-height: 80vh; overflow: auto;"></div>
         </div>
         <div class="pdf-viewer-notice">🔒 Secure View-only mode - Downloads disabled</div>
     </div>
@@ -1125,6 +1127,9 @@
     <!-- PDF.js Library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
-    <script src="/company-admin/js/employee-portal-dashboard.js?v=20251212"></script>
+    <!-- DOCX Preview Library (for Word document viewing) -->
+    <script src="https://unpkg.com/docx-preview@0.1.20/dist/docx-preview.min.js"></script>
+
+    <script src="/company-admin/js/employee-portal-dashboard.js?v=20251213"></script>
 </body>
 </html>

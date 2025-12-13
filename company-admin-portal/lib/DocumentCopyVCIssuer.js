@@ -42,52 +42,60 @@ async function createDocumentCopyCredentialOffer(options) {
   const {
     originalDocumentDID,
     ephemeralDID,
+    ephemeralServiceEndpoint, // Service endpoint URL for document retrieval
     title,
+    classification,
     clearanceLevelGranted,
     redactedSections,
     accessRights,
     contentHash,
-    encryptionKeyId
+    encryptionKeyId,
+    sectionSummary
   } = documentCopyData;
 
-  // Create credential subject claims
+  // Create flat credential claims for Cloud Agent (JWT format)
+  // Note: Cloud Agent JWT credentials use flat claim structure, not nested objects
   const credentialSubject = {
-    id: holderDID,
-    documentCopy: {
-      originalDocumentDID,
-      ephemeralDID,
-      title,
-      clearanceLevelGranted,
-      redactedSections: redactedSections.map(s => ({
-        sectionId: s.sectionId,
-        clearance: s.clearance
-      })),
-      accessRights: {
-        expiresAt: accessRights.expiresAt,
-        viewsAllowed: accessRights.viewsAllowed,
-        downloadAllowed: false,
-        printAllowed: false
-      },
-      contentHash,
-      encryptionKeyId,
-      issuedAt: new Date().toISOString()
-    }
+    // Ephemeral DID with service endpoint for document retrieval
+    ephemeralDID: ephemeralDID,
+    ephemeralServiceEndpoint: ephemeralServiceEndpoint,
+    // Original document reference
+    originalDocumentDID: originalDocumentDID,
+    title: title,
+    classification: classification || 'UNCLASSIFIED',
+    // Access control
+    clearanceLevelGranted: clearanceLevelGranted,
+    redactedSectionCount: redactedSections?.length || 0,
+    // Section summary
+    visibleSectionCount: sectionSummary?.visibleCount || 0,
+    // Access rights
+    expiresAt: accessRights.expiresAt,
+    viewsAllowed: accessRights.viewsAllowed,
+    downloadAllowed: false,
+    printAllowed: false,
+    // Metadata
+    contentHash: contentHash,
+    issuedAt: new Date().toISOString()
   };
 
   // Create credential offer request
+  // Using JWT format with automatic issuance for seamless wallet experience
   const credentialOfferRequest = {
     validityPeriod: calculateValidityPeriod(accessRights.expiresAt),
-    schemaId: null, // Use dynamic schema for DocumentCopy
     claims: credentialSubject,
     automaticIssuance: true, // Auto-issue when holder accepts
     connectionId,
-    issuingDID: null // Will use default issuing DID
+    credentialFormat: 'JWT',
+    goalCode: 'document-copy-access',
+    goal: `Access to document: ${title}`
   };
 
-  console.log('[DocumentCopyVCIssuer] Creating credential offer for:', holderDID);
-  console.log('[DocumentCopyVCIssuer] Document:', title);
-  console.log('[DocumentCopyVCIssuer] Clearance granted:', clearanceLevelGranted);
-  console.log('[DocumentCopyVCIssuer] Expires:', accessRights.expiresAt);
+  console.log('[DocumentCopyVCIssuer] Creating credential offer for DocumentCopy');
+  console.log('[DocumentCopyVCIssuer]   Connection ID:', connectionId);
+  console.log('[DocumentCopyVCIssuer]   Document:', title);
+  console.log('[DocumentCopyVCIssuer]   Clearance granted:', clearanceLevelGranted);
+  console.log('[DocumentCopyVCIssuer]   Service endpoint:', ephemeralServiceEndpoint);
+  console.log('[DocumentCopyVCIssuer]   Expires:', accessRights.expiresAt);
 
   try {
     const response = await fetch(`${CLOUD_AGENT_URL}/cloud-agent/issue-credentials/credential-offers`, {
@@ -145,9 +153,10 @@ function calculateValidityPeriod(expiresAt) {
  *
  * @param {Object} metadata - Ephemeral DID metadata from EphemeralDIDService
  * @param {string} documentTitle - Title of the document
+ * @param {string} serviceEndpoint - Service endpoint URL for document retrieval
  * @returns {Object} VC claims object
  */
-function createDocumentCopyVCClaims(metadata, documentTitle) {
+function createDocumentCopyVCClaims(metadata, documentTitle, serviceEndpoint) {
   return {
     '@context': [
       'https://www.w3.org/2018/credentials/v1',
@@ -155,23 +164,19 @@ function createDocumentCopyVCClaims(metadata, documentTitle) {
     ],
     type: ['VerifiableCredential', 'DocumentCopyCredential'],
     credentialSubject: {
-      documentCopy: {
-        originalDocumentDID: metadata.originalDocumentDID,
-        ephemeralDID: metadata.ephemeralDID,
-        title: documentTitle,
-        clearanceLevelGranted: metadata.clearanceLevel,
-        redactedSections: metadata.redactedSections.map(s => ({
-          sectionId: s.sectionId,
-          clearance: s.clearance
-        })),
-        accessRights: {
-          expiresAt: metadata.expiresAt,
-          viewsAllowed: metadata.viewsAllowed,
-          downloadAllowed: false,
-          printAllowed: false
-        },
-        encryptionKeyId: `${metadata.ephemeralDID}#key-1`
-      }
+      ephemeralDID: metadata.ephemeralDID,
+      ephemeralServiceEndpoint: serviceEndpoint,
+      originalDocumentDID: metadata.originalDocumentDID,
+      title: documentTitle,
+      classification: metadata.classification || 'UNCLASSIFIED',
+      clearanceLevelGranted: metadata.clearanceLevel,
+      redactedSectionCount: metadata.redactedSections?.length || 0,
+      visibleSectionCount: metadata.visibleSectionCount || 0,
+      expiresAt: metadata.expiresAt,
+      viewsAllowed: metadata.viewsAllowed,
+      downloadAllowed: false,
+      printAllowed: false,
+      issuedAt: new Date().toISOString()
     }
   };
 }
