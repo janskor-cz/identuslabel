@@ -431,7 +431,7 @@ function extractParagraphText(p) {
     }
   }
 
-  return textParts.join('');
+  return textParts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -475,7 +475,7 @@ function findInlineStyledText(obj, characterStyles, sections, startCounter, proc
           }
         }
 
-        const textContent = textParts.join('');
+        const textContent = textParts.join(' ').replace(/\s+/g, ' ').trim();
         if (!textContent) continue;
 
         // Create inline section
@@ -742,14 +742,16 @@ function determineOverallClassification(sections) {
     return 'UNCLASSIFIED';
   }
 
-  let highestLevel = 1;
+  // Find the LOWEST clearance level (least restrictive)
+  // This determines who can access the document (with redactions for higher sections)
+  let lowestLevel = 4; // Start with TOP_SECRET
   for (const section of sections) {
-    if (section.clearanceLevel > highestLevel) {
-      highestLevel = section.clearanceLevel;
+    if (section.clearanceLevel < lowestLevel) {
+      lowestLevel = section.clearanceLevel;
     }
   }
 
-  return getClearanceName(highestLevel);
+  return getClearanceName(lowestLevel);
 }
 
 /**

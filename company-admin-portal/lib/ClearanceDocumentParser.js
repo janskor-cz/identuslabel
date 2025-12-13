@@ -223,19 +223,19 @@ function determineOverallClassification(sections) {
     return 'UNCLASSIFIED';
   }
 
-  // Find the HIGHEST clearance level (most restrictive)
-  // Document is classified at its highest section's level
-  let highestLevel = 1; // UNCLASSIFIED
+  // Find the LOWEST clearance level (least restrictive)
+  // This determines who can access the document (with redactions for higher sections)
+  let lowestLevel = 4; // Start with TOP_SECRET
 
   for (const section of sections) {
-    if (section.clearanceLevel > highestLevel) {
-      highestLevel = section.clearanceLevel;
+    if (section.clearanceLevel < lowestLevel) {
+      lowestLevel = section.clearanceLevel;
     }
   }
 
   // Convert level back to string
   for (const [name, level] of Object.entries(CLEARANCE_LEVELS)) {
-    if (level === highestLevel) {
+    if (level === lowestLevel) {
       return name;
     }
   }

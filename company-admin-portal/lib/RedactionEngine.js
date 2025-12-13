@@ -273,27 +273,15 @@ function createRedactionElement(document, section) {
 
 /**
  * Create a visible section element
+ * Classification badge is shown via CSS ::before pseudo-element using data-clearance attribute
  */
 function createVisibleSection(document, section) {
   const wrapper = document.createElement(section.tagName || 'section');
   wrapper.setAttribute('data-clearance', section.clearance);
   wrapper.setAttribute('data-section-id', section.sectionId);
 
-  // Add classification badge
-  const badge = document.createElement('span');
-  badge.className = `classification-badge classification-${section.clearance}`;
-  badge.textContent = section.clearance;
-
-  // Parse and insert content
+  // Parse and insert content (no visible badge - CSS handles display)
   wrapper.innerHTML = section.content;
-
-  // Prepend badge to first element or wrapper
-  const firstChild = wrapper.firstChild;
-  if (firstChild && firstChild.nodeType === 1) {
-    firstChild.insertBefore(badge, firstChild.firstChild);
-  } else {
-    wrapper.insertBefore(badge, firstChild);
-  }
 
   return wrapper;
 }

@@ -284,12 +284,16 @@ class ReEncryptionService {
             console.log(`[ReEncryptionService] Copy ID: ${copyId}, Processing time: ${accessLogEntry.processingTimeMs}ms`);
 
             // Step 11: Return encrypted document to client
+            // Determine mimeType from sourceInfo.format or filename extension
+            const mimeType = this.getMimeType(document);
+
             return {
                 success: true,
                 documentDID,
                 copyId,
                 copyHash,
                 filename: document.iagonStorage.filename || 'document',
+                mimeType,
                 classificationLevel: document.classificationLevel,
                 ciphertext: ephemeralCiphertext.ciphertext,
                 nonce: ephemeralCiphertext.nonce,
@@ -477,6 +481,61 @@ class ReEncryptionService {
             4: 'TOP_SECRET'
         };
         return labels[level] || 'UNKNOWN';
+    }
+
+    /**
+     * Determine MIME type from document metadata
+     * Priority: sourceInfo.format > metadata.sourceFormat > filename extension > default
+     */
+    static getMimeType(document) {
+        const mimeTypes = {
+            'pdf': 'application/pdf',
+            'html': 'text/html',
+            'htm': 'text/html',
+            'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'doc': 'application/msword',
+            'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'xls': 'application/vnd.ms-excel',
+            'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'ppt': 'application/vnd.ms-powerpoint',
+            'txt': 'text/plain',
+            'json': 'application/json',
+            'xml': 'application/xml',
+            'png': 'image/png',
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'gif': 'image/gif'
+        };
+
+        // Try sourceInfo.format first (for registerClassifiedDocument flow)
+        if (document.sourceInfo && document.sourceInfo.format) {
+            const format = document.sourceInfo.format.toLowerCase();
+            if (mimeTypes[format]) {
+                console.log(`[getMimeType] Found sourceInfo.format: ${format} -> ${mimeTypes[format]}`);
+                return mimeTypes[format];
+            }
+        }
+
+        // Try metadata.sourceFormat (for registerDocument/classified upload flow)
+        if (document.metadata && document.metadata.sourceFormat) {
+            const format = document.metadata.sourceFormat.toLowerCase();
+            if (mimeTypes[format]) {
+                console.log(`[getMimeType] Found metadata.sourceFormat: ${format} -> ${mimeTypes[format]}`);
+                return mimeTypes[format];
+            }
+        }
+
+        // Try filename extension from metadata or iagonStorage
+        const filename = document.metadata?.originalFilename || document.iagonStorage?.filename || '';
+        const ext = filename.split('.').pop()?.toLowerCase();
+        if (ext && mimeTypes[ext]) {
+            console.log(`[getMimeType] Found filename extension: ${ext} -> ${mimeTypes[ext]}`);
+            return mimeTypes[ext];
+        }
+
+        // Default to octet-stream for unknown types
+        console.log(`[getMimeType] No format found, defaulting to application/octet-stream`);
+        return 'application/octet-stream';
     }
 
     /**

@@ -26,6 +26,46 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ DOCX Whitespace Preservation & Filename Fix (Dec 13, 2025)
+
+**STATUS**: ✅ **PRODUCTION READY** - DOCX documents now preserve proper spacing and use original filenames
+
+Fixed critical bug where downloaded DOCX documents had missing spaces between words (e.g., "Thisis" instead of "This is"). Also fixed filename handling to use the original uploaded filename instead of DOCX internal metadata.
+
+**Root Cause**: The `DocxRedactionService` was using `xml2js` to parse and re-serialize the entire document XML. During serialization, xml2js normalizes whitespace, collapsing spaces between text runs and losing the original formatting.
+
+**Solution**: Complete rewrite of `DocxRedactionService.js` to use **string manipulation** instead of xml2js serialization:
+- Use xml2js **only** to find which paragraphs need redaction (via style analysis)
+- Use **regex** on the **original XML string** to replace only redacted paragraphs
+- Non-redacted content remains **completely untouched**, preserving all whitespace
+
+**Key Fixes**:
+```javascript
+// DocxRedactionService.js - String manipulation approach
+static redactParagraphsByStyle(xml, styleId, clearance) {
+  const paragraphRegex = new RegExp(`(<w:p[^>]*>)(.*?)(<\\/w:p>)`, 'gs');
+  return xml.replace(paragraphRegex, (match, openTag, content, closeTag) => {
+    if (stylePattern.test(content)) {
+      return this.createRedactedParagraphXml(styleId, clearance);
+    }
+    return match; // Keep original - preserves whitespace perfectly
+  });
+}
+
+// server.js - Always use original filename
+const filenameWithoutExt = file.originalname.replace(/\.(docx|html?)$/i, '');
+parsedDocument.metadata.title = filenameWithoutExt;
+```
+
+**Files Modified**:
+- `/root/company-admin-portal/lib/DocxRedactionService.js` - Complete rewrite with string manipulation
+- `/root/company-admin-portal/lib/DocxClearanceParser.js` - Fixed spacing in text extraction methods
+- `/root/company-admin-portal/server.js` - Filename handling, removed unused title parameter
+
+**Verification**: Uploaded "classified-document-test-4.docx" now displays as "classified-document-test-4" with all text properly spaced.
+
+---
+
 ### ✅ PDF.js Secure Viewer with CORS Session Support (Dec 12, 2025)
 
 **STATUS**: ✅ **PRODUCTION READY** - Documents display in secure modal with download prevention
@@ -759,8 +799,8 @@ This documentation has been reorganized to improve maintainability and AI perfor
 
 ---
 
-**Document Version**: 6.4 (Dec 12, 2025 - PDF.js Secure Viewer)
-**Last Updated**: 2025-12-12
+**Document Version**: 6.5 (Dec 13, 2025 - DOCX Whitespace Fix)
+**Last Updated**: 2025-12-13
 **Status**: Production-Ready - Streamlined for AI Performance
 **File Size**: ~590 lines (with detailed feature docs in subdocuments)
 **Maintained By**: Hyperledger Identus SSI Infrastructure Team
