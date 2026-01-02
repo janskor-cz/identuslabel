@@ -26,6 +26,133 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ Security Clearance Credential Display Name Fix (Jan 2, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Security Clearance credentials now display holder name and clearance level correctly
+
+Fixed credential display in proof request dropdowns and OOB modals where Security Clearance VCs showed DID instead of holder name.
+
+**Problem**: Security Clearance showed `did:prism:be299...32AGmzWjmq (Clearance) [Exp: 1yr]` instead of `Alice Copper (CONFIDENTIAL) [Exp: 1yr]`
+
+**Root Cause**: `credentialNaming.ts` accessed `credential.credentialSubject` directly, but SDK credentials store claims in a `properties` Map that requires special extraction via `getCredentialSubject()` helper.
+
+**Fix Applied**:
+```typescript
+// credentialNaming.ts - Now uses getCredentialSubject helper
+import { getCredentialSubject } from './credentialTypeDetector';
+
+const subject = getCredentialSubject(credential);  // Handles SDK Map format
+if (subject) {
+  // Existing holderName and clearanceLevel checks now work correctly
+}
+```
+
+**File Modified**:
+- `alice-wallet/src/utils/credentialNaming.ts` - Added import and use of `getCredentialSubject` helper
+
+**Result**: Security Clearance credentials now correctly display `Alice Copper (CONFIDENTIAL) [Exp: 1yr]`
+
+---
+
+### ✅ PRISM DID Binding Disabled for Credential Issuance (Dec 15, 2025)
+
+**STATUS**: ⚠️ **WORKAROUND ACTIVE** - Custom PRISM DID binding temporarily disabled
+
+Cloud Agent v2.1.0 cannot validate long-form PRISM DIDs in JWT credential requests. All credential issuance attempts with custom holder DIDs failed with `InvalidDid` error.
+
+**Root Cause**: When wallet passed a custom PRISM DID to the SDK for credential requests, the resulting JWT contained:
+```json
+{
+  "header": {
+    "alg": "ES256K",
+    "kid": "did:prism:be299c1387e9da53...#authentication-0"  // Long-form PRISM DID
+  }
+}
+```
+Cloud Agent failed to parse/resolve this long-form DID and returned:
+```
+CredentialRequestValidationFailed(JWT presentation verification failed: InvalidDid(invalidDid))
+```
+
+**Workaround Applied**: Disabled PRISM DID binding feature - SDK now creates internal DIDs for each credential request (original working behavior).
+
+**File Modified**:
+- `alice-wallet/src/actions/index.ts` - Removed `subjectDID` parameter from `prepareRequestCredentialWithIssuer()` call
+
+**Credential Issuance Flow** (current):
+```
+Cloud Agent (Issuer)                    Edge Wallet (Holder)
+        │                                       │
+        │  1. OfferCredential                   │
+        │  ────────────────────────►            │
+        │                                       │  2. SDK creates internal PRISM DID
+        │                                       │     (masterSk + authSk stored in Pluto)
+        │  3. RequestCredential                 │
+        │  ◄────────────────────────            │
+        │     JWT signed by authSk              │
+        │                                       │
+        │  4. IssueCredential                   │
+        │  ────────────────────────►            │
+        │     VC with SDK's DID in subject.id  │
+```
+
+**Impact**:
+- ✅ Credential issuance now works
+- ⚠️ Holder DID in credentials is SDK-generated (not CA-connection PRISM DID)
+- 📋 TODO: Re-enable when Cloud Agent supports long-form PRISM DID validation
+
+**Related**: Security Clearance VCs store custom Ed25519/X25519 keys as **claim data fields** (not as holder DID), which is why they work with custom keys.
+
+---
+
+### ✅ PRISM DID Duplicate Prevention & CA Connection Fix (Dec 14, 2025)
+
+**STATUS**: ✅ **PRODUCTION READY** - Single PRISM DID created per CA connection
+
+Fixed critical bugs where:
+1. PRISM DID was not created for existing CA connections (early return bug)
+2. Multiple duplicate PRISM DIDs were created (3 instead of 1)
+3. "Copy DID" button showed nothing instead of PRISM DID
+
+**Root Causes**:
+1. **Early Return Bug**: `CAConnectionEnforcementModal.tsx` returned early for existing CA connections without checking/creating PRISM DID
+2. **Duplicate Creation**: No check for existing CA PRISM DID before creating new one (clicking Connect multiple times created duplicates)
+3. **Pluto Storage Bug**: SDK's `storeDID()` with 3 private keys creates 3 database entries; `getAllPrismDIDs()` returns all 3 as duplicates
+
+**Solutions**:
+```javascript
+// 1. localStorage guard prevents duplicate creation
+const existingCAPrismDID = getItem('ca-connection-prism-did');
+if (existingCAPrismDID) {
+    console.log('[CA MODAL] Reusing existing PRISM DID');
+    return existingCAPrismDID; // Don't create new one
+}
+// After creation, store immediately:
+setItem('ca-connection-prism-did', newPrismDID);
+
+// 2. Deduplication in refreshPrismDIDs action
+const seenDIDs = new Set<string>();
+const prismDIDs = allPrismDIDs.filter(item => {
+    if (seenDIDs.has(item.did)) return false;
+    seenDIDs.add(item.did);
+    return true;
+});
+```
+
+**Files Modified**:
+- `alice-wallet/src/components/CAConnectionEnforcementModal.tsx` - Added PRISM DID check for existing connections, localStorage guard
+- `alice-wallet/src/components/PageHeader.tsx` - Updated "Copy DID" to show PRISM DID from connection metadata
+- `alice-wallet/src/actions/index.ts` - Added deduplication to `refreshPrismDIDs` action
+
+**Console Output** (after fix):
+```
+[CA MODAL] Creating PRISM DID with alias: Alice Cooper
+[PRISM DID] Removed 2 duplicate entries
+[PRISM DID] Refreshed list, count: 1 with aliases: 1
+```
+
+---
+
 ### ✅ DOCX Whitespace Preservation & Filename Fix (Dec 13, 2025)
 
 **STATUS**: ✅ **PRODUCTION READY** - DOCX documents now preserve proper spacing and use original filenames
@@ -686,6 +813,7 @@ ServiceConfiguration VCs enable enterprise mode with Cloud Agent integration for
 | Issue | Impact | Status | Workaround |
 |-------|--------|--------|------------|
 | Browser cache persistence | Updates not appearing | 🔴 High | Hard refresh (Ctrl+Shift+R) |
+| Cloud Agent long-form PRISM DID validation | Custom holder DID rejected in credential requests | 🟡 Medium | **Workaround active** - SDK creates internal DIDs |
 | WebAssembly memory accumulation | Periodic refresh needed | 🟡 Low | Refresh when wallet slows |
 | SDK deployment requirement | SDK changes need manual copy | 🟡 Low | Copy build to `node_modules` after SDK changes |
 | StatusList revocation delay | Revoked credentials appear valid for 30min-hours | 🟡 Low | **By design** - eventual consistency model |
@@ -799,8 +927,8 @@ This documentation has been reorganized to improve maintainability and AI perfor
 
 ---
 
-**Document Version**: 6.5 (Dec 13, 2025 - DOCX Whitespace Fix)
-**Last Updated**: 2025-12-13
+**Document Version**: 6.8 (Jan 2, 2026 - Security Clearance Display Name Fix)
+**Last Updated**: 2026-01-02
 **Status**: Production-Ready - Streamlined for AI Performance
-**File Size**: ~590 lines (with detailed feature docs in subdocuments)
+**File Size**: ~700 lines (with detailed feature docs in subdocuments)
 **Maintained By**: Hyperledger Identus SSI Infrastructure Team
