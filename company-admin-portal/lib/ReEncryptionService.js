@@ -459,26 +459,28 @@ class ReEncryptionService {
 
     /**
      * Get classification level number from label
+     * Standardized to CA Portal naming convention
      */
     static getLevelNumber(label) {
         const levels = {
-            'UNCLASSIFIED': 1,
+            'INTERNAL': 1,
             'CONFIDENTIAL': 2,
-            'SECRET': 3,
-            'TOP_SECRET': 4
+            'RESTRICTED': 3,
+            'TOP-SECRET': 4
         };
         return levels[label] || 1;
     }
 
     /**
      * Get classification level label from number
+     * Standardized to CA Portal naming convention
      */
     static getLevelLabel(level) {
         const labels = {
-            1: 'UNCLASSIFIED',
+            1: 'INTERNAL',
             2: 'CONFIDENTIAL',
-            3: 'SECRET',
-            4: 'TOP_SECRET'
+            3: 'RESTRICTED',
+            4: 'TOP-SECRET'
         };
         return labels[level] || 'UNKNOWN';
     }

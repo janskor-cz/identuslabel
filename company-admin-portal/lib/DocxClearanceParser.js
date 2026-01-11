@@ -7,10 +7,10 @@
  * METHOD 1: PARAGRAPH STYLES (Recommended - User-Friendly)
  * =========================================================
  * Users apply predefined paragraph styles from Word's style dropdown:
- * - "Unclassified" or "Public" → UNCLASSIFIED
+ * - "Internal" or "Public" → INTERNAL
  * - "Confidential" → CONFIDENTIAL
- * - "Secret" → SECRET
- * - "TopSecret" or "Top_Secret" → TOP_SECRET
+ * - "Restricted" → RESTRICTED
+ * - "TopSecret" or "Top-Secret" → TOP-SECRET
  *
  * Simply: Select text → Apply style from dropdown. Done!
  *
@@ -41,29 +41,37 @@ const WORD_NS = {
 // Style name to clearance level mapping (case-insensitive)
 // Users apply these styles from Word's style dropdown
 const STYLE_CLEARANCE_MAP = {
-  // Unclassified styles
-  'unclassified': 'UNCLASSIFIED',
-  'public': 'UNCLASSIFIED',
-  'clearance_unclassified': 'UNCLASSIFIED',
-  'clearanceunclassified': 'UNCLASSIFIED',
+  // Internal styles (level 1)
+  'internal': 'INTERNAL',
+  'public': 'INTERNAL',
+  'clearance_internal': 'INTERNAL',
+  'clearanceinternal': 'INTERNAL',
+  // Legacy: map old names for backward compatibility
+  'unclassified': 'INTERNAL',
+  'clearance_unclassified': 'INTERNAL',
+  'clearanceunclassified': 'INTERNAL',
 
-  // Confidential styles
+  // Confidential styles (level 2)
   'confidential': 'CONFIDENTIAL',
   'clearance_confidential': 'CONFIDENTIAL',
   'clearanceconfidential': 'CONFIDENTIAL',
 
-  // Secret styles
-  'secret': 'SECRET',
-  'clearance_secret': 'SECRET',
-  'clearancesecret': 'SECRET',
+  // Restricted styles (level 3)
+  'restricted': 'RESTRICTED',
+  'clearance_restricted': 'RESTRICTED',
+  'clearancerestricted': 'RESTRICTED',
+  // Legacy: map old SECRET to RESTRICTED
+  'secret': 'RESTRICTED',
+  'clearance_secret': 'RESTRICTED',
+  'clearancesecret': 'RESTRICTED',
 
-  // Top Secret styles
-  'topsecret': 'TOP_SECRET',
-  'top_secret': 'TOP_SECRET',
-  'top-secret': 'TOP_SECRET',
-  'clearance_topsecret': 'TOP_SECRET',
-  'clearance_top_secret': 'TOP_SECRET',
-  'clearancetopsecret': 'TOP_SECRET'
+  // Top Secret styles (level 4)
+  'topsecret': 'TOP-SECRET',
+  'top_secret': 'TOP-SECRET',
+  'top-secret': 'TOP-SECRET',
+  'clearance_topsecret': 'TOP-SECRET',
+  'clearance_top_secret': 'TOP-SECRET',
+  'clearancetopsecret': 'TOP-SECRET'
 };
 
 /**
@@ -183,12 +191,12 @@ async function parseDocxClearanceSections(docxBuffer) {
     }
   }
 
-  // Extract unmarked content (treated as UNCLASSIFIED)
+  // Extract unmarked content (treated as INTERNAL)
   const unclassifiedContent = await extractUnmarkedContent(doc, sections);
   if (unclassifiedContent && unclassifiedContent.textLength > 0) {
     sections.unshift({
       sectionId: 'sec-000',
-      clearance: 'UNCLASSIFIED',
+      clearance: 'INTERNAL',
       clearanceLevel: 1,
       tagName: 'div',
       isInline: false,
@@ -739,12 +747,12 @@ async function extractUnmarkedContent(doc, sections) {
  */
 function determineOverallClassification(sections) {
   if (sections.length === 0) {
-    return 'UNCLASSIFIED';
+    return 'INTERNAL';
   }
 
   // Find the LOWEST clearance level (least restrictive)
   // This determines who can access the document (with redactions for higher sections)
-  let lowestLevel = 4; // Start with TOP_SECRET
+  let lowestLevel = 4; // Start with TOP-SECRET
   for (const section of sections) {
     if (section.clearanceLevel < lowestLevel) {
       lowestLevel = section.clearanceLevel;
@@ -761,10 +769,10 @@ function determineOverallClassification(sections) {
  */
 function calculateClearanceStats(sections) {
   const stats = {
-    UNCLASSIFIED: 0,
-    CONFIDENTIAL: 0,
-    SECRET: 0,
-    TOP_SECRET: 0
+    'INTERNAL': 0,
+    'CONFIDENTIAL': 0,
+    'RESTRICTED': 0,
+    'TOP-SECRET': 0
   };
 
   for (const section of sections) {
@@ -813,7 +821,7 @@ async function validateDocx(docxBuffer) {
     const result = await parseDocxClearanceSections(docxBuffer);
 
     if (result.sections.length === 0) {
-      warnings.push('No Content Controls with clearance tags found. Document will be treated as UNCLASSIFIED.');
+      warnings.push('No Content Controls with clearance tags found. Document will be treated as INTERNAL.');
     }
 
     // Check for sections without proper tags

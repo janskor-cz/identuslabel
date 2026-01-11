@@ -93,6 +93,46 @@ const SOFT_DELETED_FILE = path.join(__dirname, 'data', 'soft-deleted-connections
 // Employee connection mappings storage
 const EMPLOYEE_MAPPINGS_FILE = path.join(__dirname, 'data', 'employee-connection-mappings.json');
 
+// ============================================================================
+// URL Shortener (for QR code compatibility with long DIDComm invitation URLs)
+// ============================================================================
+const shortUrlMap = new Map(); // In-memory storage: shortId → fullUrl
+const SHORT_URL_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Generate a random short ID
+ * @param {number} length - Length of the ID (default: 8)
+ * @returns {string} Random alphanumeric ID
+ */
+function generateShortId(length = 8) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'; // No confusing chars (0,O,1,l,I)
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+/**
+ * Clean up expired short URLs (runs periodically)
+ */
+function cleanupExpiredUrls() {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [shortId, data] of shortUrlMap.entries()) {
+    if (now - data.createdAt > SHORT_URL_EXPIRY_MS) {
+      shortUrlMap.delete(shortId);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    console.log(`[URL Shortener] Cleaned up ${cleaned} expired URLs`);
+  }
+}
+
+// Run cleanup every hour
+setInterval(cleanupExpiredUrls, 60 * 60 * 1000);
+
 /**
  * Load employee-connection mappings from persistent storage
  * @returns {Map} Employee-connection mappings (identifier → connectionId)
@@ -372,6 +412,95 @@ app.get('/api/health', (req, res) => {
     cloudAgent: MULTITENANCY_CLOUD_AGENT_URL,
     uptime: process.uptime()
   });
+});
+
+// ============================================================================
+// URL Shortener Routes (for QR code compatibility)
+// ============================================================================
+
+/**
+ * POST /api/shorten - Create a short URL
+ * Used to make long DIDComm invitation URLs scannable as QR codes
+ */
+app.post('/api/shorten', (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({
+      success: false,
+      error: 'URL is required'
+    });
+  }
+
+  // Generate unique short ID
+  let shortId;
+  do {
+    shortId = generateShortId();
+  } while (shortUrlMap.has(shortId));
+
+  // Store the mapping
+  shortUrlMap.set(shortId, {
+    url: url,
+    createdAt: Date.now()
+  });
+
+  // Build the short URL using the request's host
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  const basePath = req.baseUrl || '/company-admin';
+  const shortUrl = `${protocol}://${host}${basePath}/s/${shortId}`;
+
+  console.log(`[URL Shortener] Created: ${shortId} -> ${url.substring(0, 50)}... (${url.length} chars)`);
+
+  res.json({
+    success: true,
+    shortUrl: shortUrl,
+    shortId: shortId,
+    expiresIn: '24 hours'
+  });
+});
+
+/**
+ * GET /s/:shortId - Redirect to the full URL
+ */
+app.get('/s/:shortId', (req, res) => {
+  const { shortId } = req.params;
+  const data = shortUrlMap.get(shortId);
+
+  if (!data) {
+    console.log(`[URL Shortener] Not found: ${shortId}`);
+    return res.status(404).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Link Expired</title></head>
+      <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+        <h1>Link Not Found or Expired</h1>
+        <p>This invitation link has expired or does not exist.</p>
+        <p>Please request a new invitation from your administrator.</p>
+      </body>
+      </html>
+    `);
+  }
+
+  // Check if expired
+  if (Date.now() - data.createdAt > SHORT_URL_EXPIRY_MS) {
+    shortUrlMap.delete(shortId);
+    console.log(`[URL Shortener] Expired: ${shortId}`);
+    return res.status(410).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Link Expired</title></head>
+      <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+        <h1>Invitation Link Expired</h1>
+        <p>This invitation link has expired (24 hour limit).</p>
+        <p>Please request a new invitation from your administrator.</p>
+      </body>
+      </html>
+    `);
+  }
+
+  console.log(`[URL Shortener] Redirect: ${shortId}`);
+  res.redirect(302, data.url);
 });
 
 /**
@@ -2547,7 +2676,7 @@ app.get('/api/employee-portal/training/status/:recordId', requireEmployeeSession
  * Request Body:
  * - title: Document title (required)
  * - description: Document description (required)
- * - classificationLevel: UNCLASSIFIED | CONFIDENTIAL | SECRET | TOP_SECRET (required)
+ * - classificationLevel: INTERNAL | CONFIDENTIAL | RESTRICTED | TOP-SECRET (required)
  * - releasableTo: Array of company names (required) - only TechCorp and ACME allowed
  *
  * Returns: Document DID and registration confirmation
@@ -2574,7 +2703,7 @@ app.post('/api/employee-portal/documents/create', requireEmployeeSession, async 
     }
 
     // Validate classification level
-    const validClassifications = ['UNCLASSIFIED', 'CONFIDENTIAL', 'SECRET', 'TOP_SECRET'];
+    const validClassifications = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
     if (!validClassifications.includes(classificationLevel)) {
       return res.status(400).json({
         success: false,
@@ -2712,7 +2841,7 @@ app.post('/api/employee-portal/documents/create', requireEmployeeSession, async 
  * - title: Document title (required)
  * - description: Document description (required)
  * - documentType: Report | Contract | Policy | Procedure | Memo | Certificate | Other (required)
- * - classificationLevel: UNCLASSIFIED | CONFIDENTIAL | SECRET | TOP_SECRET (required)
+ * - classificationLevel: INTERNAL | CONFIDENTIAL | RESTRICTED | TOP-SECRET (required)
  * - releasableTo: JSON array of company names (required)
  *
  * Returns: Document DID, Iagon storage metadata, VC record ID, and registration confirmation
@@ -2771,7 +2900,7 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
     }
 
     // Validate classification level
-    const validClassifications = ['UNCLASSIFIED', 'CONFIDENTIAL', 'SECRET', 'TOP_SECRET'];
+    const validClassifications = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
     if (!validClassifications.includes(classificationLevel)) {
       return res.status(400).json({
         success: false,
@@ -3058,7 +3187,7 @@ app.get('/api/employee-portal/documents/:documentDID/download', requireEmployeeS
   console.log('📥 [DocumentDownload] Download request');
   console.log(`   Employee: ${session.email}`);
   console.log(`   Document DID: ${documentDID.substring(0, 60)}...`);
-  console.log(`   Clearance: ${session.clearanceLevel || 'NONE (UNCLASSIFIED only)'}`);
+  console.log(`   Clearance: ${session.clearanceLevel || 'NONE (INTERNAL only)'}`);
 
   try {
     // Get the employee's company issuerDID
@@ -3099,10 +3228,10 @@ app.get('/api/employee-portal/documents/:documentDID/download', requireEmployeeS
 
     // Check clearance level
     const clearanceLevels = {
-      'UNCLASSIFIED': 1,
+      'INTERNAL': 1,
       'CONFIDENTIAL': 2,
-      'SECRET': 3,
-      'TOP_SECRET': 4
+      'RESTRICTED': 3,
+      'TOP-SECRET': 4
     };
 
     const documentLevel = clearanceLevels[document.classificationLevel] || 1;
@@ -3113,7 +3242,7 @@ app.get('/api/employee-portal/documents/:documentDID/download', requireEmployeeS
       return res.status(403).json({
         success: false,
         error: 'InsufficientClearance',
-        message: `This document requires ${document.classificationLevel} clearance. You have ${session.clearanceLevel || 'no clearance (UNCLASSIFIED only)'}.`
+        message: `This document requires ${document.classificationLevel} clearance. You have ${session.clearanceLevel || 'no clearance (INTERNAL only)'}.`
       });
     }
 
@@ -3223,12 +3352,17 @@ app.get('/api/documents/discover', async (req, res) => {
     }
 
     // Extract clearance level from employee session (if authenticated)
-    // If no session or no clearance, defaults to null (UNCLASSIFIED access only)
-    const session = employeeSessions.get(req.query.sessionId) || employeeSessions.get(req.headers['x-session-id']);
+    // If no session or no clearance, defaults to null (INTERNAL access only)
+    const sessionIdFromQuery = req.query.sessionId;
+    const sessionIdFromHeader = req.headers['x-session-id'];
+    console.log(`[DocumentRegistry] Session lookup - query: ${sessionIdFromQuery?.substring(0,20)}..., header: ${sessionIdFromHeader?.substring(0,20)}...`);
+    console.log(`[DocumentRegistry] Active sessions: ${employeeSessions.size}`);
+
+    const session = employeeSessions.get(sessionIdFromQuery) || employeeSessions.get(sessionIdFromHeader);
     const clearanceLevel = session?.clearanceLevel || null;
 
     console.log(`[DocumentRegistry] Document discovery request for issuerDID: ${issuerDID}`);
-    console.log(`[DocumentRegistry] Employee clearance level: ${clearanceLevel || 'NONE (UNCLASSIFIED only)'}`);
+    console.log(`[DocumentRegistry] Session found: ${!!session}, clearanceLevel: ${clearanceLevel || 'NONE (INTERNAL only)'}`);
 
     // Query document registry by issuer DID with clearance-based filtering
     const documents = await DocumentRegistry.queryByIssuerDID(issuerDID, clearanceLevel);
@@ -3240,7 +3374,7 @@ app.get('/api/documents/discover', async (req, res) => {
       documents,
       count: documents.length,
       issuerDID,
-      clearanceLevel: clearanceLevel || 'UNCLASSIFIED'
+      clearanceLevel: clearanceLevel || 'INTERNAL'
     });
 
   } catch (error) {
@@ -3260,7 +3394,7 @@ app.get('/api/documents/discover', async (req, res) => {
  * Body:
  * - documentDID: PRISM DID for the document
  * - title: Document title (will be encrypted)
- * - classificationLevel: UNCLASSIFIED|CONFIDENTIAL|SECRET|TOP_SECRET
+ * - classificationLevel: INTERNAL|CONFIDENTIAL|RESTRICTED|TOP-SECRET
  * - releasableTo: Array of company DIDs
  * - contentEncryptionKey: Encrypted content key
  * - metadata: Additional metadata
@@ -3397,8 +3531,8 @@ app.get('/api/ephemeral-documents', async (req, res) => {
  * - file: The document file
  * - title: Document title
  * - description: Document description (optional)
- * - classificationLevel: 1-4 (UNCLASSIFIED to TOP_SECRET)
- * - classificationLabel: UNCLASSIFIED|CONFIDENTIAL|SECRET|TOP_SECRET
+ * - classificationLevel: 1-4 (INTERNAL to TOP-SECRET)
+ * - classificationLabel: INTERNAL|CONFIDENTIAL|RESTRICTED|TOP-SECRET
  * - releasableTo: JSON array of issuer DIDs allowed access
  * - creatorDID: PRISM DID of the document creator
  * - creatorClearanceLevel: Creator's clearance level
@@ -3560,8 +3694,8 @@ app.post('/api/ephemeral-documents/access', async (req, res) => {
     }
 
     // Use clearance from session (set during VP verification at login)
-    // Default to UNCLASSIFIED if no clearance verification done yet
-    const sessionClearanceLabel = session.clearanceLevel || 'UNCLASSIFIED';
+    // Default to INTERNAL if no clearance verification done yet
+    const sessionClearanceLabel = session.clearanceLevel || 'INTERNAL';
     const clearanceLevelNumeric = ReEncryptionService.getLevelNumber(sessionClearanceLabel);
 
     // Validate required fields (clearanceLevel removed - comes from session)
@@ -3902,7 +4036,7 @@ app.get('/api/documents/download-by-did/:documentDID', async (req, res) => {
           keyId: encryptionInfo.keyId
         });
       } else {
-        console.log('[DocumentDownload] No encryption info found in registry (UNCLASSIFIED document or legacy)');
+        console.log('[DocumentDownload] No encryption info found in registry (INTERNAL document or legacy)');
       }
 
       // Use the extracted fileId for Iagon download
@@ -4403,7 +4537,7 @@ app.post('/api/employee-portal/clearance/submit', requireEmployeeSession, async 
     }
 
     // Validate clearance level
-    const validLevels = ['UNCLASSIFIED', 'CONFIDENTIAL', 'SECRET', 'TOP_SECRET'];
+    const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
     if (!validLevels.includes(clearanceLevel)) {
       return res.status(400).json({
         success: false,
@@ -4479,7 +4613,7 @@ const PROTECTED_RESOURCES = {
     id: 'financial-reports',
     name: 'Financial Reports Q4',
     description: 'Quarterly financial analysis',
-    requiredClearance: 'SECRET',
+    requiredClearance: 'RESTRICTED',
     requiredRole: null // Any role allowed
   },
   'employee-records': {
@@ -4493,17 +4627,17 @@ const PROTECTED_RESOURCES = {
     id: 'infrastructure-plans',
     name: 'Infrastructure Architecture',
     description: 'IT infrastructure documentation',
-    requiredClearance: 'TOP_SECRET',
+    requiredClearance: 'TOP-SECRET',
     requiredRole: 'IT'
   }
 };
 
 // Clearance level hierarchy for comparison
 const CLEARANCE_HIERARCHY = {
-  'UNCLASSIFIED': 0,
-  'CONFIDENTIAL': 1,
-  'SECRET': 2,
-  'TOP_SECRET': 3
+  'INTERNAL': 1,
+  'CONFIDENTIAL': 2,
+  'RESTRICTED': 3,
+  'TOP-SECRET': 4
 };
 
 /**
@@ -5250,10 +5384,10 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
     // Log section statistics
     const stats = parsedDocument.metadata.clearanceLevelStats;
     console.log('   Section breakdown:');
-    console.log(`     UNCLASSIFIED: ${stats.UNCLASSIFIED}`);
-    console.log(`     CONFIDENTIAL: ${stats.CONFIDENTIAL}`);
-    console.log(`     SECRET: ${stats.SECRET}`);
-    console.log(`     TOP_SECRET: ${stats.TOP_SECRET}`);
+    console.log(`     INTERNAL: ${stats['INTERNAL'] || 0}`);
+    console.log(`     CONFIDENTIAL: ${stats['CONFIDENTIAL'] || 0}`);
+    console.log(`     RESTRICTED: ${stats['RESTRICTED'] || 0}`);
+    console.log(`     TOP-SECRET: ${stats['TOP-SECRET'] || 0}`);
     console.log(`   Overall classification: ${parsedDocument.metadata.overallClassification}`);
 
     // Encrypt sections
@@ -5328,7 +5462,7 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
       documentDID,
       title: parsedDocument.metadata.title,
       classificationLevel: parsedDocument.metadata.overallClassification, // DocumentRegistry requires this field name
-      contentEncryptionKey: encryptedPackage.keyring?.UNCLASSIFIED || 'classified-section-keys', // Required by registry
+      contentEncryptionKey: encryptedPackage.keyring?.INTERNAL || 'classified-section-keys', // Required by registry
       releasableTo: releasableDIDs,
       metadata: {
         sectionCount: encryptedPackage.encryptedSections.length,
@@ -5405,7 +5539,7 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
   console.log('\n' + '='.repeat(80));
   console.log('[ClassifiedDownload] Document download request');
   console.log('   Employee:', session.email);
-  console.log('   Clearance:', session.clearanceLevel || 'UNCLASSIFIED');
+  console.log('   Clearance:', session.clearanceLevel || 'INTERNAL');
   console.log('='.repeat(80));
 
   try {
@@ -5420,7 +5554,7 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
     }
 
     // Get user clearance from session
-    const userClearance = session.clearanceLevel || 'UNCLASSIFIED';
+    const userClearance = session.clearanceLevel || 'INTERNAL';
     const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] || 1;
     const employeeIssuerDID = session.issuerDID;
 
@@ -5780,12 +5914,12 @@ app.post('/api/employee-portal/documents/prepare-download/:documentDID', require
   console.log('[PrepareDownload] SSI-compliant document delivery - Step 1');
   console.log('   Employee:', session.email);
   console.log('   Document DID:', documentDID);
-  console.log('   Clearance:', session.clearanceLevel || 'UNCLASSIFIED');
+  console.log('   Clearance:', session.clearanceLevel || 'INTERNAL');
   console.log('='.repeat(80));
 
   try {
     // Get user clearance from session
-    const userClearance = session.clearanceLevel || 'UNCLASSIFIED';
+    const userClearance = session.clearanceLevel || 'INTERNAL';
     const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] || 1;
     const employeeIssuerDID = session.issuerDID;
 
@@ -6218,7 +6352,7 @@ app.post('/api/employee-portal/documents/download-to-wallet/:documentDID', requi
   console.log('[DownloadToWallet] SSI-compliant document delivery');
   console.log('   Employee:', session.email);
   console.log('   Document DID:', documentDID);
-  console.log('   Clearance:', session.clearanceLevel || 'UNCLASSIFIED');
+  console.log('   Clearance:', session.clearanceLevel || 'INTERNAL');
   console.log('='.repeat(80));
 
   try {
@@ -6233,7 +6367,7 @@ app.post('/api/employee-portal/documents/download-to-wallet/:documentDID', requi
     }
 
     // Get user clearance from session
-    const userClearance = session.clearanceLevel || 'UNCLASSIFIED';
+    const userClearance = session.clearanceLevel || 'INTERNAL';
     const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] || 1;
     const employeeIssuerDID = session.issuerDID;
 
@@ -6524,10 +6658,10 @@ app.get('/api/classified-documents/templates', (req, res) => {
       }
     ],
     clearanceLevels: [
-      { level: 1, name: 'UNCLASSIFIED', description: 'Public information' },
+      { level: 1, name: 'INTERNAL', description: 'Basic organizational access' },
       { level: 2, name: 'CONFIDENTIAL', description: 'Sensitive business information' },
-      { level: 3, name: 'SECRET', description: 'Highly restricted information' },
-      { level: 4, name: 'TOP_SECRET', description: 'Classified information (highest)' }
+      { level: 3, name: 'RESTRICTED', description: 'Highly sensitive strategic information' },
+      { level: 4, name: 'TOP-SECRET', description: 'Classified information (highest)' }
     ]
   });
 });
@@ -6632,7 +6766,7 @@ app.listen(PORT, async () => {
     await DocumentRegistry.initialize();
     const stats = DocumentRegistry.getStatistics();
     console.log(`   ✅ DocumentRegistry loaded (${stats.totalDocuments} documents)`);
-    console.log(`   📊 Classification breakdown: UNCLASSIFIED=${stats.byClassification.UNCLASSIFIED}, CONFIDENTIAL=${stats.byClassification.CONFIDENTIAL}, SECRET=${stats.byClassification.SECRET}, TOP_SECRET=${stats.byClassification.TOP_SECRET}`);
+    console.log(`   📊 Classification breakdown: INTERNAL=${stats.byClassification['INTERNAL'] || 0}, CONFIDENTIAL=${stats.byClassification['CONFIDENTIAL'] || 0}, RESTRICTED=${stats.byClassification['RESTRICTED'] || 0}, TOP-SECRET=${stats.byClassification['TOP-SECRET'] || 0}`);
   } catch (error) {
     console.error(`   ❌ DocumentRegistry initialization failed:`, error.message);
   }

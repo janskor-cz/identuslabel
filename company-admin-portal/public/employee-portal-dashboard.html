@@ -169,6 +169,16 @@
             background: #48bb78;
         }
 
+        /* Wallet Selector */
+        .wallet-option.active {
+            background: #667eea !important;
+            color: white !important;
+        }
+
+        .wallet-option:hover {
+            background: #edf2f7;
+        }
+
         /* Training Status */
         .training-status {
             display: flex;
@@ -439,7 +449,7 @@
             letter-spacing: 0.5px;
         }
 
-        .classification-badge.UNCLASSIFIED {
+        .classification-badge.INTERNAL {
             background: #c6f6d5;
             color: #22543d;
         }
@@ -449,12 +459,12 @@
             color: #7c2d12;
         }
 
-        .classification-badge.SECRET {
+        .classification-badge.RESTRICTED {
             background: #fed7d7;
             color: #742a2a;
         }
 
-        .classification-badge.TOP_SECRET {
+        .classification-badge.TOP-SECRET {
             background: #e9d5ff;
             color: #4c1d95;
         }
@@ -851,10 +861,10 @@
                             style="width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; background: white;"
                         >
                             <option value="">Select classification level...</option>
-                            <option value="UNCLASSIFIED">UNCLASSIFIED (No clearance required)</option>
+                            <option value="INTERNAL">INTERNAL (Basic organizational access)</option>
                             <option value="CONFIDENTIAL">CONFIDENTIAL (Requires clearance)</option>
-                            <option value="SECRET">SECRET (Requires clearance)</option>
-                            <option value="TOP_SECRET">TOP SECRET (Requires clearance)</option>
+                            <option value="RESTRICTED">RESTRICTED (Requires clearance)</option>
+                            <option value="TOP-SECRET">TOP SECRET (Requires clearance)</option>
                         </select>
                     </div>
 
@@ -1032,16 +1042,16 @@
                                 <div style="font-weight: 600; color: #2d3748; margin-bottom: 10px;">Section Analysis</div>
                                 <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">
                                     <div style="text-align: center; padding: 10px; background: #c6f6d5; border-radius: 6px;">
-                                        <div style="font-size: 20px; font-weight: bold; color: #22543d;" id="unclassifiedCount">0</div>
-                                        <div style="font-size: 11px; color: #22543d;">UNCLASSIFIED</div>
+                                        <div style="font-size: 20px; font-weight: bold; color: #22543d;" id="internalCount">0</div>
+                                        <div style="font-size: 11px; color: #22543d;">INTERNAL</div>
                                     </div>
                                     <div style="text-align: center; padding: 10px; background: #feebc8; border-radius: 6px;">
                                         <div style="font-size: 20px; font-weight: bold; color: #7c2d12;" id="confidentialCount">0</div>
                                         <div style="font-size: 11px; color: #7c2d12;">CONFIDENTIAL</div>
                                     </div>
                                     <div style="text-align: center; padding: 10px; background: #fed7d7; border-radius: 6px;">
-                                        <div style="font-size: 20px; font-weight: bold; color: #742a2a;" id="secretCount">0</div>
-                                        <div style="font-size: 11px; color: #742a2a;">SECRET</div>
+                                        <div style="font-size: 20px; font-weight: bold; color: #742a2a;" id="restrictedCount">0</div>
+                                        <div style="font-size: 11px; color: #742a2a;">RESTRICTED</div>
                                     </div>
                                     <div style="text-align: center; padding: 10px; background: #e9d5ff; border-radius: 6px;">
                                         <div style="font-size: 20px; font-weight: bold; color: #4c1d95;" id="topSecretCount">0</div>
@@ -1050,7 +1060,7 @@
                                 </div>
                                 <div style="margin-top: 10px; padding: 8px 12px; background: #805ad5; color: white; border-radius: 6px; display: inline-flex; align-items: center; gap: 5px;">
                                     <span>Overall Classification:</span>
-                                    <strong id="overallClassification">UNCLASSIFIED</strong>
+                                    <strong id="overallClassification">INTERNAL</strong>
                                 </div>
                             </div>
                         </div>
@@ -1101,6 +1111,46 @@
             <div id="classifiedDocError" class="hidden" style="margin-top: 20px; padding: 15px; background: #fed7d7; border: 1px solid #fc8181; border-radius: 8px; color: #c53030;">
                 <strong>✗ Error:</strong>
                 <span id="classifiedErrorMessage">Failed to upload document.</span>
+            </div>
+        </div>
+
+        <!-- Wallet Settings Card -->
+        <div class="dashboard-card" style="margin-top: 20px; background: #f7fafc;">
+            <div class="card-header">
+                <div class="card-icon" style="background: linear-gradient(135deg, #718096 0%, #4a5568 100%);">&#9881;</div>
+                <h2 class="card-title">Wallet Settings</h2>
+            </div>
+
+            <div style="padding: 10px 0;">
+                <label style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">
+                    Select Wallet for Document Access
+                </label>
+
+                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 15px;">
+                    <button type="button" class="wallet-option" data-path="/wallet"
+                            onclick="setWalletPath('/wallet')"
+                            style="padding: 10px 20px; border: 2px solid #667eea; border-radius: 8px; background: white; cursor: pointer; font-size: 14px; transition: all 0.2s;">
+                        IDL Wallet (/wallet)
+                    </button>
+                    <button type="button" class="wallet-option" data-path="/alice"
+                            onclick="setWalletPath('/alice')"
+                            style="padding: 10px 20px; border: 2px solid #667eea; border-radius: 8px; background: white; cursor: pointer; font-size: 14px; transition: all 0.2s;">
+                        Alice Wallet (/alice)
+                    </button>
+                </div>
+
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <input type="text" id="customWalletPath" placeholder="/custom-wallet"
+                           style="flex: 1; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;">
+                    <button type="button" onclick="setWalletPath(document.getElementById('customWalletPath').value)"
+                            style="background: #667eea; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; font-size: 14px;">
+                        Use Custom
+                    </button>
+                </div>
+
+                <p style="margin-top: 10px; font-size: 12px; color: #718096;">
+                    Current: <strong id="currentWalletDisplay"></strong>
+                </p>
             </div>
         </div>
     </div>

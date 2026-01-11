@@ -26,6 +26,152 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ Security Clearance Level Standardization (Jan 7, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Unified security clearance naming across all systems
+
+Standardized security clearance level naming convention across CA Portal, Enterprise Server, and all wallet implementations.
+
+**Standard Levels**:
+| Level | Name | Numeric | Description |
+|-------|------|---------|-------------|
+| 1 | INTERNAL | 1 | Basic organizational access |
+| 2 | CONFIDENTIAL | 2 | Sensitive business information |
+| 3 | RESTRICTED | 3 | Highly sensitive strategic information |
+| 4 | TOP-SECRET | 4 | Classified information (highest) |
+
+**Previous Naming (Legacy)**:
+- `UNCLASSIFIED` → now `INTERNAL`
+- `SECRET` → now `RESTRICTED`
+- `TOP_SECRET` → now `TOP-SECRET` (hyphenated)
+
+**Backward Compatibility**: All systems include legacy mappings to support existing documents and credentials created with old naming.
+
+**Files Modified**:
+
+*Enterprise Server (`/root/company-admin-portal`)*:
+- `lib/ClearanceDocumentParser.js` - CLEARANCE_LEVELS constant
+- `lib/DocxRedactionService.js` - CLEARANCE_LEVELS, STYLE_CLEARANCE_MAP
+- `lib/ReEncryptionService.js` - getLevelNumber(), getLevelLabel()
+- `lib/DocumentRegistry.js` - clearanceLevels objects, meetsClassificationRequirement(), getStatistics()
+- `lib/DocxClearanceParser.js` - STYLE_CLEARANCE_MAP
+- `server.js` - ~20+ validation arrays and objects
+- `public/employee-portal-dashboard.html` - CSS classes, dropdown options
+- `public/js/employee-portal-dashboard.js` - color functions, level maps
+
+*IDL Wallet (`/root/idl-wallet`)*:
+- `src/utils/securityLevels.ts` - SecurityLevel enum
+- `src/pages/documents.tsx` - levelMap
+- `src/components/SecurityLevelSelector.tsx` - switch cases
+- `src/components/EncryptedMessageBadge.tsx` - badge colors
+- `src/components/Chat.tsx` - default levels
+- `src/actions/index.ts` - default levels
+- `src/utils/keyVCBinding.ts` - default values
+
+*Alice Wallet (`/root/clean-identus-wallet/.../alice-wallet`)*:
+- `src/utils/securityLevels.ts` - SecurityLevel enum (complete rewrite)
+- `src/actions/index.ts` - default levels, comments
+- `src/components/Chat.tsx` - default levels
+- `src/components/EncryptedMessageBadge.tsx` - switch cases
+- `src/components/SecurityLevelSelector.tsx` - switch cases
+- `src/components/DocumentAccess.tsx` - badge labels
+- `src/components/ClassifiedDocumentViewer.tsx` - badge labels, CSS selectors
+- `src/pages/documents.tsx` - badge labels, levelMap, dropdowns
+- `src/pages/my-documents.tsx` - badge labels
+- `src/types/StandardMessageBody.ts` - type union
+- `src/types/invitations.ts` - type union
+- `src/utils/keyVCBinding.ts` - comments, defaults
+- `src/utils/credentialTypeDetector.ts` - defaults
+- `src/utils/EphemeralDIDCrypto.ts` - label functions
+- `src/utils/SecureDashboardBridge.ts` - defaults
+- `src/utils/documentStorage.ts` - comments
+
+**Legacy Support Pattern**:
+```javascript
+const clearanceLevels = {
+    'INTERNAL': 1,
+    'UNCLASSIFIED': 1,  // Legacy
+    'CONFIDENTIAL': 2,
+    'RESTRICTED': 3,
+    'SECRET': 3,  // Legacy
+    'TOP-SECRET': 4,
+    'TOP_SECRET': 4,  // Legacy
+    'TOPSECRET': 4    // Legacy
+};
+```
+
+---
+
+### ✅ Configurable Wallet Selector for Employee Portal (Jan 4, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Employees can switch between wallets for document access
+
+Added a configurable wallet selector to the Employee Portal Dashboard, allowing users to switch between different wallets (IDL Wallet, Alice Wallet, or custom URLs) for document access operations.
+
+**Key Features**:
+- **Default wallet**: IDL Wallet (`/wallet`) - changed from previous Alice Wallet default
+- **Preset buttons**: Quick switch between IDL Wallet and Alice Wallet
+- **Custom URL input**: Enter any wallet path for testing/development
+- **Persistence**: Selection saved in `localStorage`, survives page refresh
+- **Auto-cleanup**: Closes existing wallet window when switching
+
+**UI Location**: "Wallet Settings" card at the bottom of the Employee Portal Dashboard
+
+**Files Modified**:
+- `company-admin-portal/public/js/employee-portal-dashboard.js` - Dynamic wallet URL functions, localStorage management
+- `company-admin-portal/public/employee-portal-dashboard.html` - Wallet Settings UI card, CSS styles
+
+**Technical Details**:
+```javascript
+// New functions added:
+getCurrentWalletPath()    // Get saved wallet path or default
+getWalletUrl()           // Build full wallet URL based on environment
+getWalletOrigin()        // Get wallet origin for postMessage validation
+setWalletPath(path)      // Save wallet path and reset connection
+updateWalletSelectorUI() // Update UI to reflect current selection
+```
+
+---
+
+### ✅ Browser Console Logging & Proof Request Name Resolution (Jan 4, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Console logs captured to server, proof requests show connection names
+
+#### Browser Console Logging Re-enabled
+
+Re-enabled the ConsoleLogger system that captures browser console output to server-side log files for debugging.
+
+**Features**:
+- All `console.log`, `console.error`, `console.warn`, `console.info` captured
+- Log filename displayed in browser console at startup: `📁 [ConsoleLogger] Logging to: /root/logs/wallet-debug-alice-2026-01-04-XX-XX-XX.log`
+- Auto-rotation: Max 10MB per file, max 50 files per wallet
+- Batched sends every 5 seconds or 100 entries
+
+**Log Location**: `/root/logs/wallet-debug-{walletId}-{timestamp}.log`
+
+**Files Modified**:
+- `alice-wallet/src/pages/_app.tsx` - Uncommented `initConsoleLogger('alice')`
+- `alice-wallet/src/pages/api/logs.ts` - Changed `LOG_DIR` to `/root/logs`, added `logFilePath` to response
+- `alice-wallet/src/utils/ConsoleLogger.ts` - Display log filename after first successful flush
+
+#### Proof Request Connection Name Resolution (IDL Wallet)
+
+Enhanced proof request display to show connection names instead of DIDs using multi-strategy lookup.
+
+**Problem**: Proof requests showed `did:peer:2.Ez6LSsJTM...` instead of connection name like "Alice Cooper"
+
+**Solution**: Enhanced `getConnectionName()` with 3 resolution strategies:
+1. **Exact DID match** - Find connection where `receiver` or `host` matches requester DID
+2. **Partial DID match** - Handle slight DID format differences
+3. **Credential resolver** - Look up names from credentials associated with the connection
+
+**Files Modified**:
+- `idl-wallet/src/components/UnifiedProofRequestModal.tsx` - Added import for `getConnectionNameWithFallback`, enhanced `getConnectionName()` with debug logging
+
+**Debug Logs**: Check browser console for `[ProofRequest]` messages showing resolution attempts
+
+---
+
 ### ✅ Security Clearance Credential Display Name Fix (Jan 2, 2026)
 
 **STATUS**: ✅ **PRODUCTION READY** - Security Clearance credentials now display holder name and clearance level correctly
@@ -927,8 +1073,8 @@ This documentation has been reorganized to improve maintainability and AI perfor
 
 ---
 
-**Document Version**: 6.8 (Jan 2, 2026 - Security Clearance Display Name Fix)
-**Last Updated**: 2026-01-02
+**Document Version**: 6.10 (Jan 7, 2026 - Security Clearance Level Standardization)
+**Last Updated**: 2026-01-07
 **Status**: Production-Ready - Streamlined for AI Performance
-**File Size**: ~700 lines (with detailed feature docs in subdocuments)
+**File Size**: ~750 lines (with detailed feature docs in subdocuments)
 **Maintained By**: Hyperledger Identus SSI Infrastructure Team

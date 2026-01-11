@@ -354,8 +354,9 @@ const app = {
 
     /**
      * Show invitation result with QR code
+     * Uses URL shortener for long DIDComm invitation URLs
      */
-    showInvitationResult(employeeName, invitationUrl) {
+    async showInvitationResult(employeeName, invitationUrl) {
         // Hide form, show result
         document.getElementById('invite-form').classList.add('hidden');
         document.getElementById('invitation-result').classList.remove('hidden');
@@ -363,25 +364,109 @@ const app = {
         // Update employee name
         document.getElementById('invited-employee-name').textContent = employeeName;
 
-        // Set invitation URL
+        // Set invitation URL (full URL for copying)
         document.getElementById('invitation-url').value = invitationUrl;
 
         // Generate QR code
-        const canvas = document.getElementById('invitation-qr');
-        QRCode.toCanvas(canvas, invitationUrl, {
-            width: 256,
-            margin: 2,
-            color: {
-                dark: '#000000',
-                light: '#ffffff'
+        const qrContainer = document.getElementById('invitation-qr');
+        qrContainer.innerHTML = ''; // Clear previous QR code
+
+        if (typeof QRCode === 'undefined') {
+            console.error('[QR] QRCode library not loaded');
+            qrContainer.innerHTML = `
+                <div style="width: 256px; height: 256px; background: #f8f8f8;
+                            display: flex; align-items: center; justify-content: center;
+                            border: 2px dashed #ccc; border-radius: 8px; text-align: center;">
+                    <div>
+                        <div style="font-size: 48px; margin-bottom: 8px;">!</div>
+                        <div style="color: #666;">QR code unavailable</div>
+                        <div style="color: #999; font-size: 12px;">Use the URL below</div>
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        console.log('[QR] Invitation URL length:', invitationUrl.length);
+
+        // For long URLs, use the URL shortener service
+        let qrUrl = invitationUrl;
+        const MAX_QR_LENGTH = 2500;
+
+        if (invitationUrl.length > MAX_QR_LENGTH) {
+            console.log('[QR] URL too long, using shortener service...');
+
+            // Show loading state
+            qrContainer.innerHTML = `
+                <div style="width: 256px; height: 256px; background: #f8f8f8;
+                            display: flex; align-items: center; justify-content: center;
+                            border: 2px dashed #ccc; border-radius: 8px; text-align: center;">
+                    <div>
+                        <div style="font-size: 36px; margin-bottom: 8px;">&#8987;</div>
+                        <div style="color: #666;">Creating short URL...</div>
+                    </div>
+                </div>
+            `;
+
+            try {
+                const response = await fetch('/company-admin/api/shorten', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: invitationUrl })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    qrUrl = data.shortUrl;
+                    console.log('[QR] Shortened URL:', qrUrl, '(' + qrUrl.length + ' chars)');
+                } else {
+                    throw new Error(data.error || 'Failed to shorten URL');
+                }
+            } catch (error) {
+                console.error('[QR] URL shortener failed:', error);
+                qrContainer.innerHTML = `
+                    <div style="width: 256px; height: 256px; background: #fff3cd;
+                                display: flex; align-items: center; justify-content: center;
+                                border: 2px dashed #ffc107; border-radius: 8px; text-align: center; padding: 16px;">
+                        <div>
+                            <div style="font-size: 36px; margin-bottom: 8px;">&#128279;</div>
+                            <div style="color: #856404; font-weight: 600;">QR unavailable</div>
+                            <div style="color: #666; font-size: 12px; margin-top: 8px;">Copy & share the URL below</div>
+                        </div>
+                    </div>
+                `;
+                return;
             }
-        }, (error) => {
-            if (error) {
-                console.error('[QR] Error generating QR code:', error);
-            } else {
-                console.log('[QR] QR code generated successfully');
-            }
-        });
+        }
+
+        // Clear loading state and generate QR
+        qrContainer.innerHTML = '';
+
+        try {
+            new QRCode(qrContainer, {
+                text: qrUrl,
+                width: 256,
+                height: 256,
+                colorDark: "#000000",
+                colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.L
+            });
+            console.log('[QR] QR code generated successfully');
+        } catch (error) {
+            console.error('[QR] Error generating QR code:', error);
+            qrContainer.innerHTML = `
+                <div style="width: 256px; height: 256px; background: #fff5f5;
+                            display: flex; align-items: center; justify-content: center;
+                            border: 2px dashed #ff6b6b; border-radius: 8px; text-align: center; padding: 16px;">
+                    <div>
+                        <div style="font-size: 36px; margin-bottom: 8px;">&#10060;</div>
+                        <div style="color: #c92a2a; font-weight: 600;">QR generation failed</div>
+                        <div style="color: #999; font-size: 12px; margin-top: 8px;">Copy & share the URL below</div>
+                    </div>
+                </div>
+            `;
+        }
     },
 
     /**

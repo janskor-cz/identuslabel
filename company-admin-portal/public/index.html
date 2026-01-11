@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Company Admin Portal - Hyperledger Identus</title>
     <link rel="stylesheet" href="/company-admin/styles.css">
-    <!-- QRCode library for invitation QR generation -->
-    <script src="https://unpkg.com/qrcode@1.5.3/build/qrcode.js"></script>
+    <!-- QRCode library for invitation QR generation (local copy for reliability) -->
+    <script src="/company-admin/js/qrcode.min.js"></script>
 </head>
 <body>
     <!-- Loading Screen -->
@@ -245,7 +245,7 @@
 
                     <div class="invitation-content">
                         <div class="qr-code-container">
-                            <canvas id="invitation-qr"></canvas>
+                            <div id="invitation-qr"></div>
                             <p class="qr-label">Scan with Identus Wallet</p>
                         </div>
 

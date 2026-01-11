@@ -150,13 +150,13 @@ function displayProfile(profile) {
 // Get color based on clearance level
 function getClearanceColor(level) {
     switch (level) {
-        case 'TOP_SECRET':
+        case 'TOP-SECRET':
             return '#9f7aea'; // Purple
-        case 'SECRET':
+        case 'RESTRICTED':
             return '#e53e3e'; // Red
         case 'CONFIDENTIAL':
             return '#ed8936'; // Orange
-        case 'UNCLASSIFIED':
+        case 'INTERNAL':
         default:
             return '#38a169'; // Green
     }
@@ -687,6 +687,7 @@ async function loadDocuments(profile) {
         }
 
         const data = await response.json();
+        console.log(`[Documents] API response:`, data.success, `documents count:`, data.documents?.length);
 
         if (data.success) {
             displayDocuments(data.documents || []);
@@ -717,11 +718,11 @@ function displayDocuments(documents) {
         listEl.classList.remove('hidden');
         listEl.innerHTML = documents.map(doc => {
             // Check if this is a classified document
-            // Use SSI flow for: documents with sections, "classified" in DID, or non-UNCLASSIFIED
+            // Use SSI flow for: documents with sections, "classified" in DID, or non-INTERNAL
             const hasClassifiedSections = doc.sectionSummary?.totalSections > 0;
             const isClassifiedDoc = hasClassifiedSections ||
                 doc.documentDID?.includes('classified') ||
-                (doc.classificationLevel && doc.classificationLevel !== 'UNCLASSIFIED');
+                (doc.classificationLevel && doc.classificationLevel !== 'INTERNAL');
             const isDocx = doc.metadata?.sourceFormat === 'docx';
             const sectionInfo = hasClassifiedSections
                 ? `<span title="${doc.sectionSummary.visibleCount} visible, ${doc.sectionSummary.redactedCount} redacted">📑 ${doc.sectionSummary.totalSections} sections</span>`
@@ -1307,7 +1308,7 @@ async function viewDocument(documentDID) {
  *
  * NOTE: This function is no longer used. Clearance level mapping is now handled
  * server-side using ReEncryptionService.getLevelNumber() which uses correct 1-indexed values:
- *   UNCLASSIFIED: 1, CONFIDENTIAL: 2, SECRET: 3, TOP_SECRET: 4
+ *   INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3, TOP-SECRET: 4
  *
  * The client no longer sends clearance level - the server extracts it from the
  * VP-verified session to prevent clearance level spoofing attacks.
@@ -1317,12 +1318,12 @@ async function viewDocument(documentDID) {
 function mapClearanceToNumeric(level) {
     console.warn('[DEPRECATED] mapClearanceToNumeric() is no longer used. Clearance is verified server-side.');
     const levelMap = {
-        'UNCLASSIFIED': 0,
-        'CONFIDENTIAL': 1,
-        'SECRET': 2,
-        'TOP_SECRET': 3
+        'INTERNAL': 1,
+        'CONFIDENTIAL': 2,
+        'RESTRICTED': 3,
+        'TOP-SECRET': 4
     };
-    return levelMap[level] || 0;
+    return levelMap[level] || 1;
 }
 
 /**
@@ -1695,6 +1696,7 @@ document.addEventListener('DOMContentLoaded', () => {
     checkSessionExpiry();
     initializeDashboard();
     startAutoRefresh();
+    updateWalletSelectorUI();  // Initialize wallet selector
 });
 
 // Handle browser back/forward buttons
@@ -1714,24 +1716,67 @@ let walletWindow = null;
 let walletReady = false;
 let pendingDocumentRequests = new Map(); // requestId -> { resolve, reject, timeout }
 
-// Wallet URL (production uses HTTPS domain)
-const WALLET_URL = window.location.hostname === 'localhost'
-    ? 'http://localhost:3001/alice'
-    : 'https://identuslabel.cz/alice';
+// Wallet configuration (stored in localStorage)
+const DEFAULT_WALLET_PATH = '/wallet';  // IDL wallet as default
 
-const WALLET_ORIGIN = window.location.hostname === 'localhost'
-    ? 'http://localhost:3001'
-    : 'https://identuslabel.cz';
+function getCurrentWalletPath() {
+    return localStorage.getItem('selectedWalletPath') || DEFAULT_WALLET_PATH;
+}
+
+function getWalletUrl() {
+    const path = getCurrentWalletPath();
+    return window.location.hostname === 'localhost'
+        ? `http://localhost:3001${path}`
+        : `https://identuslabel.cz${path}`;
+}
+
+function getWalletOrigin() {
+    return window.location.hostname === 'localhost'
+        ? 'http://localhost:3001'
+        : 'https://identuslabel.cz';
+}
+
+function setWalletPath(path) {
+    localStorage.setItem('selectedWalletPath', path);
+    // Close existing wallet window if open
+    if (walletWindow && !walletWindow.closed) {
+        walletWindow.close();
+    }
+    walletWindow = null;
+    walletReady = false;
+    updateWalletSelectorUI();
+}
+
+function updateWalletSelectorUI() {
+    const currentPath = getCurrentWalletPath();
+    document.querySelectorAll('.wallet-option').forEach(el => {
+        el.classList.toggle('active', el.dataset.path === currentPath);
+    });
+    const customInput = document.getElementById('customWalletPath');
+    if (customInput) {
+        customInput.value = currentPath;
+    }
+    const display = document.getElementById('currentWalletDisplay');
+    if (display) {
+        display.textContent = getWalletUrl();
+    }
+}
 
 // Listen for messages from wallet
 window.addEventListener('message', (event) => {
     // Validate origin
-    if (event.origin !== WALLET_ORIGIN) {
+    if (event.origin !== getWalletOrigin()) {
         console.log('[WalletBridge] Ignoring message from unknown origin:', event.origin);
         return;
     }
 
     const data = event.data;
+
+    // Ignore messages without a type (browser extensions, etc.)
+    if (!data || !data.type) {
+        return;
+    }
+
     console.log('[WalletBridge] Received message:', data.type);
 
     switch (data.type) {
@@ -1810,7 +1855,7 @@ async function waitForWalletReady(timeout = 30000) {
                     type: 'PING',
                     source: 'employee-portal',
                     timestamp: Date.now()
-                }, WALLET_ORIGIN);
+                }, getWalletOrigin());
             }
 
             // Check timeout
@@ -1834,8 +1879,8 @@ async function ensureWalletOpen() {
     }
 
     // Open new wallet window
-    console.log('[WalletBridge] Opening wallet window:', WALLET_URL);
-    walletWindow = window.open(WALLET_URL, 'alice-wallet', 'width=1200,height=800');
+    console.log('[WalletBridge] Opening wallet window:', getWalletUrl());
+    walletWindow = window.open(getWalletUrl(), 'alice-wallet', 'width=1200,height=800');
     walletReady = false;
 
     if (!walletWindow) {
@@ -1877,7 +1922,7 @@ async function requestDocumentAccess(documentDID) {
             sessionToken,  // Pass session token for server authentication
             // NOTE: clearanceLevel removed - server uses session-verified clearance
             timestamp: Date.now()
-        }, WALLET_ORIGIN);
+        }, getWalletOrigin());
     });
 }
 
@@ -2007,7 +2052,7 @@ async function openDocumentInWallet(ephemeralDID, title, sourceInfo) {
 
         // Listen for response
         const handler = (event) => {
-            if (event.origin !== WALLET_ORIGIN) return;
+            if (event.origin !== getWalletOrigin()) return;
             if (event.data?.type === 'DOCUMENT_VIEWER_OPENED' && event.data?.requestId === requestId) {
                 clearTimeout(timeout);
                 window.removeEventListener('message', handler);
@@ -2025,13 +2070,13 @@ async function openDocumentInWallet(ephemeralDID, title, sourceInfo) {
                 title,
                 sourceInfo,
                 timestamp: Date.now()
-            }, WALLET_ORIGIN);
+            }, getWalletOrigin());
 
             // Focus wallet window
             walletWindow.focus();
         } else {
             // Open wallet with document parameter
-            const walletUrl = `${WALLET_ORIGIN}/my-documents?open=${encodeURIComponent(ephemeralDID)}`;
+            const walletUrl = `${getWalletOrigin()}/my-documents?open=${encodeURIComponent(ephemeralDID)}`;
             walletWindow = window.open(walletUrl, 'alice-wallet');
 
             if (walletWindow) {
@@ -2085,7 +2130,7 @@ async function downloadToWallet(documentDID, title) {
         // Ensure wallet window is open
         if (!walletWindow || walletWindow.closed) {
             walletWindow = window.open(
-                `${WALLET_ORIGIN}/my-documents`,
+                `${getWalletOrigin()}/my-documents`,
                 'identus-wallet',
                 'width=600,height=800'
             );
@@ -2157,7 +2202,7 @@ async function requestWalletDocumentDownload(params) {
 
         const handler = (event) => {
             // Check origin
-            if (event.origin !== WALLET_ORIGIN) return;
+            if (event.origin !== getWalletOrigin()) return;
             if (event.data?.requestId !== requestId) return;
 
             window.removeEventListener('message', handler);
@@ -2190,7 +2235,7 @@ async function requestWalletDocumentDownload(params) {
             sessionId: params.sessionId,
             serverBaseUrl: params.serverBaseUrl,
             timestamp: Date.now()
-        }, WALLET_ORIGIN);
+        }, getWalletOrigin());
     });
 }
 
@@ -2245,7 +2290,7 @@ async function sendDocumentToWallet(documentData) {
 
             // Listen for response
             const handler = (event) => {
-                if (event.origin !== WALLET_ORIGIN) return;
+                if (event.origin !== getWalletOrigin()) return;
                 if (event.data?.requestId !== requestId) return;
 
                 window.removeEventListener('message', handler);
@@ -2277,7 +2322,7 @@ async function sendDocumentToWallet(documentData) {
                 accessRights: documentData.accessRights,
                 sourceInfo: documentData.sourceInfo,
                 timestamp: Date.now()
-            }, WALLET_ORIGIN);
+            }, getWalletOrigin());
         });
     }
 
@@ -2355,38 +2400,38 @@ async function analyzeHtmlSections(file) {
 
         // Count sections by clearance level
         const counts = {
-            UNCLASSIFIED: 0,
-            CONFIDENTIAL: 0,
-            SECRET: 0,
-            TOP_SECRET: 0
+            'INTERNAL': 0,
+            'CONFIDENTIAL': 0,
+            'RESTRICTED': 0,
+            'TOP-SECRET': 0
         };
 
         const classifiedElements = doc.querySelectorAll('[data-clearance]');
         classifiedElements.forEach(el => {
-            const clearance = el.getAttribute('data-clearance').toUpperCase().replace('-', '_');
+            const clearance = el.getAttribute('data-clearance').toUpperCase();
             if (counts.hasOwnProperty(clearance)) {
                 counts[clearance]++;
             }
         });
 
-        // Count unmarked elements as UNCLASSIFIED
+        // Count unmarked elements as INTERNAL
         // (simplified - actual parsing is more complex)
         const totalMarked = classifiedElements.length;
         if (totalMarked === 0) {
-            counts.UNCLASSIFIED = 1; // Whole document is unclassified
+            counts['INTERNAL'] = 1; // Whole document is internal
         }
 
         // Update UI
-        document.getElementById('unclassifiedCount').textContent = counts.UNCLASSIFIED;
-        document.getElementById('confidentialCount').textContent = counts.CONFIDENTIAL;
-        document.getElementById('secretCount').textContent = counts.SECRET;
-        document.getElementById('topSecretCount').textContent = counts.TOP_SECRET;
+        document.getElementById('internalCount').textContent = counts['INTERNAL'];
+        document.getElementById('confidentialCount').textContent = counts['CONFIDENTIAL'];
+        document.getElementById('restrictedCount').textContent = counts['RESTRICTED'];
+        document.getElementById('topSecretCount').textContent = counts['TOP-SECRET'];
 
         // Determine overall classification (lowest in doc for discovery purposes)
-        let overall = 'UNCLASSIFIED';
-        if (counts.CONFIDENTIAL > 0) overall = 'CONFIDENTIAL';
-        if (counts.SECRET > 0) overall = 'SECRET';
-        if (counts.TOP_SECRET > 0) overall = 'TOP_SECRET';
+        let overall = 'INTERNAL';
+        if (counts['CONFIDENTIAL'] > 0) overall = 'CONFIDENTIAL';
+        if (counts['RESTRICTED'] > 0) overall = 'RESTRICTED';
+        if (counts['TOP-SECRET'] > 0) overall = 'TOP-SECRET';
 
         document.getElementById('overallClassification').textContent = overall;
         document.getElementById('sectionAnalysis').classList.remove('hidden');

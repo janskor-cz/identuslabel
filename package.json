@@ -54,6 +54,10 @@
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
+    "puppeteer": "^24.31.0",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
   }
 }

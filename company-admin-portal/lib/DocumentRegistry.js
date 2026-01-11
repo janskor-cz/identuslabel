@@ -68,7 +68,7 @@ class DocumentRegistry {
      * @param {Object} documentMetadata
      * @param {string} documentMetadata.documentDID - PRISM DID for the document
      * @param {string} documentMetadata.title - Document title (will be encrypted)
-     * @param {string} documentMetadata.classificationLevel - UNCLASSIFIED|CONFIDENTIAL|SECRET|TOP_SECRET
+     * @param {string} documentMetadata.classificationLevel - INTERNAL|CONFIDENTIAL|RESTRICTED|TOP-SECRET
      * @param {Array<string>} documentMetadata.releasableTo - Array of company DIDs that can discover this document
      * @param {string} documentMetadata.contentEncryptionKey - Encrypted content key (ABE encrypted)
      * @param {Object} documentMetadata.metadata - Additional metadata (tags, categories, etc.)
@@ -99,8 +99,8 @@ class DocumentRegistry {
             throw new Error('Missing required document metadata fields');
         }
 
-        // Validate classification level
-        const validLevels = ['UNCLASSIFIED', 'CONFIDENTIAL', 'SECRET', 'TOP_SECRET'];
+        // Validate classification level (standardized to CA Portal naming)
+        const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
         if (!validLevels.includes(classificationLevel)) {
             throw new Error(`Invalid classification level: ${classificationLevel}`);
         }
@@ -202,7 +202,7 @@ class DocumentRegistry {
         }
 
         console.log(`[DocumentRegistry] Query by issuerDID: ${issuerDID}`);
-        console.log(`[DocumentRegistry] Clearance level: ${clearanceLevel || 'NONE (UNCLASSIFIED only)'}`);
+        console.log(`[DocumentRegistry] Clearance level: ${clearanceLevel || 'NONE (INTERNAL only)'}`);
         console.log(`[DocumentRegistry] Total releasable documents: ${totalDocuments}`);
         console.log(`[DocumentRegistry] Filtered by clearance: ${filteredByClearance}`);
         console.log(`[DocumentRegistry] Discoverable documents: ${discoverableDocuments.length}`);
@@ -213,28 +213,32 @@ class DocumentRegistry {
     /**
      * Check if employee's clearance level meets document's classification requirement
      *
-     * Clearance Hierarchy (4 levels):
-     * 1. UNCLASSIFIED - No clearance required (everyone can access)
+     * Clearance Hierarchy (4 levels, CA Portal naming):
+     * 1. INTERNAL - Basic organizational access
      * 2. CONFIDENTIAL - Requires CONFIDENTIAL or higher clearance
-     * 3. SECRET - Requires SECRET or higher clearance
-     * 4. TOP_SECRET - Requires TOP_SECRET clearance
+     * 3. RESTRICTED - Requires RESTRICTED or higher clearance
+     * 4. TOP-SECRET - Requires TOP-SECRET clearance
      *
      * @param {string|null} employeeClearance - Employee's clearance level (null if no clearance)
      * @param {string} documentClassification - Document's classification level
      * @returns {boolean} True if employee can access the document
      */
     meetsClassificationRequirement(employeeClearance, documentClassification) {
-        // Define clearance hierarchy (higher number = higher clearance)
+        // Define clearance hierarchy (standardized to CA Portal naming, with legacy support)
         const clearanceLevels = {
-            'UNCLASSIFIED': 1,
+            'INTERNAL': 1,
+            'UNCLASSIFIED': 1,  // Legacy
             'CONFIDENTIAL': 2,
-            'SECRET': 3,
-            'TOP_SECRET': 4
+            'RESTRICTED': 3,
+            'SECRET': 3,  // Legacy
+            'TOP-SECRET': 4,
+            'TOP_SECRET': 4,  // Legacy (underscore variant)
+            'TOPSECRET': 4    // Legacy (no separator)
         };
 
         // Get numeric levels
-        const documentLevel = clearanceLevels[documentClassification];
-        const employeeLevel = employeeClearance ? clearanceLevels[employeeClearance] : 1; // No clearance = UNCLASSIFIED level
+        const documentLevel = clearanceLevels[documentClassification] || 1;
+        const employeeLevel = employeeClearance ? (clearanceLevels[employeeClearance] || 1) : 1; // No clearance = INTERNAL level
 
         // Employee can access if their clearance level >= document classification level
         return employeeLevel >= documentLevel;
@@ -489,17 +493,31 @@ class DocumentRegistry {
         const stats = {
             totalDocuments: this.documents.size,
             byClassification: {
-                UNCLASSIFIED: 0,
-                CONFIDENTIAL: 0,
-                SECRET: 0,
-                TOP_SECRET: 0
+                'INTERNAL': 0,
+                'CONFIDENTIAL': 0,
+                'RESTRICTED': 0,
+                'TOP-SECRET': 0
             },
             classifiedDocuments: 0,
             totalSections: 0
         };
 
+        // Normalize legacy classification labels to new naming
+        const normalizeLevel = (level) => {
+            const mapping = {
+                'UNCLASSIFIED': 'INTERNAL',
+                'SECRET': 'RESTRICTED',
+                'TOP_SECRET': 'TOP-SECRET',
+                'TOPSECRET': 'TOP-SECRET'
+            };
+            return mapping[level] || level;
+        };
+
         for (const doc of this.documents.values()) {
-            stats.byClassification[doc.classificationLevel]++;
+            const normalizedLevel = normalizeLevel(doc.classificationLevel);
+            if (stats.byClassification.hasOwnProperty(normalizedLevel)) {
+                stats.byClassification[normalizedLevel]++;
+            }
             if (doc.sectionMetadata) {
                 stats.classifiedDocuments++;
                 stats.totalSections += doc.sectionMetadata.sectionCount || 0;
@@ -538,8 +556,8 @@ class DocumentRegistry {
             throw new Error('Missing required classified document fields');
         }
 
-        // Validate classification level
-        const validLevels = ['UNCLASSIFIED', 'CONFIDENTIAL', 'SECRET', 'TOP_SECRET'];
+        // Validate classification level (CA Portal naming)
+        const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
         if (!validLevels.includes(overallClassification)) {
             throw new Error(`Invalid classification level: ${overallClassification}`);
         }
@@ -630,7 +648,7 @@ class DocumentRegistry {
      * @param {string} userClearance - User's clearance level (for section visibility check)
      * @returns {Promise<Object>} Document details with section info
      */
-    async getClassifiedDocument(documentDID, requestingCompanyDID, userClearance = 'UNCLASSIFIED') {
+    async getClassifiedDocument(documentDID, requestingCompanyDID, userClearance = 'INTERNAL') {
         const documentRecord = this.documents.get(documentDID);
 
         if (!documentRecord) {
@@ -648,12 +666,16 @@ class DocumentRegistry {
             requestingCompanyDID
         );
 
-        // Calculate section visibility based on user clearance
+        // Calculate section visibility based on user clearance (CA Portal naming with legacy support)
         const clearanceLevels = {
-            'UNCLASSIFIED': 1,
+            'INTERNAL': 1,
+            'UNCLASSIFIED': 1,  // Legacy
             'CONFIDENTIAL': 2,
-            'SECRET': 3,
-            'TOP_SECRET': 4
+            'RESTRICTED': 3,
+            'SECRET': 3,  // Legacy
+            'TOP-SECRET': 4,
+            'TOP_SECRET': 4,  // Legacy
+            'TOPSECRET': 4    // Legacy
         };
 
         const userLevel = clearanceLevels[userClearance] || 1;
@@ -711,14 +733,19 @@ class DocumentRegistry {
             throw new Error('issuerDID is required');
         }
 
+        // CA Portal naming convention with legacy support
         const clearanceLevels = {
-            'UNCLASSIFIED': 1,
+            'INTERNAL': 1,
+            'UNCLASSIFIED': 1,  // Legacy
             'CONFIDENTIAL': 2,
-            'SECRET': 3,
-            'TOP_SECRET': 4
+            'RESTRICTED': 3,
+            'SECRET': 3,  // Legacy
+            'TOP-SECRET': 4,
+            'TOP_SECRET': 4,  // Legacy
+            'TOPSECRET': 4    // Legacy
         };
 
-        const userLevel = clearanceLevel ? clearanceLevels[clearanceLevel] : 1;
+        const userLevel = clearanceLevel ? (clearanceLevels[clearanceLevel] || 1) : 1;
         const classifiedDocuments = [];
 
         for (const [documentDID, documentRecord] of this.documents.entries()) {
@@ -770,7 +797,7 @@ class DocumentRegistry {
         }
 
         console.log(`[DocumentRegistry] Classified documents query for issuer: ${issuerDID}`);
-        console.log(`[DocumentRegistry] User clearance: ${clearanceLevel || 'UNCLASSIFIED'}`);
+        console.log(`[DocumentRegistry] User clearance: ${clearanceLevel || 'INTERNAL'}`);
         console.log(`[DocumentRegistry] Found: ${classifiedDocuments.length} classified documents`);
 
         return classifiedDocuments;

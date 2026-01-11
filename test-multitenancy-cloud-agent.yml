@@ -51,7 +51,7 @@ services:
   # Cloud Agent - Multitenancy Enabled
   multitenancy-test-cloud-agent:
     container_name: multitenancy-test-cloud-agent
-    image: hyperledgeridentus/identus-cloud-agent:2.0.0
+    image: hyperledgeridentus/identus-cloud-agent:2.1.0
     environment:
       # SECURITY: Secure admin token (32 chars random)
       ADMIN_TOKEN: "N9TEJXrZlIX4Qg8R1RSlJwC820QZKwXb"
@@ -65,7 +65,7 @@ services:
 
       # Service URLs
       REST_SERVICE_URL: http://91.99.4.54:8200/cloud-agent
-      DIDCOMM_SERVICE_URL: http://91.99.4.54:8290/didcomm
+      DIDCOMM_SERVICE_URL: https://identuslabel.cz/techcorp/didcomm
 
       # Database Configuration - CUSTOM USER (NOT postgres)
       POLLUX_DB_HOST: multitenancy-test-db
@@ -99,6 +99,9 @@ services:
       # DIDComm Mediator (shared with production)
       DIDCOMM_SERVICE_ENDPOINT: http://91.99.4.54:8080
 
+      # StatusList Configuration - Public URL for credential revocation
+      POLLUX_STATUS_LIST_REGISTRY_PUBLIC_URL: https://identuslabel.cz/techcorp
+
       # Logging
       LOG_LEVEL: INFO
 
@@ -112,6 +115,10 @@ services:
 
     networks:
       - identus-network
+
+    # CRITICAL FIX: Map domain to host IP so Cloud Agent can reach mediator
+    extra_hosts:
+      - "identuslabel.cz:91.99.4.54"
 
     depends_on:
       multitenancy-test-db:

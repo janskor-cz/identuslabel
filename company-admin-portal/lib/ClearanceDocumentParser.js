@@ -4,22 +4,22 @@
  * Parses HTML documents with clearance-level markers on any element.
  * Supports data-clearance attributes on sections, paragraphs, spans, tables, etc.
  *
- * Clearance Hierarchy:
- * - UNCLASSIFIED (1) - Public information
+ * Clearance Hierarchy (Standardized to CA Portal names):
+ * - INTERNAL (1) - Basic organizational access
  * - CONFIDENTIAL (2) - Sensitive business information
- * - SECRET (3) - Highly restricted information
- * - TOP_SECRET (4) - Classified information (highest)
+ * - RESTRICTED (3) - Highly sensitive strategic information
+ * - TOP-SECRET (4) - Classified information (highest)
  */
 
 const { JSDOM } = require('jsdom');
 const crypto = require('crypto');
 
-// Clearance level hierarchy
+// Clearance level hierarchy (standardized to CA Portal naming)
 const CLEARANCE_LEVELS = {
-  'UNCLASSIFIED': 1,
+  'INTERNAL': 1,
   'CONFIDENTIAL': 2,
-  'SECRET': 3,
-  'TOP_SECRET': 4
+  'RESTRICTED': 3,
+  'TOP-SECRET': 4
 };
 
 const VALID_CLEARANCE_VALUES = Object.keys(CLEARANCE_LEVELS);

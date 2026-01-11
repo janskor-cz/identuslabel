@@ -416,37 +416,17 @@
                             </div>
                         </div>
 
-                        <!-- Key Source Selection -->
+                        <!-- Key Entry Section -->
                         <div class="form-group">
                             <label class="form-label">
                                 <i class="fas fa-key me-2"></i>
-                                Key Source
+                                Encryption Keys
                             </label>
-                            <div id="keySourceOptions">
-                                <!-- Auto-extract option (shown when PRISM DID available) -->
-                                <div id="prismDIDKeyOption" class="clearance-level-card" data-source="prism-did" style="display: none;">
-                                    <div class="clearance-level-title">
-                                        <i class="fas fa-magic me-2" style="color: #28a745;"></i>
-                                        Auto-Extract from PRISM DID
-                                        <span class="badge bg-success ms-2">Recommended</span>
-                                    </div>
-                                    <div class="clearance-level-desc">
-                                        Automatically extract encryption keys from your authenticated PRISM DID. No manual input required.
-                                    </div>
-                                    <div id="prismDIDPreview" style="margin-top: 10px; font-family: monospace; font-size: 0.75rem; color: #666; word-break: break-all;"></div>
-                                </div>
-                                <!-- Manual key entry option -->
-                                <div id="manualKeyOption" class="clearance-level-card selected" data-source="manual">
-                                    <div class="clearance-level-title">
-                                        <i class="fas fa-keyboard me-2"></i>
-                                        Enter Keys Manually
-                                    </div>
-                                    <div class="clearance-level-desc">
-                                        Paste your Ed25519 and X25519 public keys from your wallet's key manager.
-                                    </div>
-                                </div>
+                            <div class="alert alert-info" style="border-radius: 10px;">
+                                <i class="fas fa-info-circle me-2"></i>
+                                <strong>Manual Key Entry</strong><br>
+                                Paste your Ed25519 and X25519 public keys from your wallet's key manager.
                             </div>
-                            <input type="hidden" id="selectedKeySource" name="keySource" value="manual">
                         </div>
 
                         <!-- Key Format Requirement (shown only for manual entry) -->
@@ -534,9 +514,6 @@
         }
 
         let selectedClearanceLevel = null;
-        let selectedKeySource = 'manual';  // 'manual' or 'prism-did'
-        let holderPrismDID = null;
-        let canAutoExtractKeys = false;
         let authData = null;
 
         // Check authentication on page load
@@ -615,14 +592,6 @@
                 // Also store the sessionId directly for easy access
                 authData.sessionId = bridgeResult.sessionId;
                 sessionStorage.setItem('ca_auth', JSON.stringify(authData));
-
-                // Store PRISM DID info for automatic key extraction
-                if (bridgeResult.holderPrismDID) {
-                    holderPrismDID = bridgeResult.holderPrismDID;
-                    canAutoExtractKeys = bridgeResult.canAutoExtractKeys || false;
-                    console.log('🔑 Holder PRISM DID available:', holderPrismDID.substring(0, 50) + '...');
-                    console.log('   Can auto-extract keys:', canAutoExtractKeys);
-                }
 
                 // Now display the security clearance form
                 displaySecurityClearanceForm();
@@ -712,9 +681,6 @@
                 });
             });
 
-            // Key source selection (PRISM DID vs Manual)
-            setupKeySourceSelection();
-
             // ✅ Dual-key format validation (MANDATORY)
             const ed25519PublicKeyInput = document.getElementById('ed25519PublicKey');
             const x25519PublicKeyInput = document.getElementById('x25519PublicKey');
@@ -730,62 +696,6 @@
             // Form submission
             const form = document.getElementById('securityClearanceForm');
             form.addEventListener('submit', handleFormSubmission);
-        }
-
-        function setupKeySourceSelection() {
-            const prismDIDOption = document.getElementById('prismDIDKeyOption');
-            const manualOption = document.getElementById('manualKeyOption');
-            const keyFormatHelp = document.getElementById('keyFormatHelp');
-            const dualKeySection = document.getElementById('dualKeyFormatSection');
-            const prismDIDPreview = document.getElementById('prismDIDPreview');
-
-            // Show PRISM DID option if available and can extract keys
-            if (canAutoExtractKeys && holderPrismDID) {
-                prismDIDOption.style.display = 'block';
-                // Show truncated PRISM DID
-                prismDIDPreview.textContent = holderPrismDID.substring(0, 60) + '...';
-
-                // Auto-select PRISM DID option since it's recommended
-                selectKeySource('prism-did');
-            }
-
-            // Key source card click handlers
-            prismDIDOption.addEventListener('click', () => {
-                selectKeySource('prism-did');
-            });
-
-            manualOption.addEventListener('click', () => {
-                selectKeySource('manual');
-            });
-        }
-
-        function selectKeySource(source) {
-            const prismDIDOption = document.getElementById('prismDIDKeyOption');
-            const manualOption = document.getElementById('manualKeyOption');
-            const keyFormatHelp = document.getElementById('keyFormatHelp');
-            const dualKeySection = document.getElementById('dualKeyFormatSection');
-
-            // Update selected state
-            selectedKeySource = source;
-            document.getElementById('selectedKeySource').value = source;
-
-            // Update card selection states
-            prismDIDOption.classList.remove('selected');
-            manualOption.classList.remove('selected');
-
-            if (source === 'prism-did') {
-                prismDIDOption.classList.add('selected');
-                // Hide manual key entry sections
-                keyFormatHelp.style.display = 'none';
-                dualKeySection.style.display = 'none';
-                console.log('🔑 Key source: PRISM DID (auto-extract)');
-            } else {
-                manualOption.classList.add('selected');
-                // Show manual key entry sections
-                keyFormatHelp.style.display = 'block';
-                dualKeySection.style.display = 'block';
-                console.log('🔑 Key source: Manual entry');
-            }
         }
 
         function detectKeyFormat() {
@@ -986,47 +896,31 @@
                 return;
             }
 
-            // Check key source selection
-            const usePrismDID = selectedKeySource === 'prism-did';
+            // Validate keys are provided
+            const ed25519Key = document.getElementById('ed25519PublicKey').value.trim();
+            const x25519Key = document.getElementById('x25519PublicKey').value.trim();
 
-            // For PRISM DID key source, validate PRISM DID is available
-            if (usePrismDID) {
-                if (!holderPrismDID || !canAutoExtractKeys) {
-                    showStatusMessage(
-                        '<i class="fas fa-exclamation-triangle me-2"></i>' +
-                        '<strong>PRISM DID not available.</strong><br>' +
-                        'Please use manual key entry instead.',
-                        'error'
-                    );
-                    return;
-                }
-            } else {
-                // For manual entry, validate keys are provided
-                const ed25519Key = document.getElementById('ed25519PublicKey').value.trim();
-                const x25519Key = document.getElementById('x25519PublicKey').value.trim();
+            // Validate that both keys are provided
+            if (!ed25519Key || !x25519Key) {
+                showStatusMessage(
+                    '<i class="fas fa-exclamation-triangle me-2"></i>' +
+                    '<strong>Both keys required.</strong><br>' +
+                    'Please provide both Ed25519 (signing) and X25519 (encryption) public keys.',
+                    'error'
+                );
+                return;
+            }
 
-                // Validate that both keys are provided
-                if (!ed25519Key || !x25519Key) {
-                    showStatusMessage(
-                        '<i class="fas fa-exclamation-triangle me-2"></i>' +
-                        '<strong>Both keys required.</strong><br>' +
-                        'Please provide both Ed25519 (signing) and X25519 (encryption) public keys.',
-                        'error'
-                    );
-                    return;
-                }
+            // Validate key lengths (32 bytes = 43 characters in base64url)
+            if (ed25519Key.length !== 43 || x25519Key.length !== 43) {
+                showStatusMessage('<i class="fas fa-exclamation-triangle me-2"></i>Both keys must be exactly 43 characters (32 bytes in base64url).', 'error');
+                return;
+            }
 
-                // Validate key lengths (32 bytes = 43 characters in base64url)
-                if (ed25519Key.length !== 43 || x25519Key.length !== 43) {
-                    showStatusMessage('<i class="fas fa-exclamation-triangle me-2"></i>Both keys must be exactly 43 characters (32 bytes in base64url).', 'error');
-                    return;
-                }
-
-                // Validate key formats
-                if (!validateEd25519Key() || !validateX25519Key()) {
-                    showStatusMessage('<i class="fas fa-exclamation-triangle me-2"></i>Invalid key format. Please check both Ed25519 and X25519 keys.', 'error');
-                    return;
-                }
+            // Validate key formats
+            if (!validateEd25519Key() || !validateX25519Key()) {
+                showStatusMessage('<i class="fas fa-exclamation-triangle me-2"></i>Invalid key format. Please check both Ed25519 and X25519 keys.', 'error');
+                return;
             }
 
             // Show loading state
@@ -1051,34 +945,16 @@
                 const connectionId = (authData.bridgeResult && authData.bridgeResult.connectionId) ||
                                    urlParams.get('connectionId');
 
-                // Prepare request payload based on key source
-                let requestPayload;
-
-                if (usePrismDID) {
-                    // PRISM DID key extraction - server will extract keys automatically
-                    requestPayload = {
-                        sessionId: sessionId,
-                        clearanceLevel: selectedClearanceLevel,
-                        connectionId: connectionId,
-                        holderPrismDID: holderPrismDID  // Server extracts Ed25519 + X25519 from this
-                    };
-                    console.log('✅ Submitting with PRISM DID (auto-extract keys)');
-                    showStatusMessage('<i class="fas fa-magic me-2"></i>Submitting security clearance request with PRISM DID key auto-extraction...', 'info');
-                } else {
-                    // Manual key entry
-                    const ed25519Key = document.getElementById('ed25519PublicKey').value.trim();
-                    const x25519Key = document.getElementById('x25519PublicKey').value.trim();
-
-                    requestPayload = {
-                        sessionId: sessionId,
-                        clearanceLevel: selectedClearanceLevel,
-                        connectionId: connectionId,
-                        ed25519PublicKey: ed25519Key,
-                        x25519PublicKey: x25519Key
-                    };
-                    console.log('✅ Submitting dual-key format (v4.0.0)');
-                    showStatusMessage('<i class="fas fa-info-circle me-2"></i>Submitting security clearance request with dual-key format (v4.0.0)...', 'info');
-                }
+                // Prepare request payload with manual keys
+                const requestPayload = {
+                    sessionId: sessionId,
+                    clearanceLevel: selectedClearanceLevel,
+                    connectionId: connectionId,
+                    ed25519PublicKey: ed25519Key,
+                    x25519PublicKey: x25519Key
+                };
+                console.log('✅ Submitting dual-key format (v4.0.0)');
+                showStatusMessage('<i class="fas fa-info-circle me-2"></i>Submitting security clearance request...', 'info');
 
                 console.log('🔗 Using connectionId:', connectionId, '(from session bridge or URL parameter)');
 
@@ -1096,23 +972,15 @@
 
                 if (response.ok && result.success) {
                     // Success
-                    const formatBadge = usePrismDID
-                        ? '<span class="badge bg-primary">PRISM DID Keys</span>'
-                        : '<span class="badge bg-success">v4.0.0 Dual-Key</span>';
-
-                    const keySourceInfo = usePrismDID
-                        ? 'Key Source: PRISM DID (auto-extracted)'
-                        : 'Schema Version: v4.0.0 (Dual-Key)';
-
                     const successMessage = `
                         <i class="fas fa-check-circle me-2"></i>
-                        <strong>Security Clearance Issued Successfully!</strong> ${formatBadge}<br>
+                        <strong>Security Clearance Issued Successfully!</strong> <span class="badge bg-success">v4.0.0 Dual-Key</span><br>
                         <small>
                             Clearance ID: ${result.clearanceId}<br>
                             Record ID: ${result.recordId}<br>
                             Valid until: ${result.validUntil}<br>
                             ${result.keyFingerprint ? 'Key Fingerprint: ' + result.keyFingerprint + '<br>' : ''}
-                            ${keySourceInfo}
+                            Schema Version: v4.0.0 (Dual-Key)
                         </small>
                     `;
                     showStatusMessage(successMessage, 'success');
@@ -1123,11 +991,6 @@
                     document.querySelectorAll('#clearanceLevels .clearance-level-card').forEach(card => {
                         card.classList.remove('selected');
                     });
-
-                    // Reset key source if PRISM DID available
-                    if (canAutoExtractKeys && holderPrismDID) {
-                        selectKeySource('prism-did');
-                    }
 
                     // Reset format detection
                     detectKeyFormat();

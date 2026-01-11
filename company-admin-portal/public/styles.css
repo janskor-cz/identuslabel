@@ -610,10 +610,16 @@ code {
     text-align: center;
 }
 
-.qr-code-container canvas {
-    display: block;
+.qr-code-container #invitation-qr {
+    display: inline-block;
     border-radius: 8px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
+}
+
+.qr-code-container #invitation-qr img,
+.qr-code-container #invitation-qr canvas {
+    display: block;
 }
 
 .qr-label {

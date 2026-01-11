@@ -12,25 +12,26 @@
 const JSZip = require('jszip');
 const xml2js = require('xml2js');
 
-// Clearance level hierarchy
+// Clearance level hierarchy (standardized to CA Portal naming)
 const CLEARANCE_LEVELS = {
-  'UNCLASSIFIED': 1,
+  'INTERNAL': 1,
   'CONFIDENTIAL': 2,
-  'SECRET': 3,
-  'TOP_SECRET': 4
+  'RESTRICTED': 3,
+  'TOP-SECRET': 4
 };
 
 // Style name to clearance mapping (matches DocxClearanceParser and template)
 const STYLE_CLEARANCE_MAP = {
   // Paragraph styles
-  'unclassified': 'UNCLASSIFIED',
+  'internal': 'INTERNAL',
   'confidential': 'CONFIDENTIAL',
-  'secret': 'SECRET',
-  'topsecret': 'TOP_SECRET',
+  'restricted': 'RESTRICTED',
+  'topsecret': 'TOP-SECRET',
+  'top-secret': 'TOP-SECRET',
   // Character styles (inline)
   'confidentialinline': 'CONFIDENTIAL',
-  'secretinline': 'SECRET',
-  'topsecretinline': 'TOP_SECRET'
+  'restrictedinline': 'RESTRICTED',
+  'topsecretinline': 'TOP-SECRET'
 };
 
 class DocxRedactionService {

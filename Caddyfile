@@ -104,9 +104,9 @@ identuslabel.cz {
         }
     }
 
-    # Bob Wallet (/bob -> port 3002)
-    # Note: Using 'handle' instead of 'handle_path' to preserve /bob prefix for Next.js basePath
-    handle /bob* {
+    # IDL Wallet (/wallet -> port 3002)
+    # Note: Using 'handle' instead of 'handle_path' to preserve /wallet prefix for Next.js basePath
+    handle /wallet* {
         reverse_proxy 127.0.0.1:3002 {
             header_up Host {host}
             header_up X-Real-IP {remote_host}
@@ -192,6 +192,17 @@ identuslabel.cz {
     # Proxy to Cloud Agent REST API for credential/connection management
     handle_path /cloud-agent* {
         reverse_proxy 127.0.0.1:8085 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Top-Level Issuer Credential Status (proxy for mixed-content fix)
+    # Credentials issued by port 8100 have HTTP URLs - proxy to avoid mixed content blocking
+    handle_path /issuer/credential-status* {
+        reverse_proxy 127.0.0.1:8100 {
             header_up Host {host}
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
