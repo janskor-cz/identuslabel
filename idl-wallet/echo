@@ -1,0 +1,1 @@
+Listing all DIDs in Wallet A... curl -s -X GET http://91.99.4.54:8200/did-registrar/dids  -H apikey: 

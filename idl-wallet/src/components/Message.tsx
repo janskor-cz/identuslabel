@@ -1,0 +1,1341 @@
+import SDK from "@hyperledger/identus-edge-agent-sdk";
+import { v4 as uuid } from 'uuid';
+import { useState } from "react";
+import { useMountedApp } from "@/reducers/store";
+import { AgentRequire } from "./AgentRequire";
+import { Loading } from "./Loading";
+import { Credential } from "./Credential";
+import { refreshConnections } from "@/actions";
+import { MESSAGE_TYPES } from "@/utils/messageFilters";
+
+function MessageTitle(props) {
+  const { message, title } = props;
+  return <div className="text-xl font-bold">
+    <b>{title}: </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+  </div>
+}
+
+function CredentialDisplay(props) {
+  const { message } = props;
+  const attachments = message.attachments.reduce((acc, x) => {
+    if ("base64" in x.data) {
+      if (x.format === SDK.Domain.AttachmentFormats.JWT) {
+        const decoded = atob(x.data.base64);
+        return acc.concat(
+          SDK.JWTCredential.fromJWS(decoded)
+        );
+      }
+      if (x.format === SDK.Domain.AttachmentFormats.SDJWT) {
+        const decoded = atob(x.data.base64);
+        return acc.concat(
+          SDK.SDJWTCredential.fromJWS(decoded)
+        );
+      }
+      const decoded = atob(x.data.base64);
+      try {
+        const parsed = JSON.parse(decoded);
+        return acc.concat(parsed);
+      } catch (err) {
+
+      }
+    }
+    return acc;
+  }, []);
+
+  const attachment = attachments.at(0);
+  const parsed = { ...message };
+  if (typeof parsed.body === "string") {
+    (parsed as any).body = JSON.parse(parsed.body);
+  }
+  const format = message.attachments?.at(0).format;
+  return (
+    <div className="w-full mt-5 p-0 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700">
+      <div className="pt-6 px-6">
+        <MessageTitle message={message} title={`Credential (${format})`} />
+      </div>
+
+      <div className="p-0  space-y-6">
+        <Credential credential={attachment} />
+      </div>
+    </div>
+  );
+}
+
+function CredentialRequestMessage(message: SDK.Domain.Message) {
+  const parsed = { ...message };
+  if (typeof parsed.body === "string") {
+    (parsed as any).body = JSON.parse(parsed.body);
+  }
+  const format = parsed.body.formats?.at(0)?.format ?? 'unknown';
+  return <div
+    className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+  >
+    <div>
+      <MessageTitle message={message} title="Credential Request" />
+      <p>You requested the Credential through this Credential Request Message of type {format}</p>
+    </div>
+  </div>;
+}
+
+const InputFields: React.FC<{ fields: SDK.Domain.InputField[]; }> = props => {
+  return <>
+    Should proof the following claims:
+    {
+      props.fields.map((field, i) => {
+        return <div key={`field${i}`} >
+          <p className=" text-sm font-normal text-gray-500 dark:text-gray-400">
+            {
+              field.name
+            }
+            {
+              field.filter ? `must match ${JSON.stringify(field.filter)
+                }` : ``
+            }
+          </p>
+        </div>;
+
+      })
+    }
+  </>;
+};
+
+function replacePlaceholders(text: string, args: any[]): string {
+  if (!text || typeof text !== 'string') {
+    return '';
+  }
+  return text.replace(/\{(\d+)\}/g, (match, index) => {
+    const idx = parseInt(index) - 1; // Adjust for zero-based array index
+    return args && args[idx] !== undefined ? args[idx] : match; // Replace or keep original if undefined
+  });
+}
+
+export function Message({ message }) {
+  const app = useMountedApp();
+  const [response, setResponse] = useState<string>("");
+  const [collapsed, setCollapsed] = useState<boolean>(true);
+  const [options, setOptions] = useState<any>({});
+
+  const body = message.body;
+  const agent = app.agent.instance;
+
+  const parsed = { ...message };
+  if (typeof parsed.body === "string") {
+    (parsed as any).body = JSON.parse(message.body);
+  }
+
+  const attachments = message.attachments.reduce((acc, x) => {
+    if ("base64" in x.data) {
+      if (x.format === "prism/jwt") {
+        const decodedFirst = atob(x.data.base64);
+        const decoded = atob(decodedFirst.split(".")[1]);
+        const parsed = JSON.parse(decoded);
+        return acc.concat(parsed);
+      }
+      const decoded = atob(x.data.base64);
+      try {
+        const parsed = JSON.parse(decoded);
+        return acc.concat(parsed);
+      } catch (err) {
+
+      }
+    }
+    return acc;
+  }, []);
+
+  const handleSend = async () => {
+    const text = response;
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const from = message?.from as SDK.Domain.DID;
+    const to = message?.to as SDK.Domain.DID;
+    const thid = message?.thid || message?.id;
+    try {
+      if (!agent) {
+        throw new Error("Start the agent first");
+      }
+      await agent.sendMessage(
+        new SDK.BasicMessage(
+          { content: text },
+          to,
+          from,
+          thid
+        ).makeMessage()
+
+      );
+    }
+    catch (e) {
+      console.log(e);
+    }
+  };
+
+  const hasResponse = app.messages.find((appMessage) => {
+    if (!message.thid || !appMessage.thid) {
+      return false;
+    }
+    if (appMessage.id === message.id) {
+      return false;
+    }
+    const messageCreatedTime = parseInt(message.createdTime);
+    const appMessageCreatedTime = parseInt(appMessage.createdTime);
+    const response = appMessage.thid === message.thid && messageCreatedTime < appMessageCreatedTime;
+    return response;
+  });
+
+  const isReceived = message.direction !== SDK.Domain.MessageDirection.SENT;
+
+  if (message.piuri === "https://didcomm.org/basicmessage/2.0/message") {
+    // ✅ Parse StandardMessageBody if present
+    let messageContent = parsed.body.content;
+    let isStandardFormat = false;
+    let standardBody: any = null;
+
+    console.log('🔍 [Message] Starting StandardMessageBody parsing...');
+    console.log('🔍 [Message] messageContent type:', typeof messageContent);
+    console.log('🔍 [Message] messageContent value:', messageContent);
+
+    try {
+      const parsedContent = typeof messageContent === 'string' ? JSON.parse(messageContent) : messageContent;
+      console.log('🔍 [Message] parsedContent:', parsedContent);
+      console.log('🔍 [Message] parsedContent type:', typeof parsedContent);
+      console.log('🔍 [Message] has encrypted?:', 'encrypted' in parsedContent);
+      console.log('🔍 [Message] has timestamp?:', 'timestamp' in parsedContent);
+
+      if (parsedContent && typeof parsedContent === 'object' && 'encrypted' in parsedContent && 'timestamp' in parsedContent) {
+        isStandardFormat = true;
+        standardBody = parsedContent;
+        console.log('✅ [Message] StandardMessageBody detected!');
+      } else {
+        console.log('❌ [Message] Not StandardMessageBody format');
+      }
+    } catch (e) {
+      console.error('❌ [Message] JSON parse error:', e);
+      // Not standard format, use as-is
+    }
+
+    console.log('🔍 [Message] Final isStandardFormat:', isStandardFormat);
+    console.log('🔍 [Message] Final standardBody:', standardBody);
+
+    // Format timestamp
+    const getTimestampMs = (ts: number | string): number => {
+      const numTs = typeof ts === 'string' ? parseInt(ts) : ts;
+      // Convert SDK timestamp (seconds) to milliseconds if needed
+      // Threshold: 10 billion (year 2286 in seconds) - any timestamp below this is in seconds
+      return numTs < 10000000000 ? numTs * 1000 : numTs;
+    };
+
+    const timestamp = standardBody?.timestamp
+      ? new Date(getTimestampMs(standardBody.timestamp)).toLocaleString()
+      : new Date(getTimestampMs(message.createdTime)).toLocaleString();
+
+    return <div
+      className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+    >
+      <div>
+        <b>Basic Message: </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          <b>From:</b> {message.from.toString().substring(0, 60)}...
+        </p>
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          <b>To:</b> {message.to.toString().substring(0, 60)}...
+        </p>
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          <b>Time:</b> {timestamp}
+        </p>
+
+        {isStandardFormat && standardBody.encrypted ? (
+          <div className="mt-4 p-4 bg-yellow-50 dark:bg-yellow-900 border-l-4 border-yellow-400 rounded">
+            <p className="text-lg font-semibold text-yellow-800 dark:text-yellow-200">
+              🔒 [ENCRYPTED MESSAGE - {standardBody.securityLevel || 'CLASSIFIED'}]
+            </p>
+            <p className="text-sm text-yellow-700 dark:text-yellow-300 mt-2">
+              Algorithm: {standardBody.encryptionMeta?.algorithm || 'Unknown'}
+            </p>
+            <p className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">
+              This message is encrypted end-to-end. Content can only be decrypted by the recipient.
+            </p>
+          </div>
+        ) : (
+          <pre style={{
+            textAlign: "left",
+            wordWrap: "break-word",
+            wordBreak: "break-all",
+            whiteSpace: "pre-wrap",
+            marginTop: "1rem"
+          }}
+          >
+            {isStandardFormat ? standardBody.content : JSON.stringify(messageContent, null, 2)}
+          </pre>
+        )}
+        {attachments.length > 0 && (
+          <pre style={{
+            textAlign: "left",
+            wordWrap: "break-word",
+            wordBreak: "break-all",
+            whiteSpace: "pre-wrap",
+          }}
+          >
+            <b>Attachments:</b>
+            {attachments.map(x => JSON.stringify(x, null, 2))}
+          </pre>
+        )}
+
+      </div>
+      {
+        message?.isAnswering && <>
+          <div role="status">
+            <svg aria-hidden="true" className="w-8 h-8 text-gray-200 animate-spin dark:text-gray-600 fill-blue-600" viewBox="0 0 100 101" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M100 50.5908C100 78.2051 77.6142 100.591 50 100.591C22.3858 100.591 0 78.2051 0 50.5908C0 22.9766 22.3858 0.59082 50 0.59082C77.6142 0.59082 100 22.9766 100 50.5908ZM9.08144 50.5908C9.08144 73.1895 27.4013 91.5094 50 91.5094C72.5987 91.5094 90.9186 73.1895 90.9186 50.5908C90.9186 27.9921 72.5987 9.67226 50 9.67226C27.4013 9.67226 9.08144 27.9921 9.08144 50.5908Z" fill="currentColor" />
+              <path d="M93.9676 39.0409C96.393 38.4038 97.8624 35.9116 97.0079 33.5539C95.2932 28.8227 92.871 24.3692 89.8167 20.348C85.8452 15.1192 80.8826 10.7238 75.2124 7.41289C69.5422 4.10194 63.2754 1.94025 56.7698 1.05124C51.7666 0.367541 46.6976 0.446843 41.7345 1.27873C39.2613 1.69328 37.813 4.19778 38.4501 6.62326C39.0873 9.04874 41.5694 10.4717 44.0505 10.1071C47.8511 9.54855 51.7191 9.52689 55.5402 10.0491C60.8642 10.7766 65.9928 12.5457 70.6331 15.2552C75.2735 17.9648 79.3347 21.5619 82.5849 25.841C84.9175 28.9121 86.7997 32.2913 88.1811 35.8758C89.083 38.2158 91.5421 39.6781 93.9676 39.0409Z" fill="currentFill" />
+            </svg>
+            <span className="sr-only">Loading...</span>
+          </div>
+        </>
+      }
+      {
+        !message?.isAnswering && isReceived && !hasResponse && <AgentRequire>
+          <input
+            className="block mt-5 p-2.5 w-full text-sm text-gray-900 bg-gray-50 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white dark:focus:ring-blue-500 dark:focus:border-blue-500" type="text" value={response} placeholder="Your response" onChange={(e) => setResponse(e.target.value)} />
+
+          <button className="mt-5 inline-flex items-center justify-center px-5 py-3 text-base font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-900" style={{ width: 120 }} onClick={() => {
+            handleSend();
+          }}>Respond</button>
+        </AgentRequire>
+      }
+    </div>;
+  }
+
+  if (message.piuri === "https://atalaprism.io/mercury/connections/1.0/request") {
+    const isReceived = message.direction === 1;
+    const [isAccepting, setIsAccepting] = useState<boolean>(false);
+    const [hasAccepted, setHasAccepted] = useState<boolean>(false);
+    const app = useMountedApp();
+    const dispatch = app.dispatch;
+
+    const handleAcceptConnectionRequest = async () => {
+      console.log('🚀 STARTING connection acceptance process...');
+      console.log('🚀 Button clicked for message:', message.id);
+
+      if (!agent) {
+        alert("Agent not started");
+        return;
+      }
+
+      setIsAccepting(true);
+      try {
+        console.log('🔧 Accepting connection request from Bob\'s NEW ephemeral DID:', message.from?.toString());
+        console.log('📋 Original message ID:', message.id);
+        console.log('📋 Original message PIURI:', message.piuri);
+
+        // Create Alice's response DID with mediator service endpoints
+        const responseDID = await agent.createNewPeerDID([], true);
+        console.log('✅ Alice response DID created:', responseDID.toString().substring(0, 60) + '...');
+
+        // Get the connection request data - parse message body for connection request
+        let requestBody;
+        try {
+          if (typeof message.body === "string") {
+            requestBody = JSON.parse(message.body);
+          } else {
+            requestBody = message.body || {};
+          }
+        } catch (parseError) {
+          console.warn('⚠️ Failed to parse message body, using fallback:', parseError);
+          requestBody = {};
+        }
+
+        const connectionLabel = requestBody.label || requestBody.goalCode || 'Unknown Connection';
+        console.log('🏷️ Connection label:', connectionLabel);
+        console.log('📄 Request body:', JSON.stringify(requestBody, null, 2));
+
+        // Create connection response message
+        const responseBody = {
+          accept: requestBody.accept || ["didcomm/v2"],
+          goal_code: "connect",
+          goal: `Response to connection request`,
+          label: connectionLabel
+        };
+
+        // Create connection response message using manual SDK.Domain.Message construction
+        const fromDID = responseDID;  // Alice's new response DID
+
+        // Ensure toDID is a proper DID object
+        let toDID: SDK.Domain.DID;
+        if (typeof message.from === 'string') {
+          toDID = SDK.Domain.DID.fromString(message.from);
+        } else if (message.from && typeof message.from === 'object' && 'toString' in message.from) {
+          // It's already a DID-like object, try to reconstruct it
+          toDID = SDK.Domain.DID.fromString(message.from.toString());
+        } else {
+          throw new Error('Invalid DID in message.from field');
+        }
+
+        console.log('🔄 DID Mapping for connection response:');
+        console.log('   📤 FROM (Alice):', fromDID.toString().substring(0, 60) + '...');
+        console.log('   📥 TO (Bob NEW):', toDID.toString().substring(0, 60) + '...');
+
+        const responseMessage = new SDK.Domain.Message(
+          JSON.stringify(responseBody),
+          uuid(),
+          SDK.ProtocolType.DidcommconnectionResponse,
+          fromDID,
+          toDID,
+          [],
+          message.id  // Use the request message ID as thread ID
+        );
+
+        console.log('📤 Sending connection response...');
+        await agent.sendMessage(responseMessage);
+
+        // Create and store the DIDPair connection
+        console.log('🔗 Creating DIDPair connection:');
+        console.log('   🏠 Host (Alice):', fromDID.toString().substring(0, 60) + '...');
+        console.log('   📱 Receiver (Bob NEW):', toDID.toString().substring(0, 60) + '...');
+        console.log('   🏷️ Label:', connectionLabel);
+
+        // Ensure DIDs are proper SDK.Domain.DID instances
+        const hostDID = typeof fromDID === 'string' ? SDK.Domain.DID.fromString(fromDID) : fromDID;
+        const receiverDID = typeof toDID === 'string' ? SDK.Domain.DID.fromString(toDID) : toDID;
+
+        const didPair = new SDK.Domain.DIDPair(
+          hostDID,  // Alice's DID (host)
+          receiverDID,    // Bob's NEW ephemeral DID (receiver)
+          connectionLabel  // 'name' field in DIDPair constructor
+        );
+
+        console.log('✅ DIDPair created successfully');
+        console.log('   DIDPair host type:', typeof didPair.host, didPair.host.constructor.name);
+        console.log('   DIDPair receiver type:', typeof didPair.receiver, didPair.receiver.constructor.name);
+
+        // Check if connection already exists to avoid duplicates
+        try {
+          console.log('🔍 Checking for existing connections...');
+          const existingConnections = await agent.pluto.getAllDidPairs();
+          console.log('📊 Found', existingConnections.length, 'existing connections');
+
+          const existingConnection = existingConnections.find(conn =>
+            conn.receiver.toString() === toDID.toString() &&
+            conn.host.toString() === fromDID.toString()
+          );
+
+          if (!existingConnection) {
+            console.log('💾 Storing new DIDPair connection using connectionManager...');
+            await agent.connectionManager.addConnection(didPair);
+            console.log('✅ Connection stored successfully:', connectionLabel);
+          } else {
+            console.log('✅ Connection already exists:', connectionLabel);
+          }
+        } catch (storeError) {
+          console.warn('⚠️ Connection storage issue (may already exist):', storeError.message);
+          console.warn('   Error details:', storeError);
+          // Continue with success even if storage fails - connection may already exist
+        }
+
+        // Refresh Redux connections state to show new connection in UI
+        console.log('🔄 Refreshing connections state...');
+        await dispatch(refreshConnections());
+        console.log('✅ Connections state refreshed');
+
+        setHasAccepted(true);
+        alert(`Connection accepted! You are now connected to "${connectionLabel}"`);
+
+      } catch (error) {
+        console.error('❌ Failed to accept connection request:', error);
+        console.error('❌ Error stack:', error.stack);
+        console.error('❌ Message details:', {
+          id: message.id,
+          piuri: message.piuri,
+          from: message.from?.toString(),
+          body: message.body
+        });
+        alert(`Failed to accept connection: ${error.message}`);
+      } finally {
+        console.log('🔄 Resetting acceptance state...');
+        setIsAccepting(false);
+      }
+    };
+
+    return <div
+      className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+    >
+      <div>
+        <b>Connection Request: </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+        <pre style={{
+          textAlign: "left",
+          wordWrap: "break-word",
+          wordBreak: "break-all",
+          whiteSpace: "pre-wrap",
+        }}
+        >
+          {JSON.stringify(parsed.body, null, 2)}
+        </pre>
+
+        {/* Add Accept button for received connection requests */}
+        {isReceived && !hasAccepted && (
+          <div className="mt-4">
+            <AgentRequire>
+              {isAccepting ? (
+                <div className="flex items-center">
+                  <svg aria-hidden="true" className="w-6 h-6 text-gray-200 animate-spin dark:text-gray-600 fill-blue-600" viewBox="0 0 100 101" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M100 50.5908C100 78.2051 77.6142 100.591 50 100.591C22.3858 100.591 0 78.2051 0 50.5908C0 22.9766 22.3858 0.59082 50 0.59082C77.6142 0.59082 100 22.9766 100 50.5908ZM9.08144 50.5908C9.08144 73.1895 27.4013 91.5094 50 91.5094C72.5987 91.5094 90.9186 73.1895 90.9186 50.5908C90.9186 27.9921 72.5987 9.67226 50 9.67226C27.4013 9.67226 9.08144 27.9921 9.08144 50.5908Z" fill="currentColor" />
+                    <path d="M93.9676 39.0409C96.393 38.4038 97.8624 35.9116 97.0079 33.5539C95.2932 28.8227 92.871 24.3692 89.8167 20.348C85.8452 15.1192 80.8826 10.7238 75.2124 7.41289C69.5422 4.10194 63.2754 1.94025 56.7698 1.05124C51.7666 0.367541 46.6976 0.446843 41.7345 1.27873C39.2613 1.69328 37.813 4.19778 38.4501 6.62326C39.0873 9.04874 41.5694 10.4717 44.0505 10.1071C47.8511 9.54855 51.7191 9.52689 55.5402 10.0491C60.8642 10.7766 65.9928 12.5457 70.6331 15.2552C75.2735 17.9648 79.3347 21.5619 82.5849 25.841C84.9175 28.9121 86.7997 32.2913 88.1811 35.8758C89.083 38.2158 91.5421 39.6781 93.9676 39.0409Z" fill="currentFill" />
+                  </svg>
+                  <span className="ml-2">Accepting connection...</span>
+                </div>
+              ) : (
+                <button
+                  className="px-6 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 focus:ring-4 focus:ring-green-300 dark:focus:ring-green-900 transition-colors"
+                  onClick={handleAcceptConnectionRequest}
+                >
+                  ✅ Accept Connection Request
+                </button>
+              )}
+            </AgentRequire>
+          </div>
+        )}
+
+        {hasAccepted && (
+          <div className="mt-4 p-3 bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-700 rounded-lg">
+            <p className="text-green-800 dark:text-green-200 font-semibold">
+              ✅ Connection request accepted! Check your Connections page.
+            </p>
+          </div>
+        )}
+      </div>
+
+    </div>;
+  }
+
+  // ✅ DIDExchange protocol support - Handle standard DIDComm connection requests from Bob
+  if (message.piuri === MESSAGE_TYPES.DIDEXCHANGE_REQUEST) {
+    const isReceived = message.direction === 1;
+    const [isAccepting, setIsAccepting] = useState<boolean>(false);
+    const [hasAccepted, setHasAccepted] = useState<boolean>(false);
+    const app = useMountedApp();
+    const dispatch = app.dispatch;
+
+    const handleAcceptConnectionRequest = async () => {
+      console.log('🤝 [DIDEXCHANGE] STARTING connection acceptance process...');
+      console.log('🤝 [DIDEXCHANGE] Button clicked for message:', message.id);
+
+      if (!agent) {
+        alert("Agent not started");
+        return;
+      }
+
+      setIsAccepting(true);
+      try {
+        console.log('🔧 [DIDEXCHANGE] Accepting connection request from Bob:', message.from?.toString());
+        console.log('📋 [DIDEXCHANGE] Original message ID:', message.id);
+        console.log('📋 [DIDEXCHANGE] Original message PIURI:', message.piuri);
+
+        // Create Alice's response DID with mediator service endpoints
+        const responseDID = await agent.createNewPeerDID([], true);
+        console.log('✅ [DIDEXCHANGE] Alice response DID created:', responseDID.toString().substring(0, 60) + '...');
+
+        // Get the connection request data - parse message body for connection request
+        let requestBody;
+        try {
+          if (typeof message.body === "string") {
+            requestBody = JSON.parse(message.body);
+          } else {
+            requestBody = message.body || {};
+          }
+        } catch (parseError) {
+          console.warn('⚠️ [DIDEXCHANGE] Failed to parse message body, using fallback:', parseError);
+          requestBody = {};
+        }
+
+        const connectionLabel = requestBody.label || requestBody.goalCode || 'Unknown Connection';
+        console.log('🏷️ [DIDEXCHANGE] Connection label:', connectionLabel);
+        console.log('📄 [DIDEXCHANGE] Request body:', JSON.stringify(requestBody, null, 2));
+
+        // Create connection response message for DIDExchange
+        const responseBody = {
+          "@type": "https://didcomm.org/didexchange/1.0/response",
+          "@id": uuid(),
+          "~thread": {
+            "thid": message.id  // Thread ID references the request message
+          },
+          "did": responseDID.toString(),  // Alice's DID for the connection
+          "label": connectionLabel
+        };
+
+        // Create connection response message using manual SDK.Domain.Message construction
+        const fromDID = responseDID;  // Alice's new response DID
+
+        // Ensure toDID is a proper DID object
+        let toDID: SDK.Domain.DID;
+        if (typeof message.from === 'string') {
+          toDID = SDK.Domain.DID.fromString(message.from);
+        } else if (message.from && typeof message.from === 'object' && 'toString' in message.from) {
+          // It's already a DID-like object, try to reconstruct it
+          toDID = SDK.Domain.DID.fromString(message.from.toString());
+        } else {
+          throw new Error('Invalid DID in message.from field');
+        }
+
+        console.log('🔄 [DIDEXCHANGE] DID Mapping for connection response:');
+        console.log('   📤 FROM (Alice):', fromDID.toString().substring(0, 60) + '...');
+        console.log('   📥 TO (Bob):', toDID.toString().substring(0, 60) + '...');
+
+        const responseMessage = new SDK.Domain.Message(
+          JSON.stringify(responseBody),
+          responseBody["@id"],
+          "https://didcomm.org/didexchange/1.0/response",
+          fromDID,
+          toDID,
+          [],
+          message.id  // Use the request message ID as thread ID
+        );
+
+        console.log('📤 [DIDEXCHANGE] Sending connection response...');
+        await agent.sendMessage(responseMessage);
+
+        // Create and store the DIDPair connection
+        console.log('🔗 [DIDEXCHANGE] Creating DIDPair connection:');
+        console.log('   🏠 Host (Alice):', fromDID.toString().substring(0, 60) + '...');
+        console.log('   📱 Receiver (Bob):', toDID.toString().substring(0, 60) + '...');
+        console.log('   🏷️ Label:', connectionLabel);
+
+        // Ensure DIDs are proper SDK.Domain.DID instances
+        const hostDID = typeof fromDID === 'string' ? SDK.Domain.DID.fromString(fromDID) : fromDID;
+        const receiverDID = typeof toDID === 'string' ? SDK.Domain.DID.fromString(toDID) : toDID;
+
+        const didPair = new SDK.Domain.DIDPair(
+          hostDID,  // Alice's DID (host)
+          receiverDID,    // Bob's ephemeral DID (receiver)
+          connectionLabel  // 'name' field in DIDPair constructor
+        );
+
+        console.log('✅ [DIDEXCHANGE] DIDPair created successfully');
+
+        // Check if connection already exists to avoid duplicates
+        try {
+          console.log('🔍 [DIDEXCHANGE] Checking for existing connections...');
+          const existingConnections = await agent.pluto.getAllDidPairs();
+          console.log('📊 [DIDEXCHANGE] Found', existingConnections.length, 'existing connections');
+
+          const existingConnection = existingConnections.find(conn =>
+            conn.receiver.toString() === toDID.toString() &&
+            conn.host.toString() === fromDID.toString()
+          );
+
+          if (!existingConnection) {
+            console.log('💾 [DIDEXCHANGE] Storing new DIDPair connection using connectionManager...');
+            await agent.connectionManager.addConnection(didPair);
+            console.log('✅ [DIDEXCHANGE] Connection stored successfully:', connectionLabel);
+          } else {
+            console.log('✅ [DIDEXCHANGE] Connection already exists:', connectionLabel);
+          }
+        } catch (storeError) {
+          console.warn('⚠️ [DIDEXCHANGE] Connection storage issue (may already exist):', storeError.message);
+          // Continue with success even if storage fails - connection may already exist
+        }
+
+        // Refresh Redux connections state to show new connection in UI
+        console.log('🔄 [DIDEXCHANGE] Refreshing connections state...');
+        await dispatch(refreshConnections());
+        console.log('✅ [DIDEXCHANGE] Connections state refreshed');
+
+        setHasAccepted(true);
+        alert(`DIDExchange connection accepted! You are now connected to "${connectionLabel}"`);
+
+      } catch (error) {
+        console.error('❌ [DIDEXCHANGE] Failed to accept connection request:', error);
+        console.error('❌ [DIDEXCHANGE] Error stack:', error.stack);
+        alert(`Failed to accept DIDExchange connection: ${error.message}`);
+      } finally {
+        console.log('🔄 [DIDEXCHANGE] Resetting acceptance state...');
+        setIsAccepting(false);
+      }
+    };
+
+    return <div
+      className="w-full mt-5 p-6 bg-blue-50 border-2 border-blue-300 rounded-lg shadow-lg dark:bg-blue-900/30 dark:border-blue-700"
+    >
+      <div>
+        <div className="flex items-center space-x-2 mb-3">
+          <span className="text-2xl">🤝</span>
+          <b className="text-blue-800 dark:text-blue-200 text-lg">DIDExchange Connection Request</b>
+        </div>
+        <p className="text-sm text-blue-700 dark:text-blue-300 mb-2">
+          <b>ID:</b> {message.id} {message.direction === 1 ? '(received)' : '(sent)'}
+        </p>
+        <pre className="bg-white dark:bg-gray-800 p-3 rounded text-xs overflow-auto" style={{
+          textAlign: "left",
+          wordWrap: "break-word",
+          wordBreak: "break-all",
+          whiteSpace: "pre-wrap",
+        }}>
+          {JSON.stringify(parsed.body, null, 2)}
+        </pre>
+
+        {/* Add Accept button for received connection requests */}
+        {isReceived && !hasAccepted && (
+          <div className="mt-4">
+            <AgentRequire>
+              {isAccepting ? (
+                <div className="flex items-center">
+                  <svg aria-hidden="true" className="w-6 h-6 text-gray-200 animate-spin dark:text-gray-600 fill-blue-600" viewBox="0 0 100 101" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M100 50.5908C100 78.2051 77.6142 100.591 50 100.591C22.3858 100.591 0 78.2051 0 50.5908C0 22.9766 22.3858 0.59082 50 0.59082C77.6142 0.59082 100 22.9766 100 50.5908ZM9.08144 50.5908C9.08144 73.1895 27.4013 91.5094 50 91.5094C72.5987 91.5094 90.9186 73.1895 90.9186 50.5908C90.9186 27.9921 72.5987 9.67226 50 9.67226C27.4013 9.67226 9.08144 27.9921 9.08144 50.5908Z" fill="currentColor" />
+                    <path d="M93.9676 39.0409C96.393 38.4038 97.8624 35.9116 97.0079 33.5539C95.2932 28.8227 92.871 24.3692 89.8167 20.348C85.8452 15.1192 80.8826 10.7238 75.2124 7.41289C69.5422 4.10194 63.2754 1.94025 56.7698 1.05124C51.7666 0.367541 46.6976 0.446843 41.7345 1.27873C39.2613 1.69328 37.813 4.19778 38.4501 6.62326C39.0873 9.04874 41.5694 10.4717 44.0505 10.1071C47.8511 9.54855 51.7191 9.52689 55.5402 10.0491C60.8642 10.7766 65.9928 12.5457 70.6331 15.2552C75.2735 17.9648 79.3347 21.5619 82.5849 25.841C84.9175 28.9121 86.7997 32.2913 88.1811 35.8758C89.083 38.2158 91.5421 39.6781 93.9676 39.0409Z" fill="currentFill" />
+                  </svg>
+                  <span className="ml-2 text-blue-700 dark:text-blue-300 font-semibold">Accepting DIDExchange connection...</span>
+                </div>
+              ) : (
+                <button
+                  className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-800 transition-colors shadow-md"
+                  onClick={handleAcceptConnectionRequest}
+                >
+                  ✅ Accept DIDExchange Connection Request
+                </button>
+              )}
+            </AgentRequire>
+          </div>
+        )}
+
+        {hasAccepted && (
+          <div className="mt-4 p-4 bg-green-50 dark:bg-green-900/30 border border-green-300 dark:border-green-700 rounded-lg">
+            <p className="text-green-800 dark:text-green-200 font-semibold flex items-center space-x-2">
+              <span>✅</span>
+              <span>DIDExchange connection request accepted! Check your Connections page.</span>
+            </p>
+          </div>
+        )}
+      </div>
+    </div>;
+  }
+
+  if (message.piuri === "https://atalaprism.io/mercury/connections/1.0/response") {
+    return <div
+      className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+    >
+      <div>
+        <b>Connection established: </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+        <pre style={{
+          textAlign: "left",
+          wordWrap: "break-word",
+          wordBreak: "break-all",
+          whiteSpace: "pre-wrap",
+        }}
+        >
+          {JSON.stringify(parsed.body, null, 2)}
+        </pre>
+
+
+      </div>
+
+    </div>;
+  }
+
+  if (message.piuri === "https://didcomm.org/issue-credential/3.0/request-credential") {
+    return <CredentialRequestMessage {...message} />
+  }
+
+  if (message.piuri === "https://didcomm.org/issue-credential/3.0/issue-credential") {
+    return <CredentialDisplay message={message} />
+  }
+
+  if (message.piuri === "https://didcomm.org/issue-credential/3.0/offer-credential") {
+    const data = body.credential_preview.body.attributes.map(({ name }) => name);
+    return <div
+      className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+    >
+      <div>
+        <p
+          className=" text-lg font-normal text-gray-500 lg:text-xl  dark:text-gray-400">
+          <b>Credential Offer </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+        </p>
+
+        Credential will contain the following fields
+        {
+          data.map((field, i) => {
+            return <p
+              key={`field${i}`}
+              className=" text-lg font-normal text-gray-500 lg:text-xl  dark:text-gray-400">
+              {field}
+            </p>;
+
+          })
+        }
+
+        {isReceived && !hasResponse && <AgentRequire>
+          {
+            message?.isAnswering && <>
+              <div role="status">
+                <svg aria-hidden="true" className="w-8 h-8 text-gray-200 animate-spin dark:text-gray-600 fill-blue-600" viewBox="0 0 100 101" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M100 50.5908C100 78.2051 77.6142 100.591 50 100.591C22.3858 100.591 0 78.2051 0 50.5908C0 22.9766 22.3858 0.59082 50 0.59082C77.6142 0.59082 100 22.9766 100 50.5908ZM9.08144 50.5908C9.08144 73.1895 27.4013 91.5094 50 91.5094C72.5987 91.5094 90.9186 73.1895 90.9186 50.5908C90.9186 27.9921 72.5987 9.67226 50 9.67226C27.4013 9.67226 9.08144 27.9921 9.08144 50.5908Z" fill="currentColor" />
+                  <path d="M93.9676 39.0409C96.393 38.4038 97.8624 35.9116 97.0079 33.5539C95.2932 28.8227 92.871 24.3692 89.8167 20.348C85.8452 15.1192 80.8826 10.7238 75.2124 7.41289C69.5422 4.10194 63.2754 1.94025 56.7698 1.05124C51.7666 0.367541 46.6976 0.446843 41.7345 1.27873C39.2613 1.69328 37.813 4.19778 38.4501 6.62326C39.0873 9.04874 41.5694 10.4717 44.0505 10.1071C47.8511 9.54855 51.7191 9.52689 55.5402 10.0491C60.8642 10.7766 65.9928 12.5457 70.6331 15.2552C75.2735 17.9648 79.3347 21.5619 82.5849 25.841C84.9175 28.9121 86.7997 32.2913 88.1811 35.8758C89.083 38.2158 91.5421 39.6781 93.9676 39.0409Z" fill="currentFill" />
+                </svg>
+                <span className="sr-only">Loading...</span>
+              </div>
+            </>
+          }
+          {
+            !message?.isAnswering && <>
+              {
+                message?.error && <p>{JSON.stringify(message.error.message)}</p>
+              }
+
+              <button className="mt-5 inline-flex items-center justify-center px-5 py-3 text-base font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-900" style={{ width: 120 }} onClick={() => {
+                if (!agent) {
+                  throw new Error("Start the agent first");
+                }
+                app.acceptCredentialOffer({ agent: agent, message: message });
+              }}>🎫 Accept Credential</button>
+
+              <button className="mt-5 mx-5 inline-flex items-center justify-center px-5 py-3 text-base font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-900" style={{ width: 120 }} onClick={() => {
+                if (!agent) {
+                  throw new Error("Start the agent first");
+                }
+                if (!app.db.instance) {
+                  throw new Error("Start the database first");
+                }
+                app.rejectCredentialOffer({ message: message, pluto: app.db.instance });
+              }}>❌ Reject Credential</button>
+            </>
+          }
+        </AgentRequire>}
+
+      </div>
+    </div>;
+  }
+
+  if (message.piuri === MESSAGE_TYPES.PRESENTATION) {
+
+    return <div
+      className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+    >
+      <div>
+        <p
+          className=" text-lg font-normal text-gray-500 lg:text-xl  dark:text-gray-400">
+          <b>Verification Proof </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+        </p>
+        <div
+          className="overflow-x-auto h-auto text-sm font-normal text-gray-500dark:text-gray-400">
+          <p>You have sent proof in the past to {message.to.toString()}</p>
+          <AgentRequire text="to verify a proof">
+            <button
+              className="mt-5 inline-flex items-center justify-center px-5 py-3 text-base font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-900"
+              style={{ width: 120 }}
+              onClick={() => {
+                app.agent.instance?.handlePresentation(SDK.Presentation.fromMessage(message))
+                  .then((valid) => {
+                    setOptions({ valid: valid });
+                  })
+                  .catch((err) => {
+                    setOptions({ valid: false, reason: err.message });
+                  });
+              }}>
+              Verify the Proof
+            </button>
+            <p>{
+              options && <>
+                {
+                  options.valid === true && <>Presentation is VALID</>
+                }
+                {
+                  options.valid === false && <>Presentation is NOT VALID: {options.reason || 'unknown'} </>
+                }
+              </>}</p>
+          </AgentRequire>
+        </div>
+      </div>
+    </div>;
+  }
+
+  if (message.piuri === SDK.ProtocolType.ProblemReporting) {
+    const content = replacePlaceholders(message.body.comment, message.body.args);
+
+    return <div className="flex items-center justify-center">
+      <div className="w-full bg-red-300 border-l-4 border-red-500 text-red-700 p-4 rounded-md shadow-lg my-5 w-full">
+        <div className="flex">
+          <svg
+            className="w-6 h-6 text-red-500 mr-3"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="2"
+              d="M18.364 5.636l-12.728 12.728M5.636 5.636l12.728 12.728"
+            ></path>
+          </svg>
+          <div>
+            <p className="font-bold">Error {message.id}</p>
+          </div>
+        </div>
+        <div className="mt-5">
+          <div className="w-full shadow-lg bg-white px-10 py-4 rounded-lg">An error ocurred, {content}, CODE {message.body.code}</div>
+        </div>
+      </div>
+    </div>
+  }
+
+  if (message.piuri === MESSAGE_TYPES.PRESENTATION_REQUEST) {
+    const requestPresentationMessage = SDK.RequestPresentation.fromMessage(message);
+    const requestPresentation = requestPresentationMessage.decodedAttachments.at(0);
+    const requestPresentationFormat = requestPresentationMessage.attachments.at(0)?.format;
+    const shouldRespond = isReceived && !hasResponse;
+    if (requestPresentationFormat === SDK.Domain.AttachmentFormats.PRESENTATION_EXCHANGE_DEFINITIONS) {
+
+      if (SDK.isPresentationDefinitionRequestType(requestPresentation, SDK.Domain.CredentialType.SDJWT)) {
+        const credentials: SDK.Domain.Credential[] = app.credentials.filter((c) => c instanceof SDK.SDJWTCredential);
+        const fields: SDK.Domain.InputField[] = requestPresentation.presentation_definition ?
+          requestPresentation.presentation_definition.input_descriptors.at(0)?.constraints.fields ?? [] :
+          [];
+
+        return <div
+          className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+        >
+          <div>
+            <p
+              className=" text-lg font-normal text-gray-500 lg:text-xl  dark:text-gray-400">
+              <b>SDJWT Verification request </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+            </p>
+
+            <InputFields fields={fields} />
+
+            {shouldRespond && <AgentRequire>
+              {
+                message?.isAnswering && <Loading />
+              }
+              {
+                !message?.isAnswering && <>
+                  {
+                    message?.error && <p>{JSON.stringify(message.error.message)}</p>
+                  }
+
+                  <button
+                    onClick={() => {
+                      if (collapsed) {
+                        setCollapsed(false);
+                      }
+                    }}
+                    id="dropdownRadioBgHoverButton"
+                    data-dropdown-toggle="dropdownRadioBgHover"
+                    style={{ height: 47 }}
+                    className=" text-white bg-blue-700 hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center inline-flex items-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800" type="button">
+                    Accept with Credential <svg className="w-2.5 h-2.5 ms-3" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                      <path stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="m1 1 4 4 4-4" />
+                    </svg>
+                  </button>
+
+                  <div id="dropdownRadioBgHover" className={(collapsed ? 'hidden ' : '') + `z-10  bg-white divide-y divide-gray-100 rounded-lg shadow dark:bg-gray-700 dark:divide-gray-600`}>
+                    <ul className="px-5 py-3 space-y-1 text-sm text-gray-700 dark:text-gray-200" aria-labelledby="dropdownRadioBgHoverButton">
+                      {
+                        credentials.map((credential, i) => {
+                          const fields = credential.claims.reduce<any>((all, claim) => [
+                            ...all,
+                            Object.keys(claim).slice(0, 3).join(",")
+                          ], []);
+                          let credentialText = `Credential with ${fields}`;
+                          if (credential.issuer) {
+                            credentialText += ` from ${credential.issuer.slice(0, 30)}...`;
+                          }
+                          return <li key={`cred${i}`}>
+                            <div className="flex items-center p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-600">
+                              {
+                                app.agent.isSendingMessage === false && <button
+                                  onClick={() => {
+                                    if (!agent) {
+                                      throw new Error("Start the agent first");
+                                    }
+                                    app.acceptPresentationRequest({
+                                      agent,
+                                      message,
+                                      credential
+                                    });
+                                    setCollapsed(true);
+                                  }}
+                                >
+                                  <span className="ms-2 text-sm font-medium text-gray-900 rounded dark:text-gray-300 overflow-x-auto h-auto">
+                                    {credentialText}
+                                  </span>
+                                </button>
+                              }
+
+                              {
+                                app.agent.isSendingMessage === true && <button><Loading /></button>
+                              }
+                            </div>
+                          </li>;
+                        })
+                      }
+                    </ul>
+                  </div>
+
+                  <button className="mt-5 mx-5 inline-flex items-center justify-center px-5 py-3 text-base font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-900" style={{ width: 120 }} onClick={() => {
+                    if (!app.db.instance) {
+                      throw new Error("Start the db first");
+                    }
+                    app.rejectCredentialOffer({ message: message, pluto: app.db.instance });
+                  }}>Reject</button>
+                </>
+              }
+            </AgentRequire>}
+
+          </div>
+        </div>;
+
+      }
+
+      if (SDK.isPresentationDefinitionRequestType(requestPresentation, SDK.Domain.CredentialType.JWT)) {
+
+        const credentials: SDK.Domain.Credential[] = app.credentials.filter((c) => c instanceof SDK.JWTCredential);
+        const fields: SDK.Domain.InputField[] = requestPresentation.presentation_definition ?
+          requestPresentation.presentation_definition.input_descriptors.at(0)?.constraints.fields ?? [] :
+          [];
+
+        // ✅ HIDE UI for Security Clearance VC requests (auto-responded in background)
+        // Check if this is a Security Clearance request by looking for clearanceLevel field
+        const isSecurityClearanceRequest = fields.some(field =>
+          field.path?.some(p => p.includes('clearanceLevel'))
+        );
+
+        if (isSecurityClearanceRequest && isReceived) {
+          console.log('🤖 [UI] Security Clearance VC request auto-responded in background - hiding UI prompt');
+          return null; // Don't show UI - auto-response handled it
+        }
+
+        return <div
+          className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+        >
+          <div>
+            <p
+              className=" text-lg font-normal text-gray-500 lg:text-xl  dark:text-gray-400">
+              <b>JWT Verification request </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+            </p>
+
+            <InputFields fields={fields} />
+
+            {shouldRespond && <AgentRequire>
+              {
+                message?.isAnswering && <Loading />
+              }
+              {
+                !message?.isAnswering && <>
+                  {
+                    message?.error && <p>{JSON.stringify(message.error.message)}</p>
+                  }
+
+                  <button
+                    onClick={() => {
+                      if (collapsed) {
+                        setCollapsed(false);
+                      }
+                    }}
+                    id="dropdownRadioBgHoverButton"
+                    data-dropdown-toggle="dropdownRadioBgHover"
+                    style={{ height: 47 }}
+                    className=" text-white bg-blue-700 hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center inline-flex items-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800" type="button">
+                    Accept with Credential <svg className="w-2.5 h-2.5 ms-3" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                      <path stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="m1 1 4 4 4-4" />
+                    </svg>
+                  </button>
+
+                  <div id="dropdownRadioBgHover" className={(collapsed ? 'hidden ' : '') + `z-10  bg-white divide-y divide-gray-100 rounded-lg shadow dark:bg-gray-700 dark:divide-gray-600`}>
+                    <ul className="px-5 py-3 space-y-1 text-sm text-gray-700 dark:text-gray-200" aria-labelledby="dropdownRadioBgHoverButton">
+                      {
+                        credentials.map((credential, i) => {
+                          const fields = credential.claims.reduce<any>((all, claim) => [
+                            ...all,
+                            Object.keys(claim).slice(0, 3).join(",")
+                          ], []);
+                          let credentialText = `Credential with ${fields}`;
+                          if (credential.issuer) {
+                            credentialText += ` from ${credential.issuer.slice(0, 30)}...`;
+                          }
+                          return <li key={`cred${i}`}>
+                            <div className="flex items-center p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-600">
+                              {
+                                app.agent.isSendingMessage === false && <button
+                                  onClick={() => {
+                                    if (!agent) {
+                                      throw new Error("Start the agent first");
+                                    }
+                                    app.acceptPresentationRequest({
+                                      agent,
+                                      message,
+                                      credential
+                                    });
+                                    setCollapsed(true);
+                                  }}
+                                >
+                                  <span className="ms-2 text-sm font-medium text-gray-900 rounded dark:text-gray-300 overflow-x-auto h-auto">
+                                    {credentialText}
+                                  </span>
+                                </button>
+                              }
+
+                              {
+                                app.agent.isSendingMessage === true && <button><Loading /></button>
+                              }
+                            </div>
+                          </li>;
+                        })
+                      }
+                    </ul>
+                  </div>
+
+                  <button className="mt-5 mx-5 inline-flex items-center justify-center px-5 py-3 text-base font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-900" style={{ width: 120 }} onClick={() => {
+                    if (!app.db.instance) {
+                      throw new Error("Start the db first");
+                    }
+                    app.rejectCredentialOffer({ message: message, pluto: app.db.instance });
+                  }}>Reject</button>
+                </>
+              }
+            </AgentRequire>}
+
+          </div>
+        </div>;
+
+      }
+
+      if (SDK.isPresentationDefinitionRequestType(requestPresentation, SDK.Domain.CredentialType.AnonCreds)) {
+        const credentials = app.credentials;
+        const fields =
+          Object.keys(requestPresentation.requested_attributes || []).reduce(
+            (_, key) => ([
+              ..._,
+              {
+                name: key, path: [key],
+              }
+            ]), []
+          );
+        return <div
+          className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+        >
+          <div>
+            <p
+              className=" text-lg font-normal text-gray-500 lg:text-xl  dark:text-gray-400">
+              <b>Anoncreds Verification request </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+            </p>
+
+            <InputFields fields={fields} />
+
+            {shouldRespond && <AgentRequire>
+              {
+                message?.isAnswering && <Loading />
+              }
+              {
+                !message?.isAnswering && <>
+                  {
+                    message?.error && <p>{JSON.stringify(message.error.message)}</p>
+                  }
+
+                  <button
+                    onClick={() => {
+                      if (collapsed) {
+                        setCollapsed(false);
+                      }
+                    }}
+                    id="dropdownRadioBgHoverButton"
+                    data-dropdown-toggle="dropdownRadioBgHover"
+                    style={{ height: 47 }}
+                    className=" text-white bg-blue-700 hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center inline-flex items-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800" type="button">
+                    Accept with Credential <svg className="w-2.5 h-2.5 ms-3" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                      <path stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="m1 1 4 4 4-4" />
+                    </svg>
+                  </button>
+
+                  <div id="dropdownRadioBgHover" className={(collapsed ? 'hidden ' : '') + `z-10  bg-white divide-y divide-gray-100 rounded-lg shadow dark:bg-gray-700 dark:divide-gray-600`}>
+                    <ul className="px-5 py-3 space-y-1 text-sm text-gray-700 dark:text-gray-200" aria-labelledby="dropdownRadioBgHoverButton">
+                      {
+                        credentials.map((credential, i) => {
+                          const fields = credential.claims.reduce<any>((all, claim) => [
+                            ...all,
+                            Object.keys(claim).slice(0, 3).join(",")
+                          ], []);
+                          let credentialText = `Credential with ${fields}`;
+                          if (credential.issuer) {
+                            credentialText += ` from ${credential.issuer.slice(0, 30)}...`;
+                          }
+                          return <li key={`cred${i}`}>
+                            <div className="flex items-center p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-600">
+                              {
+                                app.agent.isSendingMessage === false && <button
+                                  onClick={() => {
+                                    if (!agent) {
+                                      throw new Error("Start the agent first");
+                                    }
+                                    app.acceptPresentationRequest({
+                                      agent,
+                                      message,
+                                      credential
+                                    });
+                                    setCollapsed(true);
+                                  }}
+                                >
+                                  <span className="ms-2 text-sm font-medium text-gray-900 rounded dark:text-gray-300 overflow-x-auto h-auto">
+                                    {credentialText}
+                                  </span>
+                                </button>
+                              }
+                              {
+                                app.agent.isSendingMessage === true && <button><Loading /></button>
+                              }
+                            </div>
+                          </li>;
+                        })
+                      }
+                    </ul>
+                  </div>
+
+                  <button className="mt-5 mx-5 inline-flex items-center justify-center px-5 py-3 text-base font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-900" style={{ width: 120 }} onClick={() => {
+                    if (!app.db.instance) {
+                      throw new Error("Start the db first");
+                    }
+                    app.rejectCredentialOffer({ message: message, pluto: app.db.instance });
+                  }}>Reject</button>
+                </>
+              }
+            </AgentRequire>}
+
+          </div>
+        </div>;
+
+
+      }
+    } else {
+
+      const verificationType = requestPresentationMessage.attachments.at(0)?.format;
+      const credentials: SDK.Domain.Credential[] = app.credentials.filter((credential) => credential.credentialType == verificationType);
+      const fields = Object.keys(requestPresentation?.claims ?? {}).map((field) => ({ name: field, path: [`$.${field}`] }))
+      return <div
+        className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+      >
+        <div>
+          <p
+            className=" text-lg font-normal text-gray-500 lg:text-xl  dark:text-gray-400">
+            <b>Cloud Agent [{verificationType?.toUpperCase()}] Verification request </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+          </p>
+
+          <InputFields fields={fields} />
+
+          {shouldRespond && <AgentRequire>
+            {
+              message?.isAnswering && <Loading />
+            }
+            {
+              !message?.isAnswering && <>
+                {
+                  message?.error && <p>{JSON.stringify(message.error.message)}</p>
+                }
+
+                <button
+                  onClick={() => {
+                    if (collapsed) {
+                      setCollapsed(false);
+                    }
+                  }}
+                  id="dropdownRadioBgHoverButton"
+                  data-dropdown-toggle="dropdownRadioBgHover"
+                  style={{ height: 47 }}
+                  className=" text-white bg-blue-700 hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center inline-flex items-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800" type="button">
+                  Accept with Credential <svg className="w-2.5 h-2.5 ms-3" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 10 6">
+                    <path stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="m1 1 4 4 4-4" />
+                  </svg>
+                </button>
+
+                <div id="dropdownRadioBgHover" className={(collapsed ? 'hidden ' : '') + `z-10  bg-white divide-y divide-gray-100 rounded-lg shadow dark:bg-gray-700 dark:divide-gray-600`}>
+                  <ul className="px-5 py-3 space-y-1 text-sm text-gray-700 dark:text-gray-200" aria-labelledby="dropdownRadioBgHoverButton">
+                    {
+                      credentials.map((credential, i) => {
+                        const fields = credential.claims.reduce<any>((all, claim) => [
+                          ...all,
+                          Object.keys(claim).slice(0, 3).join(",")
+                        ], []);
+                        let credentialText = `Credential with ${fields}`;
+                        if (credential.issuer) {
+                          credentialText += ` from ${credential.issuer.slice(0, 30)}...`;
+                        }
+                        return <li key={`cred${i}`}>
+                          <div className="flex items-center p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-600">
+                            {
+                              app.agent.isSendingMessage === false && <button
+                                onClick={() => {
+                                  if (!agent) {
+                                    throw new Error("Start the agent first");
+                                  }
+                                  app.acceptPresentationRequest({
+                                    agent,
+                                    message,
+                                    credential
+                                  });
+                                  setCollapsed(true);
+                                }}
+                              >
+                                <span className="ms-2 text-sm font-medium text-gray-900 rounded dark:text-gray-300 overflow-x-auto h-auto">
+                                  {credentialText}
+                                </span>
+                              </button>
+                            }
+                            {
+                              app.agent.isSendingMessage === true && <button><Loading /></button>
+                            }
+                          </div>
+                        </li>;
+                      })
+                    }
+                  </ul>
+                </div>
+
+                <button className="mt-5 mx-5 inline-flex items-center justify-center px-5 py-3 text-base font-medium text-center text-white bg-blue-700 rounded-lg hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-900" style={{ width: 120 }} onClick={() => {
+                  if (!app.db.instance) {
+                    throw new Error("Start the db first");
+                  }
+                  app.rejectCredentialOffer({ message: message, pluto: app.db.instance });
+                }}>Reject</button>
+              </>
+            }
+          </AgentRequire>}
+
+        </div>
+      </div>;
+
+    }
+
+
+
+
+    return <>Unsupported {message.piuri}</>;
+  }
+
+  return <div
+    className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
+  >
+    <div>
+      <b>Message: </b> {message.id} {message.direction === 1 ? 'received' : 'sent'}
+      {message.piuri === "https://atalaprism.io/mercury/connections/1.0/response" && (
+        <p>Connection Established with {message.from!.toString()} (Goal: {body.goal})?</p>
+      )}
+      <pre style={{
+        background: "lightBlue",
+        textAlign: "left",
+        wordWrap: "break-word",
+        wordBreak: "break-all",
+        whiteSpace: "pre-wrap",
+      }}
+      >
+        {JSON.stringify(parsed, null, 2)}
+      </pre>
+      {attachments.length > 0 && (
+        <pre style={{
+          background: "lightCyan",
+          textAlign: "left",
+          wordWrap: "break-word",
+          wordBreak: "break-all",
+          whiteSpace: "pre-wrap",
+        }}
+        >
+          <b>Attachments:</b>
+          {attachments.map(x => JSON.stringify(x, null, 2))}
+        </pre>
+      )}
+    </div>
+  </div>;
+}

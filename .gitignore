@@ -73,8 +73,13 @@ snap/
 
 # Claude Code workspace
 .claude.json
-.claude.json.backup
+.claude.json.backup*
 .claude/
+
+# Git credentials (NEVER commit)
+.git-credentials
+.gitconfig
+.lesshst
 
 # Development tools (not part of main project)
 claudecodeui/
