@@ -107,6 +107,9 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
       const newDecrypted = new Map(decryptedMessages);
       let hasNewDecryptions = false;
 
+      // Revocation status cache: keyed by credential identifier, populated once per render cycle
+      const revocationCache: Record<string, any> = {};
+
       for (const message of messages) {
         // Skip if already decrypted
         if (newDecrypted.has(message.id)) continue;
@@ -152,80 +155,69 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
           // Get user's v3.0.0 Security Clearance VC (with X25519 encryption keys)
           const credentials = await agent.pluto.getAllCredentials();
 
-          // First pass: Try sync lookup (fast path for localStorage keys)
-          let userVC: any = credentials.find((cred: any) => {
-            try {
-              if (!validateSecurityClearanceVC(cred)) return false;
+          // Unified async loop: find a valid, non-revoked SC with an available private key
+          let userVC: any = null;
+          let userKey: any = undefined;
 
-              const credSubject = cred.credentialSubject || cred.subject;
+          for (const cred of credentials) {
+            try {
+              if (!validateSecurityClearanceVC(cred)) continue;
+
+              const credSubject = (cred as any).credentialSubject || (cred as any).subject;
               const x25519Fingerprint = credSubject?.x25519Fingerprint;
 
               if (!x25519Fingerprint) {
                 console.log('⏭️ [Chat] Skipping VC - no x25519Fingerprint (not v3.0.0)');
-                return false;
-              }
-
-              // Check if we have the private key for this VC in localStorage (fast sync check)
-              const hasPrivateKey = getSecurityKeyByFingerprint(x25519Fingerprint) !== undefined;
-              if (!hasPrivateKey) {
-                console.log('⏭️ [Chat] Skipping VC in sync check - no localStorage key');
-                return false;
-              }
-
-              // v3.0.0 Security Clearance VC found with localStorage key
-              return true;
-            } catch (e) {
-              return false;
-            }
-          });
-
-          // Second pass: If no VC found with localStorage key, try Pluto fallback (PRISM DID keys)
-          if (!userVC) {
-            console.log('🔍 [Chat] No localStorage key found, trying Pluto fallback...');
-            for (const cred of credentials) {
-              try {
-                if (!validateSecurityClearanceVC(cred)) continue;
-
-                const credSubject = (cred as any).credentialSubject || (cred as any).subject;
-                const x25519Fingerprint = credSubject?.x25519Fingerprint;
-
-                if (!x25519Fingerprint) continue;
-
-                // Try async lookup with Pluto fallback
-                const key = await getSecurityKeyByFingerprintAsync(x25519Fingerprint, agent);
-                if (key) {
-                  console.log('✅ [Chat] Found key via Pluto fallback');
-                  userVC = cred;
-                  break;
-                }
-              } catch (e) {
                 continue;
               }
+
+              // Revocation check: skip revoked/suspended SCs — they lose decryption rights
+              // Cache the result so we don't re-fetch the StatusList for the same VC across messages
+              const credCacheKey = credSubject?.clearanceId || credSubject?.id || x25519Fingerprint;
+              if (!(credCacheKey in revocationCache)) {
+                revocationCache[credCacheKey] = await verifyCredentialStatus(cred);
+              }
+              const revStatus = revocationCache[credCacheKey];
+              if (revStatus.revoked || revStatus.suspended) {
+                console.log('🚫 [Chat] SC is revoked/suspended, skipping:', credCacheKey);
+                continue;
+              }
+
+              // Try localStorage first (fast path)
+              let key: any = getSecurityKeyByFingerprint(x25519Fingerprint);
+
+              // Fallback to Pluto (PRISM DID-derived keys)
+              if (!key) {
+                console.log('🔍 [Chat] No localStorage key found, trying Pluto fallback...');
+                key = await getSecurityKeyByFingerprintAsync(x25519Fingerprint, agent);
+                if (key) {
+                  console.log('✅ [Chat] Found key via Pluto fallback');
+                }
+              }
+
+              if (key) {
+                userVC = cred;
+                userKey = key;
+                break;
+              }
+            } catch (e) {
+              continue;
             }
           }
 
-          if (!userVC) {
+          if (!userVC || !userKey) {
             console.warn('⚠️ [Chat] No v3.0.0 Security Clearance VC - cannot decrypt');
-            newDecrypted.set(message.id, '🔒 [No v3.0.0 Security Clearance VC - upgrade required]');
+            newDecrypted.set(message.id, '🔒 [Encrypted — Security Clearance with encryption keys required. Visit the CA Portal to get an updated clearance.]');
             hasNewDecryptions = true;
             continue;
           }
 
-          // Extract X25519 fingerprint from VC
+          // Extract X25519 fingerprint from VC (needed for key verification below)
           const userSubject = userVC.credentialSubject || userVC.subject;
           const userX25519Fingerprint = userSubject?.x25519Fingerprint;
           if (!userX25519Fingerprint) {
             console.error('❌ [Chat] v3.0.0 VC missing x25519Fingerprint');
             newDecrypted.set(message.id, '🔒 [Invalid v3.0.0 VC structure]');
-            hasNewDecryptions = true;
-            continue;
-          }
-
-          // Get dual-key from storage by X25519 fingerprint (with Pluto fallback for PRISM DID keys)
-          const userKey = await getSecurityKeyByFingerprintAsync(userX25519Fingerprint, agent);
-          if (!userKey) {
-            console.error('❌ [Chat] X25519 private key not found in localStorage or Pluto');
-            newDecrypted.set(message.id, '🔒 [X25519 key not found in storage or Pluto]');
             hasNewDecryptions = true;
             continue;
           }

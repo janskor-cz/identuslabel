@@ -24,6 +24,7 @@ interface EnterpriseCredentialOfferData {
     subjectId?: string;
     createdAt: string;
     updatedAt?: string;
+    claims?: any;
 }
 
 export const EnterpriseCredentialOfferModal: React.FC = () => {
@@ -46,7 +47,8 @@ export const EnterpriseCredentialOfferModal: React.FC = () => {
             credentialFormat: record.credentialFormat,
             subjectId: record.subjectId,
             createdAt: record.createdAt,
-            updatedAt: record.updatedAt
+            updatedAt: record.updatedAt,
+            claims: record.claims
         }));
 
     // Local state
@@ -156,7 +158,16 @@ export const EnterpriseCredentialOfferModal: React.FC = () => {
                 return subject?.employeeId && subject?.role && subject?.department && subject?.prismDid;
             });
 
+            // Fallback: use prismDid from the offer's claims directly (present in training VCs)
             if (!employeeRoleRecord) {
+                const claimsPrismDid = currentOffer.claims?.prismDid;
+                if (claimsPrismDid) {
+                    await dispatch(acceptCredentialOffer({
+                        recordId: currentOffer.recordId,
+                        subjectId: claimsPrismDid
+                    })).unwrap();
+                    return;
+                }
                 throw new Error('EmployeeRole credential not found. Please complete employee onboarding first.');
             }
 

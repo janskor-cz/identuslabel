@@ -33,13 +33,18 @@ import {
 import nacl from 'tweetnacl';
 import {
   loadDocuments as loadMyDocuments,
+  addDocument,
   openDocument,
   removeDocument,
   cleanupDocuments,
   closeViewer
 } from "@/reducers/classifiedDocuments";
+import { StoredDocument } from "@/utils/documentStorage";
+import { selectEnterpriseCredentials } from '@/reducers/enterpriseAgent';
 import { DocumentSummary, formatRemainingTime, getDocument, fetchFromServiceEndpoint } from "@/utils/documentStorage";
-import { getItem, getKeysByPattern } from "@/utils/prefixedStorage";
+import { getItem, setItem, getKeysByPattern } from "@/utils/prefixedStorage";
+import { extractKeysFromPrismDID, extractEd25519FromPeerDIDs } from "@/utils/plutoKeyExtractor";
+import { base64url } from "jose";
 import { ClassifiedDocumentViewer } from "@/components/ClassifiedDocumentViewer";
 
 /**
@@ -54,7 +59,7 @@ const getClassificationBadgeNumeric = (level: number) => {
     case 3:
       return { color: 'bg-red-500/20 text-red-400 border-red-500/30', label: 'SECRET' };
     case 4:
-      return { color: 'bg-red-700/20 text-red-300 border-red-700/30', label: 'TOP SECRET' };
+      return { color: 'bg-red-700/20 text-red-300 border-red-700/30', label: 'SECRET' };
     default:
       return { color: 'bg-slate-500/20 text-slate-400 border-slate-500/30', label: 'UNKNOWN' };
   }
@@ -72,7 +77,7 @@ const getClassificationBadge = (level: string) => {
     case 'SECRET':
       return { color: 'bg-red-500/20 text-red-400 border-red-500/30', label: 'SECRET' };
     case 'TOP_SECRET':
-      return { color: 'bg-red-700/20 text-red-300 border-red-700/30', label: 'TOP SECRET' };
+      return { color: 'bg-red-700/20 text-red-300 border-red-700/30', label: 'SECRET' };
     default:
       return { color: 'bg-slate-500/20 text-slate-400 border-slate-500/30', label: level || 'UNKNOWN' };
   }
@@ -87,7 +92,15 @@ const MyDocumentCard: React.FC<{
   onDownload: (ephemeralDID: string) => void;
   onRemove: (ephemeralDID: string) => void;
   onRequestNew: (originalDID: string) => void;
-}> = ({ document, onView, onDownload, onRemove, onRequestNew }) => {
+  onEdit?: (ephemeralDID: string, originalDocumentDID: string) => void;
+  editState?: 'idle' | 'requesting' | 'editing' | 'uploading' | 'done' | 'error';
+  editDocDID?: string | null;
+  selectedFile?: File | null;
+  onFileSelect?: (file: File | null) => void;
+  onSubmitEdit?: () => void;
+  onCancelEdit?: () => void;
+  editError?: string | null;
+}> = ({ document, onView, onDownload, onRemove, onRequestNew, onEdit, editState, editDocDID, selectedFile, onFileSelect, onSubmitEdit, onCancelEdit, editError }) => {
   const badge = getClassificationBadge(document.overallClassification);
   const [timeLeft, setTimeLeft] = useState(formatRemainingTime(document.remainingTime));
 
@@ -189,6 +202,16 @@ const MyDocumentCard: React.FC<{
                   <CloudDownloadIcon className="w-4 h-4" />
                   Download
                 </button>
+                {document.sourceInfo?.format === 'docx' && onEdit && (
+                  <button
+                    onClick={() => onEdit(document.ephemeralDID, document.originalDocumentDID)}
+                    disabled={editState !== 'idle' && editState !== undefined}
+                    className="px-4 py-2 bg-amber-500 text-white rounded-xl hover:bg-amber-600 flex items-center gap-2 text-sm disabled:opacity-50"
+                  >
+                    <DocumentIcon className="w-4 h-4" />
+                    {editState === 'requesting' && editDocDID === document.originalDocumentDID ? 'Requesting…' : 'Edit'}
+                  </button>
+                )}
                 <button
                   onClick={() => onRemove(document.ephemeralDID)}
                   className="px-4 py-2 bg-slate-800/50 text-slate-300 rounded-xl hover:bg-slate-700/50 border border-slate-700/50 flex items-center gap-2 text-sm"
@@ -218,6 +241,45 @@ const MyDocumentCard: React.FC<{
           </div>
         </div>
       </div>
+
+      {/* Edit upload UI — shown when this card is in editing state */}
+      {editState === 'editing' && editDocDID === document.originalDocumentDID && (
+        <div className="mx-4 mb-4 p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl">
+          <p className="text-sm text-amber-300 mb-3">Edit the downloaded DOCX, then upload the updated file:</p>
+          <input
+            type="file"
+            accept=".docx"
+            onChange={e => onFileSelect?.(e.target.files?.[0] ?? null)}
+            className="block w-full text-sm text-slate-300 file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-sm file:bg-amber-500/20 file:text-amber-300 hover:file:bg-amber-500/30 mb-3"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={onSubmitEdit}
+              disabled={!selectedFile || editState === 'uploading'}
+              className="px-4 py-2 bg-amber-500 text-white rounded-xl hover:bg-amber-600 text-sm disabled:opacity-50"
+            >
+              Submit Updated Version
+            </button>
+            <button
+              onClick={onCancelEdit}
+              className="px-4 py-2 bg-slate-700 text-slate-300 rounded-xl hover:bg-slate-600 text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+          {editError && <p className="mt-2 text-sm text-red-400">{editError}</p>}
+        </div>
+      )}
+      {editState === 'uploading' && editDocDID === document.originalDocumentDID && (
+        <div className="mx-4 mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-sm text-amber-300">
+          Uploading and merging…
+        </div>
+      )}
+      {editState === 'done' && editDocDID === document.originalDocumentDID && (
+        <div className="mx-4 mb-4 p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-sm text-emerald-300">
+          Document updated successfully.
+        </div>
+      )}
     </div>
   );
 };
@@ -228,6 +290,7 @@ const MyDocumentCard: React.FC<{
 export default function DocumentsPage() {
   const app = useMountedApp();
   const dispatch = useAppDispatch();
+  const enterpriseCredentials = useAppSelector(selectEnterpriseCredentials);
   const classifiedDocuments = useAppSelector(state => state.classifiedDocuments);
 
   // Tab state
@@ -246,6 +309,13 @@ export default function DocumentsPage() {
 
   // My Documents state
   const [showExpired, setShowExpired] = useState(true);
+
+  // Edit / versioning state (memory only — never persisted)
+  const [editState, setEditState] = useState<'idle' | 'requesting' | 'editing' | 'uploading' | 'done' | 'error'>('idle');
+  const [editToken, setEditToken] = useState<string | null>(null);
+  const [editDocDID, setEditDocDID] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
 
   // API configuration
   const apiBaseUrl = 'https://identuslabel.cz/company-admin/api';
@@ -288,16 +358,16 @@ export default function DocumentsPage() {
         const level = subject.clearanceLevel || subject.securityLevel || 'INTERNAL';
 
         // Map clearance level strings to numeric levels (CA Portal standard)
-        // INTERNAL (1) → CONFIDENTIAL (2) → RESTRICTED (3) → TOP-SECRET (4)
+        // INTERNAL (1) → CONFIDENTIAL (2) → RESTRICTED (3) → SECRET (4)
         const levelMap: { [key: string]: number } = {
           'INTERNAL': 1,
           'UNCLASSIFIED': 1,    // Legacy: map to INTERNAL
           'CONFIDENTIAL': 2,
           'RESTRICTED': 3,
-          'SECRET': 3,          // Legacy: map to RESTRICTED
-          'TOP-SECRET': 4,
-          'TOP_SECRET': 4,      // Handle underscore variant
-          'TOPSECRET': 4        // Handle no-separator variant
+          'SECRET': 4,
+          'TOP-SECRET': 4,      // Legacy: map to SECRET
+          'TOP_SECRET': 4,      // Legacy: map to SECRET
+          'TOPSECRET': 4        // Legacy: map to SECRET
         };
         const numLevel = levelMap[level.toUpperCase()] || 1;
         console.log('[Documents] Mapped clearance:', level, '→', numLevel);
@@ -368,6 +438,90 @@ export default function DocumentsPage() {
   }, [app.credentials]);
 
   /**
+   * Load Ed25519 private key for document request signing.
+   * Pass 1: localStorage security-clearance-keys
+   * Pass 2: Pluto PRISM DID keys (via agent)
+   */
+  useEffect(() => {
+    const loadEd25519Key = async () => {
+      // Pass 1: localStorage
+      const securityKeysData = getItem('security-clearance-keys');
+      if (securityKeysData && typeof securityKeysData === 'object') {
+        try {
+          const activeKeyId = securityKeysData.activeKeyId;
+          const keys = securityKeysData.keys || [];
+          const activeKey = keys.find((k: any) => k.keyId === activeKeyId);
+          if (activeKey?.ed25519?.privateKeyBytes) {
+            setEd25519PrivateKey(base64url.decode(activeKey.ed25519.privateKeyBytes));
+            console.log('[Documents] Ed25519 key loaded from localStorage');
+            return;
+          }
+          for (const key of keys) {
+            if (key?.ed25519?.privateKeyBytes) {
+              setEd25519PrivateKey(base64url.decode(key.ed25519.privateKeyBytes));
+              console.log('[Documents] Ed25519 key loaded from localStorage (fallback)');
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn('[Documents] Failed to parse localStorage Ed25519 keys:', e);
+        }
+      }
+
+      // Pass 2: Pluto DID keys (PRISM first, then Peer)
+      if (app.agent.instance) {
+        try {
+          const prismDIDs = await app.agent.instance.pluto.getAllPrismDIDs();
+          for (const prismDID of prismDIDs || []) {
+            const plutoKeys = await extractKeysFromPrismDID(app.agent.instance, prismDID.did.toString());
+            if (plutoKeys?.ed25519?.privateKeyBytes) {
+              setEd25519PrivateKey(base64url.decode(plutoKeys.ed25519.privateKeyBytes));
+              console.log('[Documents] Ed25519 key loaded from Pluto PRISM DID');
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn('[Documents] Pluto PRISM DID Ed25519 key lookup failed:', e);
+        }
+
+        // Pass 2b: Peer DID Ed25519 keys (stored in Pluto by createNewPeerDID)
+        try {
+          const peerDIDKey = await extractEd25519FromPeerDIDs(app.agent.instance);
+          if (peerDIDKey) {
+            // NaCl expects 64-byte secret key (32 private + 32 public concatenated)
+            const naclPrivateKey = new Uint8Array(64);
+            naclPrivateKey.set(peerDIDKey.privateKeyBytes.slice(0, 32), 0);
+            naclPrivateKey.set(peerDIDKey.publicKeyBytes.slice(0, 32), 32);
+            setEd25519PrivateKey(naclPrivateKey);
+            console.log('[Documents] Ed25519 key loaded from Pluto peer DID');
+            return;
+          }
+        } catch (e) {
+          console.warn('[Documents] Pluto peer DID Ed25519 key lookup failed:', e);
+        }
+      }
+
+      // Pass 3: Generate and persist a local signing keypair
+      // Server only validates signature format (MVP), not DID-key binding
+      const stored = getItem('document-signing-key');
+      if (stored?.privateKeyBytes) {
+        setEd25519PrivateKey(base64url.decode(stored.privateKeyBytes));
+        console.log('[Documents] Ed25519 key loaded from persisted local keypair');
+        return;
+      }
+      const keypair = nacl.sign.keyPair();
+      setItem('document-signing-key', {
+        privateKeyBytes: base64url.encode(keypair.secretKey),
+        publicKeyBytes: base64url.encode(keypair.publicKey),
+      });
+      setEd25519PrivateKey(keypair.secretKey);
+      console.log('[Documents] Generated new local Ed25519 signing keypair');
+    };
+
+    loadEd25519Key();
+  }, [app.agent.instance, app.credentials]);
+
+  /**
    * Fetch available documents from server
    * Uses /api/documents/discover endpoint which requires issuerDID
    */
@@ -416,9 +570,14 @@ export default function DocumentsPage() {
       }
 
       const data = await response.json();
-      setDocuments(data.documents || []);
+      // Server returns 'documentDID' as the ID field; normalize to 'id' for EphemeralDocument
+      const normalized = (data.documents || []).map((d: any) => ({
+        ...d,
+        id: d.id ?? d.documentDID,
+      }));
+      setDocuments(normalized);
 
-      console.log('[Documents] Fetched', data.documents?.length || 0, 'documents');
+      console.log('[Documents] Fetched', normalized.length, 'documents; first doc id=', normalized[0]?.id, 'documentDID=', normalized[0]?.documentDID);
     } catch (err: any) {
       console.error('[Documents] Fetch error:', err);
       setError(err.message || 'Failed to fetch documents');
@@ -460,6 +619,7 @@ export default function DocumentsPage() {
    * Handle document access request
    */
   const handleRequestAccess = (document: EphemeralDocument) => {
+    console.log('[Documents] handleRequestAccess: doc.id=', document.id, 'doc.documentDID=', (document as any).documentDID);
     setSelectedDocument(document);
   };
 
@@ -480,6 +640,52 @@ export default function DocumentsPage() {
       console.log('[Documents] Access denied or failed');
     }
   };
+
+  /**
+   * Save VC-gate accessed document to "My Documents" (IndexedDB).
+   * Stores the plaintext directly with algorithm:'plaintext' so the viewer
+   * can display it without needing a decryption key.
+   */
+  const handleDocumentAccessed = useCallback((data: {
+    plaintext: Uint8Array;
+    ephemeralDID: string;
+    title: string;
+    classification: string;
+    filename: string;
+    mimeType: string;
+  }) => {
+    if (!selectedDocument) return;
+    const format = data.mimeType.includes('docx') ? 'docx'
+      : data.mimeType.includes('pdf') ? 'pdf' : 'html';
+    const doc: StoredDocument = {
+      ephemeralDID: data.ephemeralDID,
+      originalDocumentDID: selectedDocument.id,
+      title: data.title,
+      overallClassification: data.classification || 'UNCLASSIFIED',
+      encryptedContent: data.plaintext.buffer as ArrayBuffer,
+      encryptionInfo: {
+        serverPublicKey: '',
+        nonce: '',
+        algorithm: 'plaintext',
+      },
+      sectionSummary: {
+        totalSections: 1,
+        visibleCount: 1,
+        redactedCount: 0,
+        clearanceLevelsUsed: [data.classification || 'UNCLASSIFIED'],
+        visibleSections: [{ sectionId: 'all', clearance: data.classification || 'UNCLASSIFIED' }],
+        redactedSections: [],
+      },
+      sourceInfo: { filename: data.filename, format },
+      receivedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      viewCount: 0,
+      maxViews: -1,
+      status: 'active',
+    };
+    dispatch(addDocument(doc));
+    console.log('[Documents] Saved accessed document to My Documents:', data.title);
+  }, [dispatch, selectedDocument]);
 
   // My Documents handlers
   const handleView = useCallback((ephemeralDID: string) => {
@@ -644,6 +850,145 @@ export default function DocumentsPage() {
     }
   }, [dispatch]);
 
+  /**
+   * Handle Edit button click on a MyDocumentCard (DOCX documents only).
+   * Requests a redacted editable copy via the document-update/request-edit endpoint.
+   */
+  const handleEdit = useCallback(async (ephemeralDID: string, documentDID: string) => {
+    setEditState('requesting');
+    setEditDocDID(documentDID);
+    setEditToken(null);
+    setSelectedFile(null);
+    setEditError(null);
+
+    try {
+      // 1. Build VP credentials list
+      const credentialJWTs: string[] = [];
+      const allCreds = [
+        ...(app.credentials || []),
+        ...(enterpriseCredentials || []).map((ec: any) => ec.credential || ec).filter(Boolean)
+      ];
+      for (const cred of allCreds) {
+        // Extract JWT (same logic as DocumentAccess component)
+        const isJWT = (s: any): s is string => typeof s === 'string' && s.split('.').length === 3;
+        let jwt: string | null = null;
+        if (isJWT(cred?.id)) jwt = cred.id;
+        else if (isJWT(cred?.jwt)) jwt = cred.jwt;
+        else if (isJWT(cred?.string)) jwt = cred.string;
+        else if (isJWT(cred?.rawJWT)) jwt = cred.rawJWT;
+        else if (isJWT(cred?.token)) jwt = cred.token;
+        if (!jwt && typeof cred === 'string') {
+          try { const d = atob(cred); if (isJWT(d)) jwt = d; } catch (_) {}
+        }
+        if (jwt) credentialJWTs.push(jwt);
+      }
+
+      if (credentialJWTs.length === 0) {
+        throw new Error('No credentials available for VP presentation');
+      }
+
+      // 2. Generate ephemeral X25519 keypair
+      const { generateEphemeralKeyPair } = await import('@/utils/EphemeralDIDCrypto');
+      const ephemeralKeyPair = generateEphemeralKeyPair();
+
+      // 3. Get challenge
+      const challengeResp = await fetch(`${apiBaseUrl}/access-gate/challenge?documentDID=${encodeURIComponent(documentDID)}`);
+      if (!challengeResp.ok) throw new Error(`Challenge request failed: ${challengeResp.status}`);
+      const { challenge } = await challengeResp.json();
+
+      // 4. Build VP
+      const vp = {
+        '@context': ['https://www.w3.org/2018/credentials/v1'],
+        type: ['VerifiablePresentation'],
+        verifiableCredential: credentialJWTs,
+        proof: { type: 'Ed25519Signature2018', challenge, proofPurpose: 'authentication' }
+      };
+
+      // 5. Call request-edit
+      const editResp = await fetch(`${apiBaseUrl}/document-update/request-edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documentDID, vp, challenge, ephemeralPublicKey: ephemeralKeyPair.publicKey })
+      });
+      const editData = await editResp.json();
+      if (!editData.success) throw new Error(editData.message || 'Edit request denied');
+
+      // 6. Decrypt the editable DOCX using ephemeral key
+      const { base64url } = await import('jose');
+      const serverPubKey = base64url.decode(editData.encryptedEditableDocument.serverPublicKey);
+      const ciphertext = base64url.decode(editData.encryptedEditableDocument.ciphertext);
+      const nonce = base64url.decode(editData.encryptedEditableDocument.nonce);
+      const decrypted = nacl.box.open(ciphertext, nonce, serverPubKey, ephemeralKeyPair.secretKey);
+      // Destroy ephemeral key
+      for (let i = 0; i < ephemeralKeyPair.secretKey.length; i++) ephemeralKeyPair.secretKey[i] = 0;
+      ephemeralKeyPair.destroyed = true;
+
+      if (!decrypted) throw new Error('Failed to decrypt editable document');
+
+      // 7. Trigger download of editable DOCX
+      const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      const blob = new Blob([decrypted], { type: DOCX_MIME });
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = editData.filename || 'editable-document.docx';
+      window.document.body.appendChild(a);
+      a.click();
+      window.document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      // 8. Store edit token and transition to editing state
+      setEditToken(editData.editToken);
+      setEditState('editing');
+
+    } catch (err: any) {
+      console.error('[Documents] Edit request failed:', err);
+      setEditState('error');
+      setEditError(err.message || 'Edit request failed');
+    }
+  }, [app.credentials, enterpriseCredentials, apiBaseUrl]);
+
+  /**
+   * Submit the user's edited DOCX for merging and versioning.
+   */
+  const handleSubmitEdit = useCallback(async () => {
+    if (!selectedFile || !editToken) return;
+
+    setEditState('uploading');
+    setEditError(null);
+
+    try {
+      const fd = new FormData();
+      fd.append('file', selectedFile);
+      fd.append('editToken', editToken);
+
+      const resp = await fetch(`${apiBaseUrl}/document-update/submit`, {
+        method: 'POST',
+        body: fd
+      });
+      const data = await resp.json();
+
+      if (!data.success) throw new Error(data.message || 'Submit failed');
+
+      setEditState('done');
+      setEditToken(null);
+      setSelectedFile(null);
+
+    } catch (err: any) {
+      console.error('[Documents] Edit submit failed:', err);
+      setEditState('error');
+      setEditError(err.message || 'Submit failed');
+    }
+  }, [selectedFile, editToken, apiBaseUrl]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditState('idle');
+    setEditToken(null);
+    setSelectedFile(null);
+    setEditError(null);
+    setEditDocDID(null);
+  }, []);
+
   const handleRefreshMyDocs = useCallback(() => {
     dispatch(loadMyDocuments(showExpired));
   }, [dispatch, showExpired]);
@@ -769,7 +1114,7 @@ export default function DocumentsPage() {
                     <option value="1">UNCLASSIFIED</option>
                     <option value="2">CONFIDENTIAL</option>
                     {userClearanceLevel >= 3 && <option value="3">SECRET</option>}
-                    {userClearanceLevel >= 4 && <option value="4">TOP SECRET</option>}
+                    {userClearanceLevel >= 4 && <option value="4">SECRET</option>}
                   </select>
                 </div>
               </div>
@@ -958,6 +1303,14 @@ export default function DocumentsPage() {
                       onDownload={handleDownload}
                       onRemove={handleRemove}
                       onRequestNew={handleRequestNew}
+                      onEdit={handleEdit}
+                      editState={editDocDID === doc.originalDocumentDID ? editState : 'idle'}
+                      editDocDID={editDocDID}
+                      selectedFile={editDocDID === doc.originalDocumentDID ? selectedFile : null}
+                      onFileSelect={setSelectedFile}
+                      onSubmitEdit={handleSubmitEdit}
+                      onCancelEdit={handleCancelEdit}
+                      editError={editDocDID === doc.originalDocumentDID ? editError : null}
                     />
                   ))}
                 </div>
@@ -1012,7 +1365,12 @@ export default function DocumentsPage() {
             ed25519PrivateKey={ed25519PrivateKey}
             apiBaseUrl={apiBaseUrl}
             onAccessComplete={handleAccessComplete}
+            onDocumentAccessed={handleDocumentAccessed}
             onClose={handleCloseAccess}
+            credentials={[
+              ...(app.credentials || []),
+              ...(enterpriseCredentials || []).map(ec => ec.credential || ec).filter(Boolean)
+            ]}
           />
         </div>
       )}

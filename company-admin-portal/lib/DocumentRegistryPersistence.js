@@ -28,9 +28,10 @@ class DocumentRegistryPersistence {
    * Save DocumentRegistry state to persistent storage
    *
    * @param {Map} documentsMap - DocumentRegistry.documents Map
+   * @param {Map} [documentVersionsMap] - DocumentRegistry.documentVersions Map
    * @returns {Promise<void>}
    */
-  async saveRegistry(documentsMap) {
+  async saveRegistry(documentsMap, documentVersionsMap = new Map()) {
     console.log('[RegistryPersistence] Saving DocumentRegistry to disk...');
 
     try {
@@ -47,11 +48,18 @@ class DocumentRegistryPersistence {
         bloomFilter: record.bloomFilter.toString('base64')
       }));
 
+      // Serialize documentVersions Map to array-of-arrays
+      const documentVersionsArray = Array.from(documentVersionsMap.entries()).map(([did, versions]) => ({
+        documentDID: did,
+        versions
+      }));
+
       const registryState = {
         version: '1.0',
         savedAt: new Date().toISOString(),
         documentCount: documentsArray.length,
-        documents: documentsArray
+        documents: documentsArray,
+        documentVersions: documentVersionsArray
       };
 
       // Generate signature for integrity verification
@@ -90,7 +98,7 @@ class DocumentRegistryPersistence {
   /**
    * Load DocumentRegistry state from persistent storage
    *
-   * @returns {Promise<Map|null>} - Restored documents Map, or null if no saved state
+   * @returns {Promise<{documents: Map, documentVersions: Map}|null>}
    */
   async loadRegistry() {
     console.log('[RegistryPersistence] Loading DocumentRegistry from disk...');
@@ -152,9 +160,18 @@ class DocumentRegistryPersistence {
         });
       }
 
-      console.log(`[RegistryPersistence] ✅ Loaded ${documentsMap.size} documents from ${registryState.savedAt}`);
+      // Restore documentVersions Map
+      const documentVersionsMap = new Map();
+      if (registryState.documentVersions && Array.isArray(registryState.documentVersions)) {
+        for (const entry of registryState.documentVersions) {
+          documentVersionsMap.set(entry.documentDID, entry.versions || []);
+        }
+      }
 
-      return documentsMap;
+      console.log(`[RegistryPersistence] ✅ Loaded ${documentsMap.size} documents from ${registryState.savedAt}`);
+      console.log(`[RegistryPersistence] ✅ Loaded version history for ${documentVersionsMap.size} documents`);
+
+      return { documents: documentsMap, documentVersions: documentVersionsMap };
 
     } catch (error) {
       console.error('[RegistryPersistence] ❌ Failed to load registry:', error.message);

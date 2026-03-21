@@ -439,6 +439,43 @@
             color: #718096;
         }
 
+        .document-did {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            color: #a0aec0;
+            margin-top: 4px;
+            font-family: monospace;
+        }
+        .document-provenance {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 11px;
+            color: #a0aec0;
+            margin-top: 3px;
+        }
+        .did-badge {
+            background: #ebf4ff;
+            color: #3182ce;
+            border: 1px solid #bee3f8;
+            border-radius: 4px;
+            padding: 1px 5px;
+            font-size: 10px;
+            font-weight: 600;
+            font-family: sans-serif;
+        }
+        .did-copy-btn {
+            cursor: pointer;
+            background: none;
+            border: none;
+            color: #a0aec0;
+            font-size: 11px;
+            padding: 0 2px;
+        }
+        .did-copy-btn:hover { color: #667eea; }
+
         .classification-badge {
             display: inline-block;
             padding: 4px 12px;
@@ -462,6 +499,11 @@
         .classification-badge.RESTRICTED {
             background: #fed7d7;
             color: #742a2a;
+        }
+
+        .classification-badge.SECRET {
+            background: #e9d5ff;
+            color: #4c1d95;
         }
 
         .classification-badge.TOP-SECRET {
@@ -861,10 +903,11 @@
                             style="width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 14px; background: white;"
                         >
                             <option value="">Select classification level...</option>
+                            <option value="UNCLASSIFIED">UNCLASSIFIED (No clearance required)</option>
                             <option value="INTERNAL">INTERNAL (Basic organizational access)</option>
                             <option value="CONFIDENTIAL">CONFIDENTIAL (Requires clearance)</option>
                             <option value="RESTRICTED">RESTRICTED (Requires clearance)</option>
-                            <option value="TOP-SECRET">TOP SECRET (Requires clearance)</option>
+                            <option value="SECRET">SECRET (Requires clearance)</option>
                         </select>
                     </div>
 
@@ -1180,6 +1223,6 @@
     <!-- DOCX Preview Library (for Word document viewing) -->
     <script src="https://unpkg.com/docx-preview@0.1.20/dist/docx-preview.min.js"></script>
 
-    <script src="/company-admin/js/employee-portal-dashboard.js?v=20251213"></script>
+    <script src="/company-admin/js/employee-portal-dashboard.js?v=20260314"></script>
 </body>
 </html>

@@ -61,7 +61,7 @@ class ConnectionEventHandler {
         name,
         department,
         connectionId
-      }); // ✨ REMOVED: apiKeyPlaintext parameter (auto-generated in wallet creation)
+      }, { did: issuerDID, enterpriseAgentName: issuerDID }); // Pass company DID so EmployeeRole VC gets correct issuerDID per company
 
       // ✨ NEW: Log employee wallet details (created during claims build)
       console.log(`[CONNECTION-HANDLER] ✅ Employee wallet created:`);

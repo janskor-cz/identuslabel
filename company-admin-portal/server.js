@@ -13,6 +13,8 @@ const path = require('path');
 const dotenvPath = path.join(__dirname, '.env');
 require('dotenv').config({ path: dotenvPath });
 
+const ACCESS_GATE_LOG_PATH = path.join(__dirname, 'data', 'access-gate-log.jsonl');
+
 const express = require('express');
 const session = require('express-session');
 const fetch = require('node-fetch');
@@ -47,6 +49,17 @@ const upload = multer({
     }
   }
 });
+// DOCX-only multer instance for document update submissions
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const uploadDocx = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 40 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = file.mimetype === DOCX_MIME || file.originalname.endsWith('.docx');
+    cb(ok ? null : new Error('Only .docx files accepted'), ok);
+  }
+});
+
 const {
   COMPANIES,
   MULTITENANCY_CLOUD_AGENT_URL,
@@ -1239,7 +1252,7 @@ app.post('/api/company/issue-service-config/:connectionId', requireCompany, asyn
       name,
       department,
       connectionId
-    }); // ✨ REMOVED: apiKey parameter
+    }, req.company); // Pass company context for correct enterpriseAgentName
 
     // ✨ NEW: Log employee wallet details (created during claims build)
     console.log(`\n🎉 [SERVICE-CONFIG] Employee wallet created:`);
@@ -1680,10 +1693,11 @@ const TECHCORP_CLOUD_AGENT_URL = process.env.TECHCORP_CLOUD_AGENT_URL || 'http:/
 const TECHCORP_API_KEY = process.env.TECHCORP_API_KEY || 'b45cde041306c6bceafee5b1da755e49635ad1cd132b26964136a81dda3e0aa2';
 const TECHCORP_DID = COMPANIES.techcorp.did; // Used for issuer validation
 
-// TEMPORARY: Accept both Multitenancy Cloud Agent and Main Cloud Agent DIDs
-// This allows existing credentials issued by Main Cloud Agent to work during transition
+/// Accept all company DIDs plus legacy backwards-compat DID
 const ACCEPTED_ISSUER_DIDS = [
-  TECHCORP_DID, // Multitenancy Cloud Agent TechCorp wallet
+  COMPANIES.techcorp.did,
+  COMPANIES.acme.did,
+  COMPANIES.evilcorp.did,
   'did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c' // Main Cloud Agent (backwards compatibility)
 ];
 
@@ -1698,37 +1712,62 @@ const EMPLOYEE_ROLE_SCHEMA_GUID = process.env.EMPLOYEE_ROLE_SCHEMA_GUID ||
  */
 async function checkCISTrainingStatus(prismDid) {
   try {
-    // Query TechCorp Cloud Agent for credentials
+    // Query TechCorp Cloud Agent for credentials (paginate to get all records)
     const response = await cloudAgentRequest(
       TECHCORP_API_KEY,
-      '/issue-credentials/records'
+      '/issue-credentials/records?limit=200'
     );
 
     const records = response.data.contents || [];
 
+    // States that confirm training was completed (CredentialSent = delivered,
+    // OfferSent/RequestReceived = pending wallet acceptance but training was done)
+    const VALID_STATES = ['CredentialSent', 'CredentialReceived', 'OfferSent', 'RequestReceived', 'RequestSent'];
+
     // Look for CISTraining credential for this DID
-    const trainingCredential = records.find(record => {
-      if (record.protocolState !== 'CredentialSent') return false;
+    let trainingClaims = null;
+    for (const record of records) {
+      if (!VALID_STATES.includes(record.protocolState)) continue;
 
       try {
-        const decoded = decodeCredential(record);
-        return decoded &&
-               decoded.credentialType === 'CISTraining' &&
-               decoded.subject === prismDid;
-      } catch (e) {
-        return false;
-      }
-    });
+        let claims = null;
 
-    if (trainingCredential) {
-      const decoded = decodeCredential(trainingCredential);
-      const expiryDate = decoded.claims?.expiryDate;
+        if (record.credential) {
+          // Issued credential: decode JWT
+          const decoded = decodeCredential(record);
+          if (decoded &&
+              decoded.claims.trainingYear !== undefined &&
+              decoded.claims.certificateNumber !== undefined &&
+              decoded.subject === prismDid) {
+            claims = decoded.claims;
+          }
+        } else if (record.claims) {
+          // Pending offer: claims stored directly on the record
+          const c = record.claims;
+          if (c.trainingYear !== undefined &&
+              c.certificateNumber !== undefined &&
+              c.prismDid === prismDid) {
+            claims = c;
+          }
+        }
+
+        if (claims) {
+          trainingClaims = claims;
+          break;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+
+    if (trainingClaims) {
+      const expiryDate = trainingClaims.expiryDate;
       const hasValidTraining = expiryDate ? new Date(expiryDate) > new Date() : true;
 
       return {
         hasValidTraining,
         expiryDate: expiryDate || null,
-        completionDate: decoded.claims?.completionDate || null
+        completionDate: trainingClaims.completionDate || null
       };
     }
 
@@ -2212,7 +2251,9 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
 
           // Set verified claims and issuer from EmployeeRole
           verifiedClaims = employeeRoleCred.claims;
-          issuerDID = employeeRoleCred.issuer;
+          // Use company DID stored in VC subject (set per-company during onboarding)
+          // Fall back to JWT issuer for backwards compatibility with old VCs
+          issuerDID = employeeRoleCred.claims?.issuerDID || employeeRoleCred.issuer;
           console.log(`[EmployeeAuth] EmployeeRole claims extracted successfully`);
 
           // Process CIS Training credential if provided
@@ -2412,8 +2453,23 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
  * GET /api/employee-portal/profile
  * Get employee profile (requires authentication)
  */
-app.get('/api/employee-portal/profile', requireEmployeeSession, (req, res) => {
+app.get('/api/employee-portal/profile', requireEmployeeSession, async (req, res) => {
   const session = req.employeeSession;
+
+  // If session has no training, do a live check against the cloud agent
+  // (covers the case where the CIS Training VC wasn't in the login VP)
+  if (!session.hasTraining && session.prismDid) {
+    try {
+      const liveStatus = await checkCISTrainingStatus(session.prismDid);
+      if (liveStatus.hasValidTraining) {
+        session.hasTraining = true;
+        session.trainingExpiryDate = liveStatus.expiryDate;
+        session.trainingCompletionDate = liveStatus.completionDate;
+      }
+    } catch (e) {
+      // Non-fatal: fall through with session value
+    }
+  }
 
   res.json({
     success: true,
@@ -2703,7 +2759,7 @@ app.post('/api/employee-portal/documents/create', requireEmployeeSession, async 
     }
 
     // Validate classification level
-    const validClassifications = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
+    const validClassifications = ['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'];
     if (!validClassifications.includes(classificationLevel)) {
       return res.status(400).json({
         success: false,
@@ -2778,6 +2834,7 @@ app.post('/api/employee-portal/documents/create', requireEmployeeSession, async 
       classificationLevel,
       releasableTo: releasableToIssuerDIDs,
       contentEncryptionKey: 'mock-abe-encrypted-key',
+      ownerCompanyDID: session.issuerDID || null,
       metadata: {
         title,
         description,
@@ -2900,7 +2957,7 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
     }
 
     // Validate classification level
-    const validClassifications = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
+    const validClassifications = ['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'];
     if (!validClassifications.includes(classificationLevel)) {
       return res.status(400).json({
         success: false,
@@ -3080,6 +3137,7 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
       classificationLevel,
       releasableTo: releasableToIssuerDIDs,
       contentEncryptionKey: iagonStorage?.encryptionInfo?.key || 'no-encryption',
+      ownerCompanyDID: session.issuerDID || null,
       metadata: {
         title,
         description,
@@ -3228,14 +3286,16 @@ app.get('/api/employee-portal/documents/:documentDID/download', requireEmployeeS
 
     // Check clearance level
     const clearanceLevels = {
+      'UNCLASSIFIED': 0,
       'INTERNAL': 1,
       'CONFIDENTIAL': 2,
       'RESTRICTED': 3,
-      'TOP-SECRET': 4
+      'SECRET': 4,
+      'TOP-SECRET': 4  // legacy alias
     };
 
-    const documentLevel = clearanceLevels[document.classificationLevel] || 1;
-    const employeeLevel = session.clearanceLevel ? (clearanceLevels[session.clearanceLevel] || 1) : 1;
+    const documentLevel = clearanceLevels[document.classificationLevel] ?? 0;
+    const employeeLevel = session.clearanceLevel ? (clearanceLevels[session.clearanceLevel] ?? 0) : 0;
 
     if (employeeLevel < documentLevel) {
       console.log(`[DocumentDownload] ❌ Insufficient clearance (has: ${session.clearanceLevel || 'NONE'}, needs: ${document.classificationLevel})`);
@@ -3331,6 +3391,35 @@ app.get('/api/iagon/status', async (req, res) => {
 // ============================================================================
 
 /**
+ * Extract essential info from a long-form PRISM DID without a Cloud Agent round-trip.
+ * Returns null if the DID is invalid or unparseable.
+ */
+function extractDIDInfo(documentDID) {
+  try {
+    const parts = documentDID.split(':');
+    if (parts.length < 4 || parts[1] !== 'prism') return null;
+    const encodedState = parts[parts.length - 1];
+    const base64 = encodedState.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = base64.length % 4;
+    const binaryStr = Buffer.from(
+      pad ? base64 + '='.repeat(4 - pad) : base64, 'base64'
+    ).toString('binary');
+    const m = binaryStr.match(
+      /https:\/\/gw\.iagon\.com\/api\/v2\/download\?fileId=([a-f0-9]+)&filename=([^&\s"\]]+)/
+    ) || binaryStr.match(
+      /https:\/\/gw\.iagon\.com\/api\/v2\/download\?filename=([^&]+)&nodeId=([a-f0-9]+)/
+    );
+    return {
+      method: 'did:prism',
+      short: documentDID.substring(0, 24) + '…' + documentDID.slice(-8),
+      serviceType: 'IagonStorage',
+      filename: m ? decodeURIComponent(m[2] || m[1]) : null,
+      fileId: m ? (m[1] || m[2]) : null
+    };
+  } catch { return null; }
+}
+
+/**
  * GET /api/documents/discover
  * Discover documents by issuer DID (from employee's EmployeeRole VC)
  *
@@ -3365,7 +3454,8 @@ app.get('/api/documents/discover', async (req, res) => {
     console.log(`[DocumentRegistry] Session found: ${!!session}, clearanceLevel: ${clearanceLevel || 'NONE (INTERNAL only)'}`);
 
     // Query document registry by issuer DID with clearance-based filtering
-    const documents = await DocumentRegistry.queryByIssuerDID(issuerDID, clearanceLevel);
+    const documents = (await DocumentRegistry.queryByIssuerDID(issuerDID, clearanceLevel))
+      .map(doc => ({ ...doc, didInfo: extractDIDInfo(doc.documentDID) }));
 
     console.log(`[DocumentRegistry] Found ${documents.length} documents for ${issuerDID}`);
 
@@ -3374,7 +3464,7 @@ app.get('/api/documents/discover', async (req, res) => {
       documents,
       count: documents.length,
       issuerDID,
-      clearanceLevel: clearanceLevel || 'INTERNAL'
+      clearanceLevel: clearanceLevel || 'UNCLASSIFIED'
     });
 
   } catch (error) {
@@ -3676,27 +3766,33 @@ app.post('/api/ephemeral-documents/access', async (req, res) => {
 
     const session = employeeSessions.get(sessionToken);
 
-    if (!session) {
-      console.log('[EphemeralAccess] DENIED: No valid session');
-      console.log(`   Token used for lookup: ${sessionToken ? sessionToken.substring(0, 20) + '...' : 'NONE'}`);
-      // List active session tokens (first 20 chars) for debugging
-      if (employeeSessions.size > 0) {
-        console.log('   Active session tokens:');
-        for (const [token] of employeeSessions) {
-          console.log(`     - ${token.substring(0, 20)}...`);
-        }
-      }
-      return res.status(401).json({
-        success: false,
-        error: 'Unauthorized',
-        message: 'No valid session. Please log in first.'
-      });
-    }
+    let sessionClearanceLabel;
+    let clearanceLevelNumeric;
 
-    // Use clearance from session (set during VP verification at login)
-    // Default to INTERNAL if no clearance verification done yet
-    const sessionClearanceLabel = session.clearanceLevel || 'INTERNAL';
-    const clearanceLevelNumeric = ReEncryptionService.getLevelNumber(sessionClearanceLabel);
+    if (!session) {
+      // No employee session — allow sessionless access for INTERNAL (level 1) documents only.
+      // This supports IDL wallet and other SSI-native clients that authenticate via
+      // Ed25519 signature rather than VP-presentation login flow.
+      // The /discover endpoint already filters documents to the requestor's clearance,
+      // so INTERNAL is the safe default for unauthenticated sessions.
+      if (!issuerDID) {
+        console.log('[EphemeralAccess] DENIED: No session and no issuerDID');
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized',
+          message: 'No valid session. Please log in first.'
+        });
+      }
+      console.log('[EphemeralAccess] No session — granting UNCLASSIFIED-level sessionless access');
+      console.log(`   issuerDID: ${issuerDID.substring(0, 50)}...`);
+      sessionClearanceLabel = 'UNCLASSIFIED';
+      clearanceLevelNumeric = 0;
+    } else {
+      // Use clearance from session (set during VP verification at login)
+      // Default to UNCLASSIFIED if no clearance verification done yet
+      sessionClearanceLabel = session.clearanceLevel || 'UNCLASSIFIED';
+      clearanceLevelNumeric = ReEncryptionService.getLevelNumber(sessionClearanceLabel);
+    }
 
     // Validate required fields (clearanceLevel removed - comes from session)
     if (!documentDID || !requestorDID || !issuerDID || !ephemeralDID ||
@@ -3813,6 +3909,651 @@ app.get('/api/ephemeral-documents/audit/:documentDID', async (req, res) => {
       message: error.message || 'Failed to get audit log'
     });
   }
+});
+
+/**
+ * GET /api/admin/access-logs
+ * Returns access log for the authenticated company.
+ * Query params: limit (default 200), offset (default 0)
+ */
+app.get('/api/admin/access-logs', requireCompany, async (req, res) => {
+  try {
+    const limit  = Math.min(parseInt(req.query.limit)  || 200, 1000);
+    const offset = parseInt(req.query.offset) || 0;
+    const companyDID = req.company.did;
+
+    const content = await fs.promises.readFile(ACCESS_GATE_LOG_PATH, 'utf8').catch(() => '');
+    const entries = content.trim().split('\n').filter(Boolean).map(line => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean);
+
+    const filtered = entries.filter(e => e.companyDID === companyDID);
+    const page = filtered.reverse().slice(offset, offset + limit);
+    res.json({ success: true, total: filtered.length, logs: page });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// VC-Based Document Access Gate
+// ============================================================================
+
+/**
+ * GET /api/access-gate/challenge?documentDID=...
+ *
+ * Step 4 of the VC-based document access flow.
+ * Returns an OID4VP-style presentationDefinition and a time-limited challenge
+ * UUID that the wallet must include when presenting its VP.
+ *
+ * The wallet should call POST /api/access-gate/present with:
+ *   { documentDID, vp, challenge, ephemeralPublicKey }
+ *
+ * Challenge TTL: 5 minutes.
+ */
+app.get('/api/access-gate/challenge', async (req, res) => {
+  try {
+    const documentDID = req.query.documentDID;
+    if (!documentDID) {
+      return res.status(400).json({ success: false, error: 'MissingDocumentDID', message: 'documentDID query param required' });
+    }
+
+    // Verify document exists in registry
+    const document = DocumentRegistry.documents.get(documentDID);
+    if (!document) {
+      return res.status(404).json({ success: false, error: 'DocumentNotFound', message: 'Document not found in registry' });
+    }
+
+    // Generate challenge
+    const challenge = crypto.randomUUID();
+
+    // Store challenge with 5-min TTL
+    pendingDocumentAccessChallenges.set(challenge, {
+      documentDID,
+      challenge,
+      timestamp: Date.now()
+    });
+
+    // Clean up stale challenges (> 5 min)
+    const now = Date.now();
+    for (const [ch, entry] of pendingDocumentAccessChallenges) {
+      if (now - entry.timestamp > 5 * 60 * 1000) pendingDocumentAccessChallenges.delete(ch);
+    }
+
+    console.log(`[AccessGate] Challenge issued for document: ${documentDID.substring(0, 50)}...`);
+
+    res.json({
+      success: true,
+      challenge,
+      documentDID,
+      presentationDefinition: {
+        id: challenge,
+        input_descriptors: [
+          {
+            id: 'enterprise_vc',
+            name: 'Enterprise Employee Credential',
+            purpose: 'Prove you are an authorized employee',
+            constraints: {
+              fields: [
+                { path: ['$.vc.credentialSubject.role'], filter: { type: 'string' } },
+                { path: ['$.vc.credentialSubject.department'], filter: { type: 'string' } }
+              ]
+            }
+          },
+          {
+            id: 'clearance_vc',
+            name: 'Security Clearance Credential',
+            purpose: 'Prove your security clearance level',
+            constraints: {
+              fields: [
+                { path: ['$.vc.credentialSubject.clearanceLevel'], filter: { type: 'string' } }
+              ]
+            }
+          }
+        ]
+      },
+      expiresIn: 300 // seconds
+    });
+
+  } catch (error) {
+    console.error('[AccessGate] Challenge error:', error);
+    res.status(500).json({ success: false, error: 'InternalServerError', message: error.message });
+  }
+});
+
+/**
+ * POST /api/access-gate/present
+ *
+ * Step 5 of the VC-based document access flow.
+ *
+ * Request body:
+ *   - documentDID: string
+ *   - vp: object  { verifiableCredential: string[] }  — raw JWT credential array
+ *   - challenge: string  — UUID from /challenge endpoint
+ *   - ephemeralPublicKey: string  — Base64 X25519 public key for PFS encryption
+ *
+ * Verification steps:
+ *   1. Challenge valid and not expired
+ *   2. VP contains EmployeeRole VC with trusted issuer
+ *   3. companyDID (issuerDID) in document.releasableTo
+ *   4. clearanceLevel >= document.classificationLevel
+ *   5. StatusList2021 revocation check (best-effort)
+ *   6. Create EphemeralDID as access grant
+ *   7. Download from Iagon, decrypt, redact, re-encrypt for ephemeralPublicKey
+ *
+ * Returns the same shape as /api/ephemeral-documents/access so the wallet
+ * decryptAndDestroy() helper works unchanged.
+ */
+app.post('/api/access-gate/present', async (req, res) => {
+  console.log('\n' + '='.repeat(70));
+  console.log('[AccessGate] VP presentation received');
+  console.log('='.repeat(70));
+
+  try {
+    const { documentDID, vp, challenge, ephemeralPublicKey } = req.body;
+
+    // --- 1. Validate inputs ---
+    if (!documentDID || !vp || !challenge || !ephemeralPublicKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'documentDID, vp, challenge, and ephemeralPublicKey are required'
+      });
+    }
+
+    // --- 2. Validate challenge ---
+    const pendingChallenge = pendingDocumentAccessChallenges.get(challenge);
+    if (!pendingChallenge) {
+      return res.status(403).json({ success: false, error: 'InvalidChallenge', message: 'Challenge not found or expired' });
+    }
+    if (pendingChallenge.documentDID !== documentDID) {
+      return res.status(403).json({ success: false, error: 'ChallengeMismatch', message: 'Challenge was issued for a different document' });
+    }
+    const challengeAge = Date.now() - pendingChallenge.timestamp;
+    if (challengeAge > 5 * 60 * 1000) {
+      pendingDocumentAccessChallenges.delete(challenge);
+      return res.status(403).json({ success: false, error: 'ChallengeExpired', message: 'Challenge has expired' });
+    }
+    // Consume challenge (one-time use)
+    pendingDocumentAccessChallenges.delete(challenge);
+
+    // --- 3. Verify VP and extract claims ---
+    const vpResult = VPVerificationService.verifyVPAndExtractClaims(vp, ACCEPTED_ISSUER_DIDS);
+    if (!vpResult.success) {
+      console.log(`[AccessGate] VP verification failed: ${vpResult.error}`);
+      return res.status(403).json({ success: false, error: vpResult.error, message: vpResult.message });
+    }
+
+    const { companyDID, clearanceLevel, issuerDID, viewerName } = vpResult;
+    console.log(`[AccessGate] VP verified — issuerDID: ${issuerDID?.substring(0, 50)}...`);
+    console.log(`[AccessGate] Clearance from VC: ${clearanceLevel}`);
+
+    // --- 4. Get document from registry ---
+    const document = DocumentRegistry.documents.get(documentDID);
+    if (!document) {
+      return res.status(404).json({ success: false, error: 'DocumentNotFound', message: 'Document not found in registry' });
+    }
+
+    // --- 5. Releasability check ---
+    const releasabilityOk = document.releasableTo && document.releasableTo.includes(issuerDID);
+    if (!releasabilityOk) {
+      console.log(`[AccessGate] DENIED — issuerDID not in releasableTo`);
+      fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        viewerName: viewerName || null,
+        documentDID,
+        documentTitle: document?.metadata?.title || null,
+        clearanceLevel: clearanceLevel || null,
+        companyDID: document.ownerCompanyDID || null,
+        accessGranted: false,
+        denialReason: 'RELEASABILITY_DENIED',
+        copyId: null,
+        clientIp: req.ip || req.connection?.remoteAddress || null
+      }) + '\n', () => {});
+      return res.status(403).json({ success: false, error: 'ReleasabilityDenied', message: 'Your credential issuer is not authorized for this document' });
+    }
+
+    // --- 6. Clearance check ---
+    const CLEARANCE_NUMERIC = { 'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2, 'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4, 'TOP_SECRET': 4 };
+    const docLevel = CLEARANCE_NUMERIC[document.classificationLevel] ?? 1;
+    const userLevel = clearanceLevel ? (CLEARANCE_NUMERIC[clearanceLevel.toUpperCase()] ?? 0) : 0;
+    if (userLevel < docLevel) {
+      console.log(`[AccessGate] DENIED — clearance ${clearanceLevel} (${userLevel}) < required ${document.classificationLevel} (${docLevel})`);
+      fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        viewerName: viewerName || null,
+        documentDID,
+        documentTitle: document?.metadata?.title || null,
+        clearanceLevel: clearanceLevel || null,
+        companyDID: document.ownerCompanyDID || null,
+        accessGranted: false,
+        denialReason: 'CLEARANCE_DENIED',
+        copyId: null,
+        clientIp: req.ip || req.connection?.remoteAddress || null
+      }) + '\n', () => {});
+      return res.status(403).json({
+        success: false,
+        error: 'ClearanceDenied',
+        message: `Document requires ${document.classificationLevel}, your clearance is ${clearanceLevel || 'UNCLASSIFIED'}`
+      });
+    }
+
+    // --- 7. Revocation check (best-effort) ---
+    try {
+      const StatusListService = require('./lib/StatusListService');
+      const revocationStatus = await StatusListService.isRevoked(null, issuerDID);
+      if (revocationStatus.isRevoked) {
+        console.log(`[AccessGate] DENIED — clearance credential revoked`);
+        fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
+          timestamp: new Date().toISOString(),
+          viewerName: viewerName || null,
+          documentDID,
+          documentTitle: document?.metadata?.title || null,
+          clearanceLevel: clearanceLevel || null,
+          companyDID: document.ownerCompanyDID || null,
+          accessGranted: false,
+          denialReason: 'CREDENTIAL_REVOKED',
+          copyId: null,
+          clientIp: req.ip || req.connection?.remoteAddress || null
+        }) + '\n', () => {});
+        return res.status(403).json({ success: false, error: 'CredentialRevoked', message: 'Your security clearance credential has been revoked' });
+      }
+    } catch (revErr) {
+      console.warn(`[AccessGate] Revocation check failed (non-fatal): ${revErr.message}`);
+    }
+
+    // --- 8. Download document from Iagon ---
+    if (!document.iagonStorage || !document.iagonStorage.fileId) {
+      return res.status(404).json({ success: false, error: 'NoStorage', message: 'Document has no Iagon storage record' });
+    }
+
+    const iagonClient = getIagonClient();
+    const isDocxDoc = document.metadata?.sourceFormat === 'docx' && document.iagonStorage.originalDocxFileId;
+    let redactedContent;
+
+    if (isDocxDoc) {
+      // Full-fidelity DOCX redaction
+      const originalDocx = await iagonClient.downloadFile(document.iagonStorage.originalDocxFileId);
+      redactedContent = await DocxRedactionService.applyRedactions(
+        originalDocx,
+        clearanceLevel || 'UNCLASSIFIED',
+        document.metadata?.sectionMetadata || []
+      );
+    } else {
+      // HTML section-based redaction
+      const packageBuffer = await iagonClient.downloadFile(document.iagonStorage.fileId);
+      const encryptedPackage = JSON.parse(packageBuffer.toString('utf8'));
+      const decryptionResult = SectionEncryptionService.decryptSectionsForUser(
+        encryptedPackage,
+        clearanceLevel || 'UNCLASSIFIED',
+        COMPANY_SECRET
+      );
+      redactedContent = RedactionEngine.generateRedactedDocument({
+        metadata: encryptedPackage?.metadata || document.metadata,
+        decryptedSections: decryptionResult.decryptedSections,
+        redactedSections:  decryptionResult.redactedSections,
+        userClearance: clearanceLevel || 'UNCLASSIFIED'
+      }, { viewerName: viewerName || 'Unknown' });
+    }
+
+    // --- 9. Create EphemeralDID as access grant / audit token ---
+    const { metadata: ephemeralMetadata } = EphemeralDIDService.createEphemeralDID({
+      originalDocumentDID: documentDID,
+      clearanceLevel: clearanceLevel || 'UNCLASSIFIED',
+      issuerDID,
+      ttlMs: EphemeralDIDService.DEFAULT_TTL_MS,
+      viewsAllowed: -1
+    });
+    ephemeralDIDStore.set(ephemeralMetadata.ephemeralDID, ephemeralMetadata);
+
+    // --- 10. Re-encrypt for wallet's ephemeral X25519 key (PFS) ---
+    const contentBytes = Buffer.isBuffer(redactedContent) ? redactedContent : Buffer.from(redactedContent, 'utf8');
+    const encrypted = ReEncryptionService.encryptForEphemeralKey(contentBytes, ephemeralPublicKey);
+
+    // --- 11. Generate copyId for audit ---
+    const copyId = crypto.randomUUID();
+    const copyHash = crypto.createHash('sha256').update(contentBytes).update(copyId).digest('hex');
+
+    fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      viewerName: viewerName || null,
+      documentDID,
+      documentTitle: document?.metadata?.title || null,
+      clearanceLevel: clearanceLevel || null,
+      companyDID: document.ownerCompanyDID || null,
+      accessGranted: true,
+      denialReason: null,
+      copyId,
+      clientIp: req.ip || req.connection?.remoteAddress || null
+    }) + '\n', () => {});
+
+    console.log(`[AccessGate] ✅ Access GRANTED — ephemeralDID: ${ephemeralMetadata.ephemeralDID.substring(0, 50)}...`);
+
+    res.json({
+      success: true,
+      granted: true,
+      documentDID,
+      copyId,
+      copyHash,
+      ephemeralDID: ephemeralMetadata.ephemeralDID,
+      encryptedDocument: {
+        ciphertext:       encrypted.ciphertext,
+        nonce:            encrypted.nonce,
+        serverPublicKey:  encrypted.serverPublicKey,
+        copyId,
+        filename:         document.iagonStorage?.filename || `document-${copyId}`,
+        mimeType:         isDocxDoc
+          ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          : 'text/html',
+        classificationLevel: document.classificationLevel
+      },
+      ciphertext:       encrypted.ciphertext,
+      nonce:            encrypted.nonce,
+      serverPublicKey:  encrypted.serverPublicKey,
+      filename:         document.iagonStorage?.filename || `document-${copyId}`,
+      mimeType:         isDocxDoc
+        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        : 'text/html',
+      classificationLevel: document.classificationLevel,
+      accessedAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('[AccessGate] Error processing VP presentation:', error);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to process VP presentation'
+    });
+  }
+});
+
+// =============================================================================
+// DOCUMENT UPDATE / VERSIONING ENDPOINTS
+// =============================================================================
+
+/**
+ * POST /api/document-update/request-edit
+ * Request an editable (redacted) version of a DOCX document for editing.
+ *
+ * Body: { documentDID, vp, challenge, ephemeralPublicKey }
+ * Returns: { editToken, encryptedEditableDocument, filename, mimeType, expiresIn }
+ */
+app.post('/api/document-update/request-edit', async (req, res) => {
+  console.log('\n' + '='.repeat(70));
+  console.log('[DocumentUpdate] Edit request received');
+  console.log('='.repeat(70));
+
+  try {
+    const { documentDID, vp, challenge, ephemeralPublicKey } = req.body;
+
+    // 1. Validate inputs
+    if (!documentDID || !vp || !challenge || !ephemeralPublicKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'BadRequest',
+        message: 'documentDID, vp, challenge, and ephemeralPublicKey are required'
+      });
+    }
+
+    // 2. Consume challenge (one-time use)
+    const pendingChallenge = pendingDocumentAccessChallenges.get(challenge);
+    if (!pendingChallenge) {
+      return res.status(403).json({ success: false, error: 'InvalidChallenge', message: 'Challenge not found or expired' });
+    }
+    if (pendingChallenge.documentDID !== documentDID) {
+      return res.status(403).json({ success: false, error: 'ChallengeMismatch', message: 'Challenge was issued for a different document' });
+    }
+    const challengeAge = Date.now() - pendingChallenge.timestamp;
+    if (challengeAge > 5 * 60 * 1000) {
+      pendingDocumentAccessChallenges.delete(challenge);
+      return res.status(403).json({ success: false, error: 'ChallengeExpired', message: 'Challenge has expired' });
+    }
+    pendingDocumentAccessChallenges.delete(challenge);
+
+    // 3. Verify VP and extract claims
+    const vpResult = VPVerificationService.verifyVPAndExtractClaims(vp, ACCEPTED_ISSUER_DIDS);
+    if (!vpResult.success) {
+      return res.status(403).json({ success: false, error: vpResult.error, message: vpResult.message });
+    }
+
+    const { companyDID, clearanceLevel, issuerDID, viewerName } = vpResult;
+    console.log(`[DocumentUpdate] VP verified — issuerDID: ${issuerDID?.substring(0, 50)}...`);
+
+    // 4. Look up document
+    const document = DocumentRegistry.documents.get(documentDID);
+    if (!document) {
+      return res.status(404).json({ success: false, error: 'DocumentNotFound', message: 'Document not found in registry' });
+    }
+
+    // 5. Releasability check
+    if (!document.releasableTo || !document.releasableTo.includes(issuerDID)) {
+      return res.status(403).json({ success: false, error: 'ReleasabilityDenied', message: 'Your credential issuer is not authorized for this document' });
+    }
+
+    // 6. Clearance check
+    const CLEARANCE_NUMERIC = { 'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2, 'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4, 'TOP_SECRET': 4 };
+    const docLevel = CLEARANCE_NUMERIC[document.classificationLevel] ?? 1;
+    const userLevel = clearanceLevel ? (CLEARANCE_NUMERIC[clearanceLevel.toUpperCase()] ?? 0) : 0;
+    if (userLevel < docLevel) {
+      return res.status(403).json({
+        success: false,
+        error: 'ClearanceDenied',
+        message: `Document requires ${document.classificationLevel}, your clearance is ${clearanceLevel || 'UNCLASSIFIED'}`
+      });
+    }
+
+    // 7. Check document is DOCX
+    if (!document.iagonStorage?.originalDocxFileId) {
+      return res.status(400).json({ success: false, error: 'NotDocxDocument', message: 'Document is not a DOCX file' });
+    }
+
+    // 8. Download original DOCX
+    const iagonClient = getIagonClient();
+    const originalDocx = await iagonClient.downloadFile(document.iagonStorage.originalDocxFileId);
+
+    // 9. Apply redactions
+    const redactedDocx = await DocxRedactionService.applyRedactions(
+      originalDocx,
+      clearanceLevel || 'INTERNAL',
+      document.metadata?.sectionMetadata || []
+    );
+
+    // 10. Sign edit token (5-minute expiry)
+    const editToken = jwt.sign({
+      sub:            'document-edit',
+      documentDID,
+      editorDID:      viewerName || issuerDID,
+      companyDID:     companyDID || issuerDID,
+      clearanceLevel: clearanceLevel || 'INTERNAL',
+      exp:            Math.floor(Date.now() / 1000) + 300
+    }, COMPANY_SECRET, { algorithm: 'HS256' });
+
+    // 11. Encrypt redacted DOCX for wallet
+    const encrypted = ReEncryptionService.encryptForEphemeralKey(redactedDocx, ephemeralPublicKey);
+
+    const filename = document.iagonStorage?.filename || `document-${documentDID.slice(-8)}.docx`;
+
+    console.log(`[DocumentUpdate] ✅ Edit token issued for ${documentDID}`);
+
+    res.json({
+      success: true,
+      editToken,
+      encryptedEditableDocument: {
+        ciphertext:       encrypted.ciphertext,
+        nonce:            encrypted.nonce,
+        serverPublicKey:  encrypted.serverPublicKey
+      },
+      filename,
+      mimeType: DOCX_MIME,
+      expiresIn: 300
+    });
+
+  } catch (error) {
+    console.error('[DocumentUpdate] Error in request-edit:', error);
+    res.status(500).json({ success: false, error: 'InternalServerError', message: error.message });
+  }
+});
+
+/**
+ * POST /api/document-update/submit
+ * Submit an edited DOCX for merging and versioning.
+ *
+ * Multipart form: file (DOCX), editToken (JWT string)
+ */
+app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, res) => {
+  console.log('\n' + '='.repeat(70));
+  console.log('[DocumentUpdate] Edit submission received');
+  console.log('='.repeat(70));
+
+  try {
+    // 1. Validate inputs
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'file is required' });
+    }
+    if (!req.body.editToken) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'editToken is required' });
+    }
+
+    // 2. Verify token
+    let decoded;
+    try {
+      decoded = jwt.verify(req.body.editToken, COMPANY_SECRET, { algorithms: ['HS256'] });
+    } catch (err) {
+      return res.status(403).json({ success: false, error: 'InvalidEditToken', message: 'Edit token is invalid or expired' });
+    }
+
+    const { documentDID, clearanceLevel, editorDID, companyDID } = decoded;
+
+    // 3. Look up document
+    const document = DocumentRegistry.documents.get(documentDID);
+    if (!document) {
+      return res.status(404).json({ success: false, error: 'DocumentNotFound', message: 'Document not found in registry' });
+    }
+
+    const previousFileId = document.iagonStorage.originalDocxFileId;
+
+    // 4. Download original DOCX from Iagon
+    const iagonClient = getIagonClient();
+    const originalDocx = await iagonClient.downloadFile(previousFileId);
+
+    // 5. Merge
+    let mergedDocx;
+    try {
+      mergedDocx = await DocxMergeService.mergeDocx(originalDocx, req.file.buffer, clearanceLevel);
+    } catch (mergeErr) {
+      return res.status(422).json({
+        success: false,
+        error: 'MergeError',
+        message: mergeErr.message
+      });
+    }
+
+    // 6. Compute content hash
+    const contentHash = 'sha256:' + crypto.createHash('sha256').update(mergedDocx).digest('hex');
+
+    // 7. Upload merged DOCX to Iagon
+    const newResult = await iagonClient.uploadFile(
+      mergedDocx,
+      `updated-${Date.now()}.docx`,
+      { classificationLevel: document.classificationLevel }
+    );
+
+    // 8. Update registry with immutable version chain
+    const newVersion = await DocumentRegistry.addDocumentVersion(documentDID, {
+      newDocxFileId: newResult.fileId,
+      contentHash,
+      editorDID,
+      clearanceLevel
+    });
+
+    // 9. On-chain anchoring (fire-and-forget, non-fatal)
+    const enterpriseApiKey = process.env.ENTERPRISE_API_KEY || process.env.COMPANY_SECRET;
+    if (enterpriseApiKey) {
+      (async () => {
+        try {
+          const serviceEndpoint = `https://identuslabel.cz/company-admin/api/document-versions/${encodeURIComponent(documentDID)}`;
+          // Check if service endpoint already exists
+          let actionType = 'ADD_SERVICE';
+          try {
+            const didInfoResult = await enterpriseAgentRequest(enterpriseApiKey, `/did-registrar/dids/${encodeURIComponent(documentDID)}`, {});
+            const services = didInfoResult?.data?.didDocument?.service || [];
+            if (services.some(s => s.id === 'document-version')) {
+              actionType = 'UPDATE_SERVICE';
+            }
+          } catch (_) { /* proceed with ADD_SERVICE */ }
+
+          await enterpriseAgentRequest(enterpriseApiKey, `/did-registrar/dids/${encodeURIComponent(documentDID)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({
+              actions: [{
+                actionType,
+                updateService: {
+                  id:              'document-version',
+                  type:            'LinkedDomains',
+                  serviceEndpoint: [serviceEndpoint]
+                }
+              }]
+            })
+          });
+          await enterpriseAgentRequest(enterpriseApiKey, `/did-registrar/dids/${encodeURIComponent(documentDID)}/publications`, {
+            method: 'POST'
+          });
+          console.log(`[UpdateDID] On-chain anchoring submitted for ${documentDID} version ${newVersion.versionId}`);
+        } catch (err) {
+          console.error(`[UpdateDID] On-chain anchoring failed for ${documentDID}:`, err.message);
+        }
+      })();
+    }
+
+    // 10. Audit log
+    fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
+      timestamp:     new Date().toISOString(),
+      viewerName:    editorDID,
+      documentDID,
+      documentTitle: document?.metadata?.title || null,
+      companyDID:    document.ownerCompanyDID || companyDID || null,
+      accessGranted: true,
+      action:        'DOCUMENT_EDITED',
+      newFileId:     newResult.fileId,
+      versionId:     newVersion.versionId,
+      contentHash,
+      clientIp:      req.ip || null
+    }) + '\n', () => {});
+
+    console.log(`[DocumentUpdate] ✅ Version ${newVersion.versionId} created for ${documentDID}`);
+
+    res.json({
+      success:       true,
+      documentDID,
+      versionId:     newVersion.versionId,
+      newFileId:     newResult.fileId,
+      previousFileId,
+      contentHash,
+      onChainStatus: 'anchoring_submitted',
+      updatedAt:     newVersion.createdAt
+    });
+
+  } catch (error) {
+    console.error('[DocumentUpdate] Error in submit:', error);
+    res.status(500).json({ success: false, error: 'InternalServerError', message: error.message });
+  }
+});
+
+/**
+ * GET /api/document-versions/:documentDID
+ * Public endpoint — returns version history without raw Iagon fileIds.
+ * URL is embedded in the DID Document service endpoint after versioning.
+ */
+app.get('/api/document-versions/:documentDID', (req, res) => {
+  const documentDID = decodeURIComponent(req.params.documentDID);
+  const versions = DocumentRegistry.getDocumentVersions(documentDID);
+  if (!versions.length) {
+    return res.status(404).json({ error: 'NoVersionHistory', documentDID });
+  }
+  // Strip raw fileIds from public response
+  const publicVersions = versions.map(({ fileId: _omit, ...v }) => v);
+  res.json({ documentDID, versions: publicVersions });
 });
 
 /**
@@ -4537,7 +5278,7 @@ app.post('/api/employee-portal/clearance/submit', requireEmployeeSession, async 
     }
 
     // Validate clearance level
-    const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
+    const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET', 'TOP-SECRET'];
     if (!validLevels.includes(clearanceLevel)) {
       return res.status(400).json({
         success: false,
@@ -4634,10 +5375,12 @@ const PROTECTED_RESOURCES = {
 
 // Clearance level hierarchy for comparison
 const CLEARANCE_HIERARCHY = {
+  'UNCLASSIFIED': 0,
   'INTERNAL': 1,
   'CONFIDENTIAL': 2,
   'RESTRICTED': 3,
-  'TOP-SECRET': 4
+  'SECRET': 4,
+  'TOP-SECRET': 4  // legacy alias
 };
 
 /**
@@ -5279,12 +6022,18 @@ const EphemeralDIDService = require('./lib/EphemeralDIDService');
 const DocumentCopyVCIssuer = require('./lib/DocumentCopyVCIssuer');
 const { getIagonClient } = require('./lib/IagonStorageClient');
 const nacl = require('tweetnacl');
+const VPVerificationService = require('./lib/VPVerificationService');
+const DocxMergeService = require('./lib/DocxMergeService');
 
 // Company secret for key derivation (in production, use secure key management)
 const COMPANY_SECRET = process.env.COMPANY_SECRET || 'default-company-secret-change-in-production';
 
 // In-memory storage for ephemeral DIDs (in production, use persistent storage)
 const ephemeralDIDStore = new Map();
+
+// Pending document access gate challenges: presentationId → { documentDID, ephemeralPublicKey, challenge, timestamp }
+// TTL: 5 minutes (matching the challenge lifetime)
+const pendingDocumentAccessChallenges = new Map();
 
 /**
  * POST /api/classified-documents/upload
@@ -5376,9 +6125,10 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
       console.log(`   [ClassifiedUpload] Parsed DOCX: ${parsedDocument.sections.length} sections`);
     }
 
-    // Always use original filename as title (no title input field in employee dashboard)
+    // Use provided title, or fall back to title extracted from document, then filename
     const filenameWithoutExt = file.originalname.replace(/\.(docx|html?)$/i, '');
-    parsedDocument.metadata.title = filenameWithoutExt;
+    const providedTitle = req.body.title?.trim();
+    parsedDocument.metadata.title = providedTitle || parsedDocument.metadata.title || filenameWithoutExt;
     parsedDocument.metadata.originalFilename = file.originalname;
 
     // Log section statistics
@@ -5387,8 +6137,27 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
     console.log(`     INTERNAL: ${stats['INTERNAL'] || 0}`);
     console.log(`     CONFIDENTIAL: ${stats['CONFIDENTIAL'] || 0}`);
     console.log(`     RESTRICTED: ${stats['RESTRICTED'] || 0}`);
+    console.log(`     SECRET: ${stats['SECRET'] || 0}`);
     console.log(`     TOP-SECRET: ${stats['TOP-SECRET'] || 0}`);
     console.log(`   Overall classification: ${parsedDocument.metadata.overallClassification}`);
+
+    // Enforce: user cannot upload a document with sections above their own clearance
+    const CLEARANCE_NUMERIC = {
+      'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2,
+      'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4
+    };
+    const userClearanceNum = session.clearanceLevel ? (CLEARANCE_NUMERIC[session.clearanceLevel] ?? 0) : 0;
+    const maxSectionLevel = parsedDocument.sections.reduce((max, s) => Math.max(max, s.clearanceLevel ?? 0), 0);
+
+    if (maxSectionLevel > userClearanceNum) {
+      const maxSectionName = Object.entries(CLEARANCE_NUMERIC).find(([, v]) => v === maxSectionLevel)?.[0] || 'UNKNOWN';
+      console.log(`   [ClassifiedUpload] ❌ Rejected: highest section ${maxSectionName} exceeds user clearance ${session.clearanceLevel || 'NONE'}`);
+      return res.status(403).json({
+        success: false,
+        error: 'InsufficientClearance',
+        message: `You cannot upload a document containing ${maxSectionName} sections. Your clearance level is ${session.clearanceLevel || 'UNCLASSIFIED'}.`
+      });
+    }
 
     // Encrypt sections
     const encryptedPackage = SectionEncryptionService.encryptSections(
@@ -5454,8 +6223,41 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
       console.log(`   [ClassifiedUpload] Not DOCX - skipping original upload`);
     }
 
-    // Create Document DID (simplified - use existing EnterpriseDocumentManager in production)
-    const documentDID = `did:prism:classified:${encryptedPackage.documentId}`;
+    // Create real PRISM DID with DocumentAccessGate + DocumentPolicy service entries
+    const PUBLIC_URL = process.env.PUBLIC_URL || 'https://identuslabel.cz/company-admin';
+    let documentDID;
+    try {
+      const deptKey = DEPARTMENT_API_KEYS[department || session.department] || DEPARTMENT_API_KEYS['Security'];
+      const documentManager = new EnterpriseDocumentManager(ENTERPRISE_CLOUD_AGENT_URL, deptKey);
+      const accessGateService = {
+        id: 'document-access-gate',
+        type: 'DocumentAccessGate',
+        serviceEndpoint: `${PUBLIC_URL}/api/access-gate/challenge`
+      };
+      const documentPolicyService = {
+        id: 'document-policy',
+        type: 'DocumentPolicy',
+        serviceEndpoint: JSON.stringify({
+          releasableTo: releasableDIDs,
+          classificationLevel: parsedDocument.metadata.overallClassification
+        })
+      };
+      const didResult = await documentManager.createDocumentDIDWithServiceEndpoint(
+        department || session.department || 'Security',
+        {
+          title: parsedDocument.metadata.title,
+          classificationLevel: parsedDocument.metadata.overallClassification,
+          releasableTo: releasableDIDs
+        },
+        { fileId: iagonResult.fileId, downloadUrl: iagonResult.iagonUrl || iagonResult.url || '' },
+        [accessGateService, documentPolicyService]
+      );
+      documentDID = didResult.documentDID;
+      console.log(`   [ClassifiedUpload] ✅ Real PRISM DID created: ${documentDID.substring(0, 60)}...`);
+    } catch (didError) {
+      console.error(`   [ClassifiedUpload] ❌ PRISM DID creation failed, using fallback: ${didError.message}`);
+      documentDID = `did:prism:classified:${encryptedPackage.documentId}`;
+    }
 
     // Register in DocumentRegistry
     const registryEntry = {
@@ -5469,6 +6271,7 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
         sectionMetadata: SectionEncryptionService.getSectionMetadata(encryptedPackage),
         createdBy: session.email,
         createdByDID: session.prismDID,
+        creatorRole: session.role,
         department: department || session.department,
         sourceFormat: isDocx ? 'docx' : 'html',
         originalFilename: file.originalname
@@ -5539,7 +6342,7 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
   console.log('\n' + '='.repeat(80));
   console.log('[ClassifiedDownload] Document download request');
   console.log('   Employee:', session.email);
-  console.log('   Clearance:', session.clearanceLevel || 'INTERNAL');
+  console.log('   Clearance:', session.clearanceLevel || 'UNCLASSIFIED');
   console.log('='.repeat(80));
 
   try {
@@ -5554,8 +6357,8 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
     }
 
     // Get user clearance from session
-    const userClearance = session.clearanceLevel || 'INTERNAL';
-    const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] || 1;
+    const userClearance = session.clearanceLevel || 'UNCLASSIFIED';
+    const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] ?? 0;
     const employeeIssuerDID = session.issuerDID;
 
     console.log(`   Document DID: ${documentDID}`);
@@ -5914,13 +6717,13 @@ app.post('/api/employee-portal/documents/prepare-download/:documentDID', require
   console.log('[PrepareDownload] SSI-compliant document delivery - Step 1');
   console.log('   Employee:', session.email);
   console.log('   Document DID:', documentDID);
-  console.log('   Clearance:', session.clearanceLevel || 'INTERNAL');
+  console.log('   Clearance:', session.clearanceLevel || 'UNCLASSIFIED');
   console.log('='.repeat(80));
 
   try {
     // Get user clearance from session
-    const userClearance = session.clearanceLevel || 'INTERNAL';
-    const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] || 1;
+    const userClearance = session.clearanceLevel || 'UNCLASSIFIED';
+    const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] ?? 0;
     const employeeIssuerDID = session.issuerDID;
 
     // =========================================================================
@@ -5967,21 +6770,30 @@ app.post('/api/employee-portal/documents/prepare-download/:documentDID', require
 
     if (isDocx) {
       // DOCX Flow
-      const originalDocx = await iagonClient.downloadFile(documentRecord.iagonStorage.originalDocxFileId);
-      redactedDocument = await DocxRedactionService.applyRedactions(
-        originalDocx,
-        userClearance,
-        documentRecord.metadata?.sectionMetadata || []
-      );
-      documentFormat = 'docx';
-      decryptionResult = {
-        decryptedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
-          s => s.clearanceLevel <= userClearanceLevel
-        ),
-        redactedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
-          s => s.clearanceLevel > userClearanceLevel
-        )
-      };
+      try {
+        const originalDocx = await iagonClient.downloadFile(documentRecord.iagonStorage.originalDocxFileId);
+        redactedDocument = await DocxRedactionService.applyRedactions(
+          originalDocx,
+          userClearance,
+          documentRecord.metadata?.sectionMetadata || []
+        );
+        documentFormat = 'docx';
+        decryptionResult = {
+          decryptedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
+            s => s.clearanceLevel <= userClearanceLevel
+          ),
+          redactedSections: (documentRecord.metadata?.sectionMetadata || []).filter(
+            s => s.clearanceLevel > userClearanceLevel
+          )
+        };
+      } catch (docxError) {
+        console.error('[PrepareDownload] DOCX corrupted or invalid:', docxError.message);
+        return res.status(503).json({
+          success: false,
+          error: 'DocumentCorrupted',
+          message: 'The stored document file is corrupted. Please re-upload the document through the admin portal.'
+        });
+      }
     } else {
       // HTML Flow
       const packageBuffer = await iagonClient.downloadFile(documentRecord.iagonStorage.fileId);
@@ -6352,7 +7164,7 @@ app.post('/api/employee-portal/documents/download-to-wallet/:documentDID', requi
   console.log('[DownloadToWallet] SSI-compliant document delivery');
   console.log('   Employee:', session.email);
   console.log('   Document DID:', documentDID);
-  console.log('   Clearance:', session.clearanceLevel || 'INTERNAL');
+  console.log('   Clearance:', session.clearanceLevel || 'UNCLASSIFIED');
   console.log('='.repeat(80));
 
   try {
@@ -6367,8 +7179,8 @@ app.post('/api/employee-portal/documents/download-to-wallet/:documentDID', requi
     }
 
     // Get user clearance from session
-    const userClearance = session.clearanceLevel || 'INTERNAL';
-    const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] || 1;
+    const userClearance = session.clearanceLevel || 'UNCLASSIFIED';
+    const userClearanceLevel = ClearanceDocumentParser.CLEARANCE_LEVELS[userClearance] ?? 0;
     const employeeIssuerDID = session.issuerDID;
 
     // =========================================================================
@@ -6661,7 +7473,7 @@ app.get('/api/classified-documents/templates', (req, res) => {
       { level: 1, name: 'INTERNAL', description: 'Basic organizational access' },
       { level: 2, name: 'CONFIDENTIAL', description: 'Sensitive business information' },
       { level: 3, name: 'RESTRICTED', description: 'Highly sensitive strategic information' },
-      { level: 4, name: 'TOP-SECRET', description: 'Classified information (highest)' }
+      { level: 4, name: 'SECRET', description: 'Classified information (highest)' }
     ]
   });
 });
@@ -6766,7 +7578,7 @@ app.listen(PORT, async () => {
     await DocumentRegistry.initialize();
     const stats = DocumentRegistry.getStatistics();
     console.log(`   ✅ DocumentRegistry loaded (${stats.totalDocuments} documents)`);
-    console.log(`   📊 Classification breakdown: INTERNAL=${stats.byClassification['INTERNAL'] || 0}, CONFIDENTIAL=${stats.byClassification['CONFIDENTIAL'] || 0}, RESTRICTED=${stats.byClassification['RESTRICTED'] || 0}, TOP-SECRET=${stats.byClassification['TOP-SECRET'] || 0}`);
+    console.log(`   📊 Classification breakdown: INTERNAL=${stats.byClassification['INTERNAL'] || 0}, CONFIDENTIAL=${stats.byClassification['CONFIDENTIAL'] || 0}, RESTRICTED=${stats.byClassification['RESTRICTED'] || 0}, SECRET=${stats.byClassification['SECRET'] || 0}, TOP-SECRET=${stats.byClassification['TOP-SECRET'] || 0}`);
   } catch (error) {
     console.error(`   ❌ DocumentRegistry initialization failed:`, error.message);
   }

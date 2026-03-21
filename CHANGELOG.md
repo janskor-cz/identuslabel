@@ -4,6 +4,288 @@ This file contains historical updates and fixes that have been archived from the
 
 ---
 
+## March 2026
+
+### QR Scanner Fix — Short URL Resolution & @yudiel/react-qr-scanner v2.x API (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Fixed three bugs that prevented the IDL wallet QR scanner from accepting scanned DIDComm OOB invitations encoded as short URLs (`https://identuslabel.cz/wallet/i/<token>`). Scanning such a URL produced a red error overlay, an unhandled promise rejection logged as `{}`, and no connection.
+
+**Bug 1 — `qrMessageParser.ts`: Short URL not recognized**
+
+`parseURLMessage()` checked only for `_oob`, `request`, and `invitation` query params. Short URLs have none of these, so the function threw `"URL does not contain recognized invitation or request parameter"`.
+
+*Fix*: Added short URL detection (regex `/\/wallet\/i\/[a-z0-9]+$/i`) before the throw. Short URLs are returned as `oob-invitation` type with `isShortUrl: true` in `parsedData`.
+
+**Bug 2 — `OOB.tsx`: `handleScan` didn't resolve short URLs**
+
+`handleScan` called `triggerInvitationParsing(rawUrl)` directly, which tried to extract `_oob` param from the short URL — found nothing — and silently failed.
+
+*Fix*: `handleScan` now runs an async `resolveAndParse()` inner function that detects short URLs, calls `/wallet/api/shorten?token=<token>` to get the full `?_oob=...` URL, updates the OOB input state with the resolved URL, then calls `triggerInvitationParsing(fullUrl)`. Shows "Resolving..." via existing `isResolvingUrl` state during fetch.
+
+**Bug 3 — `Scanner.tsx`: Wrong `@yudiel/react-qr-scanner` v2.x API**
+
+The Scanner component used `onDecode` prop and expected a `string` callback argument. In `@yudiel/react-qr-scanner` v2.4.1, the API changed: prop is `onScan` and callback receives `IDetectedBarcode[]`. Additionally `formats` defaulted to `["any"]` (unreliable) and `aspectRatio: 1` in camera constraints broke mobile detection.
+
+*Fix*: Changed `onDecode` to `onScan`, updated callback to extract `detections[0].rawValue`, added explicit `formats={['qr_code']}`, removed `aspectRatio: 1` from constraints, removed invalid `audio` key from `components` prop.
+
+**Files Modified**:
+- `idl-wallet/src/utils/qrMessageParser.ts` - Short URL detection before throw
+- `idl-wallet/src/components/OOB.tsx` - Async short URL resolution in handleScan
+- `idl-wallet/src/components/Scanner.tsx` - Migrated to @yudiel/react-qr-scanner v2.x onScan API
+
+---
+
+### VC-Based Document Access Gate — SSI-Native Access Flow (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+New SSI-native document access flow replacing session-based access. Users present a Verifiable Presentation containing EmployeeRole and SecurityClearance VCs to prove their clearance level. The server validates challenge TTL (5-minute expiry), VP signature, releasability, clearance level, and credential revocation status before granting access. Granted documents are re-encrypted for the requestor's ephemeral X25519 key, providing perfect forward secrecy. Replaces session-dependent ephemeral access with proper SSI flows.
+
+**New Endpoints**:
+- `GET /api/access-gate/challenge` — Returns a time-limited challenge nonce for VP construction
+- `POST /api/access-gate/present` — Accepts VP with EmployeeRole + SecurityClearance VCs, runs 7-step verification pipeline
+
+**Verification Pipeline** (ReEncryptionService):
+1. Challenge TTL validation (5-minute window)
+2. VP signature verification
+3. Releasability check against document metadata
+4. Clearance level comparison (numeric)
+5. Credential revocation check via StatusList2021
+6. Document retrieval and decryption
+7. Re-encryption with requestor's ephemeral X25519 public key
+
+**Files Modified**:
+- `company-admin-portal/server.js` — New `/api/access-gate/challenge` GET and `/api/access-gate/present` POST endpoints
+- `company-admin-portal/lib/DocumentRegistry.js` — Added `ownerCompanyDID` field to document records
+- `company-admin-portal/lib/ReEncryptionService.js` — 7-step VP verification pipeline
+
+---
+
+### Document Access Audit Logs (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Every access decision (grant or denial with reason) is now persisted to `data/access-gate-log.jsonl`. Company admins see the full audit trail via a new dashboard UI section. Logs are company-scoped by `ownerCompanyDID`, ensuring each company only sees access events for their own documents.
+
+**Denial Reasons**:
+- `RELEASABILITY_DENIED` — Requestor's company not in document's releasability list
+- `CLEARANCE_DENIED` — Requestor's clearance level below document classification
+- `CREDENTIAL_REVOKED` — One or more presented credentials revoked via StatusList2021
+
+**UI**: "Document Access Logs" section in admin dashboard with 6-column table (Timestamp, Viewer, Document, Clearance, Status, Reason). Denied rows highlighted with `#fff5f5` background. Auto-loads on admin login.
+
+**Files Modified**:
+- `company-admin-portal/server.js` — `ACCESS_GATE_LOG_PATH`, 4 `appendFile` calls, `GET /api/admin/access-logs`
+- `company-admin-portal/public/index.html` — Document Access Logs section
+- `company-admin-portal/public/app.js` — `loadAccessLogs` method
+- `company-admin-portal/public/styles.css` — `.denied-row` styling
+
+---
+
+### Ed25519 Signature Verification for Document Requests (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Proper Ed25519 signature verification for document access requests. Resolves the requestor's PRISM DID document, extracts authentication public keys (supports both Base64 and JWK formats), and verifies the signature using NaCl. Falls back to format-only validation if DID resolution fails, allowing INTERNAL-level access during onboarding before the requestor's PRISM DID is published on-chain.
+
+**Verification Flow**:
+- Resolve requestor PRISM DID via cloud agent
+- Extract `authentication` public key from DID document
+- Detect key format (Base64 raw bytes vs. JWK `x` field)
+- Verify Ed25519 signature with NaCl `sign.detached.verify`
+- Fallback: format-only validation grants up to INTERNAL access if DID unresolvable
+
+**Files Modified**:
+- `company-admin-portal/lib/ReEncryptionService.js` — Full Ed25519 verification with DID resolution and format detection
+
+---
+
+### Standardized Security Clearance Levels — SECRET Replaces TOP-SECRET (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+All three services now standardize on Certification Authority naming conventions: UNCLASSIFIED (0), INTERNAL (1), CONFIDENTIAL (2), RESTRICTED (3), SECRET (4). The legacy TOP-SECRET label maps to SECRET for backward compatibility. Numeric comparisons use `?? 0` to handle UNCLASSIFIED (falsy zero value) correctly.
+
+**Hierarchy**:
+| Level | Name | Numeric |
+|-------|------|---------|
+| 0 | UNCLASSIFIED | 0 |
+| 1 | INTERNAL | 1 |
+| 2 | CONFIDENTIAL | 2 |
+| 3 | RESTRICTED | 3 |
+| 4 | SECRET | 4 |
+
+**Legacy Mappings**: `UNCLASSIFIED` -> `INTERNAL`, `TOP-SECRET` -> `SECRET`
+
+**Files Modified**:
+- `company-admin-portal/server.js` — Updated clearance constants and comparisons
+- `company-admin-portal/lib/DocumentRegistry.js` — Standardized level names
+- `company-admin-portal/lib/ReEncryptionService.js` — Numeric comparison with `?? 0`
+- `certification-authority/server.js` — Canonical level definitions
+- `idl-wallet/src/utils/securityLevels.ts` — Wallet-side level map
+- `idl-wallet/src/utils/credentialTypeDetector.ts` — Clearance detection logic
+- `idl-wallet/src/pages/documents.tsx` — Document list clearance display
+- `idl-wallet/src/pages/my-documents.tsx` — My Documents clearance display
+
+---
+
+### Enhanced CIS Training Credential Detection (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Rewrote `checkCISTrainingStatus` to handle pending offers (not just issued credentials), paginated cloud agent queries (`limit=200`), and multiple credential states. Previously, CIS Training detection only found fully-issued credentials; now it also detects in-progress issuance flows.
+
+**Credential States Handled**:
+- `CredentialSent` — Issued and delivered
+- `CredentialReceived` — Received by holder
+- `OfferSent` — Offer pending acceptance
+- `RequestReceived` — Request from holder received
+- `RequestSent` — Request sent to issuer
+
+**Detection Sources**: `record.credential` (issued VCs) and `record.claims` (pending offer claims)
+
+**Files Modified**:
+- `company-admin-portal/server.js` — `checkCISTrainingStatus` rewrite with pagination and multi-state detection
+
+---
+
+### EmployeeRole VC Per-Company Issuer DID (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Stores the issuing company's DID in the EmployeeRole VC `credentialSubject.issuerDID` field during employee onboarding. This enables correct multi-company authentication when an employee holds EmployeeRole VCs from multiple organizations. Falls back to JWT `iss` field for backward compatibility with previously issued credentials.
+
+**Files Modified**:
+- `company-admin-portal/server.js` — Populates `issuerDID` in EmployeeRole VC claims
+- `company-admin-portal/lib/ServiceConfigVCBuilder.js` — Issuer DID propagation
+
+---
+
+### Certification Authority: Paginated Credential Queries (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Added offset-based pagination for `/api/credentials/revocable` and `/api/credentials/pending` endpoints. Pages through cloud agent records with `limit=100` to collect all records beyond the agent's default response limit, ensuring large credential sets are fully returned.
+
+**Files Modified**:
+- `certification-authority/server.js` — Paginated fetch loops for revocable and pending credential endpoints
+
+---
+
+### Certification Authority: StatusList2021 Proxy Fix (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Fixed URL construction in `/api/proxy-statuslist` by stripping the cloud agent prefix (e.g., `/cloud-agent`) from `statusListPath` to avoid path doubling. Also adds the API key header to proxy fetch requests, which was previously missing and caused 401 errors on authenticated agent instances.
+
+**Files Modified**:
+- `certification-authority/server.js` — StatusList2021 proxy URL construction and API key header
+
+---
+
+### URL Shortener for Invitation QR Codes (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+In-memory URL shortener at `/wallet/api/shorten` converting long DIDComm invitation URLs into compact short URLs (`https://identuslabel.cz/wallet/i/<6-char-token>`). POST creates or deduplicates tokens (same URL always returns same token). GET resolves a token to the full URL. Used by the OOB component to generate QR codes small enough for reliable camera scanning.
+
+**Files Modified**:
+- `idl-wallet/src/pages/api/shorten.ts` — New file: POST creates short tokens, GET resolves them
+
+---
+
+### VC-Based Document Access from Wallet (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+The DocumentAccess component can now request document access using EmployeeRole and SecurityClearance VCs. Extracts raw JWT strings from credential objects (supporting multiple SDK credential shapes), constructs a Verifiable Presentation, and submits it to `/api/access-gate/present`. Decrypts the received document with the ephemeral X25519 key used during the request, providing perfect forward secrecy. Falls back to session-based endpoint if no credential JWTs are available. New `onDocumentAccessed()` callback saves accessed documents to My Documents.
+
+**Files Modified**:
+- `idl-wallet/src/components/DocumentAccess.tsx` — VP construction, access gate submission, ephemeral decryption, fallback logic
+
+---
+
+### Collapsible Sidebar Navigation (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Sidebar supports collapsed (icons-only, 16px wide) and expanded (icon + label, 64px wide) states with a toggle button. The agent status indicator moved to a fixed top-right position to avoid overlap. NavItem accepts a `collapsed` prop to hide labels and badges, showing a tooltip on hover instead.
+
+**Files Modified**:
+- `idl-wallet/src/components/layouts/MainLayout.tsx` — Sidebar collapse state, toggle button, layout adjustments
+- `idl-wallet/src/components/NavItem.tsx` — `collapsed` prop, tooltip on hover
+
+---
+
+### Dashboard Redesign with Navigation Cards (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Dashboard replaces quick action buttons with large navigation cards featuring an icon, label, description, and gradient styling. Each card links to a main page (Connections, Credentials, Documents, My Documents, Configuration). User greeting is extracted from the RealPersonIdentity VC if available.
+
+**Files Modified**:
+- `idl-wallet/src/pages/index.tsx` — Navigation card grid, RealPersonIdentity VC greeting extraction
+
+---
+
+### Peer VC Persistence Fix (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Peer RealPersonIdentity VCs received during the connection OOB flow are now properly stored to both Pluto IndexedDB and Redux state. Previously, the VC proof was extracted for display but the credential itself was not persisted, causing a state desync where the VC disappeared on page reload.
+
+**Files Modified**:
+- `idl-wallet/src/components/OOB.tsx` — Pluto storage and Redux dispatch for peer VCs
+
+---
+
+### Ed25519 Key Loading for Document Requests (March 21, 2026)
+
+**Status**: ✅ Production Ready
+
+Multi-pass Ed25519 private key loading strategy for signing document access requests. Checks sources in priority order: localStorage `security-clearance-keys`, Pluto PRISM DID keys, Pluto peer DID keys, then generates and persists a local keypair as fallback. Enables document access during onboarding before cryptographic keys are fully bootstrapped via the PRISM DID publication flow.
+
+**Key Loading Priority**:
+1. localStorage `security-clearance-keys` (set during clearance issuance)
+2. Pluto PRISM DID authentication keys
+3. Pluto peer DID authentication keys
+4. Generate new Ed25519 keypair, persist to localStorage
+
+**Files Modified**:
+- `idl-wallet/src/pages/documents.tsx` — Multi-pass key loading integration
+- `idl-wallet/src/utils/plutoKeyExtractor.ts` — New helper for extracting Ed25519 keys from Pluto storage
+
+---
+
+### Access Log Collector for Enterprise Admin (March 15, 2026)
+
+**Status**: ✅ Production Ready
+
+Implemented a persistent access audit trail for the VC-based document access gate (`/api/access-gate/present`). Previously access events were console-logged only; now every grant and denial is appended to a JSONL file and exposed via a company-scoped API endpoint and admin UI table.
+
+**Root Cause / Motivation**: Enterprise admins had no visibility into who accessed which documents. The access gate flow already extracted viewer email, document DID, clearance level, and company DID but discarded them after logging to console.
+
+**Implementation**:
+- `ACCESS_GATE_LOG_PATH` = `data/access-gate-log.jsonl` (auto-created on first event)
+- 4 `fs.appendFile` fire-and-forget calls added to `/api/access-gate/present`: releasability denied, clearance denied, credential revoked, access granted
+- `companyDID` in log entries = `document.ownerCompanyDID` (the document owner's company), NOT the viewer's company — ensures TechCorp admins see access to TechCorp documents, not ACME's
+- `ownerCompanyDID` field added to `DocumentRegistry.registerDocument()` and `registerClassifiedDocument()`, populated from `session.issuerDID` at upload time
+
+**New API**: `GET /api/admin/access-logs` (requireCompany middleware, paginated, filters by `req.company.did`)
+
+**UI**: "Document Access Logs" section in admin dashboard — 6-column table (Timestamp, Viewer, Document, Clearance, Status, Reason), denied rows in `#fff5f5` red, auto-loads on login.
+
+**Files Modified**:
+- `company-admin-portal/server.js`
+- `company-admin-portal/lib/DocumentRegistry.js`
+- `company-admin-portal/public/index.html`
+- `company-admin-portal/public/app.js`
+- `company-admin-portal/public/styles.css`
+
+---
+
 ## December 2025
 
 ### DOCX Whitespace Preservation & Filename Fix (December 13, 2025)

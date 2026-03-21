@@ -6,7 +6,7 @@ import { FooterNavigation } from "@/components/FooterNavigation";
 
 import { Box } from "@/app/Box";
 import { useMountedApp, useAppSelector } from "@/reducers/store";
-import { selectEnterpriseConnections, selectIsEnterpriseConfigured } from "@/reducers/enterpriseAgent";
+import { selectEnterpriseConnections, selectIsEnterpriseConfigured, selectActiveConfiguration } from "@/reducers/enterpriseAgent";
 import { refreshEnterpriseConnections } from "@/actions/enterpriseAgentActions";
 import { DBConnect } from "@/components/DBConnect";
 import { OOB } from "@/components/OOB";
@@ -23,6 +23,9 @@ import { getConnectionMetadata } from "@/utils/connectionMetadata";
 
 export default function App() {
 
+    const [isMounted, setIsMounted] = useState(false);
+    useEffect(() => { setIsMounted(true); }, []);
+
     const app = useMountedApp();
     const [connections, setConnections] = React.useState<SDK.Domain.DIDPair[]>([]);
     const [showDetails, setShowDetails] = React.useState<{[key: number]: boolean}>({});
@@ -30,6 +33,7 @@ export default function App() {
     // Enterprise connections from Redux
     const enterpriseConnections = useAppSelector(selectEnterpriseConnections);
     const isEnterpriseConfigured = useAppSelector(selectIsEnterpriseConfigured);
+    const activeConfig = useAppSelector(selectActiveConfiguration);
 
     // Persistent connection request queue state (hidden from UI, but still processed)
     const [persistentRequests, setPersistentRequests] = useState<ConnectionRequestItem[]>([]);
@@ -50,8 +54,11 @@ export default function App() {
     // Pending requests modal state
     const [showPendingRequestsModal, setShowPendingRequestsModal] = useState(false);
 
-    // Wallet context detection
-    const [walletContext, setWalletContext] = useState<'personal' | 'enterprise' | null>(null);
+    // New connection modal
+    const [showNewConnectionModal, setShowNewConnectionModal] = useState(false);
+
+    // Wallet tab selection
+    const [walletTab, setWalletTab] = useState<'personal' | 'enterprise' | null>(null);
     const [enterpriseConfig, setEnterpriseConfig] = useState<{
         available: boolean;
         enterpriseAgentUrl?: string;
@@ -106,7 +113,7 @@ export default function App() {
                         name: credentialSubject.enterpriseAgentName
                     });
 
-                    setWalletContext('enterprise');
+                    setWalletTab('enterprise');
                     setEnterpriseConfig({
                         available: true,
                         enterpriseAgentUrl: credentialSubject.enterpriseAgentUrl,
@@ -115,12 +122,12 @@ export default function App() {
                     });
                 } else {
                     console.log('ℹ️ [WALLET CONTEXT] No ServiceConfiguration credential found');
-                    setWalletContext('personal');
+                    setWalletTab('personal');
                     setEnterpriseConfig({ available: false });
                 }
             } catch (error) {
                 console.error('❌ [WALLET CONTEXT] Error detecting wallet context:', error);
-                setWalletContext('personal');
+                setWalletTab('personal');
                 setEnterpriseConfig({ available: false });
             }
         };
@@ -159,7 +166,7 @@ export default function App() {
     // Fetch enterprise connections when switching to enterprise mode
     useEffect(() => {
         const fetchEnterpriseConnections = async () => {
-            if (walletContext === 'enterprise' && isEnterpriseConfigured) {
+            if (walletTab === 'enterprise' && isEnterpriseConfigured) {
                 console.log('🔄 [CONNECTIONS] Fetching enterprise connections...');
 
                 try {
@@ -175,13 +182,13 @@ export default function App() {
 
         // Set up polling interval
         const interval = setInterval(() => {
-            if (walletContext === 'enterprise' && isEnterpriseConfigured) {
+            if (walletTab === 'enterprise' && isEnterpriseConfigured) {
                 fetchEnterpriseConnections();
             }
         }, 30000); // Poll every 30 seconds
 
         return () => clearInterval(interval);
-    }, [walletContext, isEnterpriseConfigured, app.dispatch]);
+    }, [walletTab, isEnterpriseConfigured, app.dispatch]);
 
     // Load persistent connection requests from IndexedDB
     const loadPersistentRequests = async () => {
@@ -494,25 +501,22 @@ export default function App() {
         }
     };
 
-    return (
-        <div>
-            {/* Header */}
-            <header className="flex items-center justify-between mb-8">
-                <div>
+    if (!isMounted) {
+        return (
+            <div>
+                <header className="mb-8">
                     <h2 className="text-2xl font-bold text-white mb-1">Connections</h2>
                     <p className="text-slate-400 text-sm">Manage your DIDComm connections</p>
-                </div>
-                {persistentRequests.length > 0 && (
-                    <button
-                        onClick={() => setShowPendingRequestsModal(true)}
-                        className="relative px-4 py-2 bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 text-white rounded-xl transition-all font-medium"
-                    >
-                        <span className="absolute -top-2 -right-2 bg-red-500/90 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center font-bold border-2 border-slate-900">
-                            {persistentRequests.length > 9 ? '9+' : persistentRequests.length}
-                        </span>
-                        Pending Requests
-                    </button>
-                )}
+                </header>
+            </div>
+        );
+    }
+
+    return (
+        <div>
+            <header className="mb-8">
+                <h2 className="text-2xl font-bold text-white mb-1">Connections</h2>
+                <p className="text-slate-400 text-sm">Manage your DIDComm connections</p>
             </header>
 
             <DBConnect>
@@ -553,89 +557,71 @@ export default function App() {
                             <h2 className="text-2xl font-bold text-white">
                                 Established Connections
                             </h2>
-                        </div>
-
-                        {/* Wallet Type Selector - Clickable Cards */}
-                        <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {/* Personal Wallet Card */}
-                            <div
-                                onClick={() => setWalletContext('personal')}
-                                className={`cursor-pointer border-2 rounded-2xl p-6 transition-all duration-200 ${
-                                    walletContext === 'personal'
-                                        ? 'border-cyan-500/50 bg-gradient-to-r from-cyan-500/20 to-purple-500/20 backdrop-blur-sm shadow-lg'
-                                        : 'border-slate-700/50 bg-slate-800/30 hover:border-cyan-500/30 backdrop-blur-sm'
-                                }`}
-                            >
-                                <div className="flex items-start justify-between mb-3">
-                                    <div className="text-3xl">🏠</div>
-                                    {walletContext === 'personal' && (
-                                        <div className="px-3 py-1 bg-cyan-500/30 text-cyan-300 rounded-full text-xs font-semibold border border-cyan-500/50">
-                                            ✓ Selected
-                                        </div>
-                                    )}
-                                </div>
-                                <h3 className="text-lg font-bold text-white mb-2">
-                                    Personal Wallet
-                                </h3>
-                                <p className="text-sm text-slate-300">
-                                    Browser-based peer-to-peer wallet using Peer DIDs
-                                </p>
-                            </div>
-
-                            {/* Enterprise Wallet Card */}
-                            <div
-                                onClick={() => enterpriseConfig.available && setWalletContext('enterprise')}
-                                className={`border-2 rounded-2xl p-6 transition-all duration-200 ${
-                                    walletContext === 'enterprise'
-                                        ? 'border-purple-500/50 bg-gradient-to-r from-purple-500/20 to-cyan-500/20 backdrop-blur-sm shadow-lg cursor-pointer'
-                                        : enterpriseConfig.available
-                                        ? 'border-slate-700/50 bg-slate-800/30 hover:border-purple-500/30 backdrop-blur-sm cursor-pointer'
-                                        : 'border-slate-700/50 bg-slate-900/50 opacity-50 cursor-not-allowed backdrop-blur-sm'
-                                }`}
-                            >
-                                <div className="flex items-start justify-between mb-3">
-                                    <div className="text-3xl">🏢</div>
-                                    {walletContext === 'enterprise' && enterpriseConfig.available && (
-                                        <div className="px-3 py-1 bg-purple-500/30 text-purple-300 rounded-full text-xs font-semibold border border-purple-500/50">
-                                            ✓ Selected
-                                        </div>
-                                    )}
-                                </div>
-                                <h3 className="text-lg font-bold text-white mb-2">
-                                    Enterprise Wallet
-                                </h3>
-                                {enterpriseConfig.available ? (
-                                    <>
-                                        <p className="text-sm text-slate-300 mb-2">
-                                            Connected to {enterpriseConfig.enterpriseAgentName}
-                                        </p>
-                                        <div className="text-xs text-slate-400 font-mono truncate">
-                                            {enterpriseConfig.enterpriseAgentUrl}
-                                        </div>
-                                    </>
-                                ) : (
-                                    <p className="text-sm text-slate-400">
-                                        Not available - activate ServiceConfiguration credential
-                                    </p>
+                            <div className="flex items-center gap-2">
+                                {persistentRequests.length > 0 && (
+                                    <button
+                                        onClick={() => setShowPendingRequestsModal(true)}
+                                        className="relative px-4 py-2 bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 text-white rounded-xl transition-all font-medium text-sm"
+                                    >
+                                        <span className="absolute -top-2 -right-2 bg-red-500/90 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center font-bold border-2 border-slate-900">
+                                            {persistentRequests.length > 9 ? '9+' : persistentRequests.length}
+                                        </span>
+                                        Pending Requests
+                                    </button>
                                 )}
+                                <button
+                                    onClick={() => setShowNewConnectionModal(true)}
+                                    className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 text-white rounded-xl transition-all font-medium text-sm"
+                                >
+                                    <span className="font-bold">+</span>
+                                    New Connection
+                                </button>
                             </div>
                         </div>
 
-                        <OOB
-                            agent={app.agent.instance!}
-                            pluto={app.db.instance!}
-                            onNewConnectionRequest={saveRequestToPersistentQueue}
-                            walletContext={walletContext}
-                            enterpriseConfig={enterpriseConfig}
-                        />
-                        {/* Conditional connection source based on wallet context */}
+                        {/* Wallet Tabs */}
+                        <div className="flex gap-1 mb-6 bg-slate-800/60 p-1 rounded-xl border border-slate-700/50 w-fit">
+                            <button
+                                onClick={() => setWalletTab('personal')}
+                                className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold transition-all ${
+                                    walletTab === 'personal'
+                                        ? 'bg-slate-700 text-white shadow'
+                                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'
+                                }`}
+                            >
+                                🪪 Personal
+                                {connections.length > 0 && (
+                                    <span className={`px-1.5 py-0.5 text-xs rounded-full ${walletTab === 'personal' ? 'bg-cyan-500/30 text-cyan-300' : 'bg-slate-700 text-slate-400'}`}>
+                                        {connections.length}
+                                    </span>
+                                )}
+                            </button>
+                            {isEnterpriseConfigured && (
+                                <button
+                                    onClick={() => enterpriseConfig.available && setWalletTab('enterprise')}
+                                    className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold transition-all ${
+                                        walletTab === 'enterprise'
+                                            ? 'bg-slate-700 text-white shadow'
+                                            : enterpriseConfig.available
+                                            ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'
+                                            : 'text-slate-600 cursor-not-allowed'
+                                    }`}
+                                >
+                                    🏢 Enterprise
+                                    {enterpriseConnections.length > 0 && (
+                                        <span className={`px-1.5 py-0.5 text-xs rounded-full ${walletTab === 'enterprise' ? 'bg-cyan-500/30 text-cyan-300' : 'bg-slate-700 text-slate-400'}`}>
+                                            {enterpriseConnections.length}
+                                        </span>
+                                    )}
+                                </button>
+                            )}
+                        </div>
+                        {/* Conditional connection source based on wallet tab */}
                         {(() => {
-                            // Determine which connections to display
-                            const isEnterpriseMode = walletContext === 'enterprise';
+                            const isEnterpriseMode = walletTab === 'enterprise';
                             const connectionsToDisplay = isEnterpriseMode ? enterpriseConnections : connections;
                             const hasConnections = connectionsToDisplay.length > 0;
 
-                            // Empty state
                             if (!hasConnections) {
                                 return (
                                     <p className="text-lg font-normal text-slate-300 lg:text-xl">
@@ -646,15 +632,10 @@ export default function App() {
                                 );
                             }
 
-                            // Render connections based on mode
                             if (isEnterpriseMode) {
-                                // Enterprise mode: render EnterpriseConnection[]
                                 return enterpriseConnections.map((connection, i) => {
                                     const displayName = connection.label || `Connection ${connection.connectionId.substring(0, 8)}...`;
                                     const isConnected = connection.state === 'ConnectionResponseSent' || connection.state === 'Active';
-                                    const statusText = connection.state;
-                                    const statusBgColor = isConnected ? 'bg-emerald-500/20' : 'bg-amber-500/20';
-                                    const statusTextColor = isConnected ? 'text-emerald-400' : 'text-amber-400';
                                     const isDetailsShown = showDetails[i] || false;
 
                                     const copyToClipboard = async (text: string, label: string) => {
@@ -666,79 +647,49 @@ export default function App() {
                                     };
 
                                     return (
-                                        <div key={`ent-connection-${connection.connectionId}`} className={`bg-slate-800/30 border border-slate-700/50 rounded-2xl backdrop-blur-sm p-6 mb-4 ${isConnected ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500'} hover:transform hover:scale-105 transition-all duration-300`}>
-                                            <div className={`${statusBgColor} ${statusTextColor} rounded-xl p-4 text-center border ${isConnected ? 'border-emerald-500/30' : 'border-amber-500/30'}`}>
-                                                <h2 className="text-2xl font-bold mb-2 text-white">
-                                                    {displayName}
-                                                </h2>
-                                                <div className="flex items-center justify-center space-x-2 mb-2">
-                                                    <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-amber-500'} animate-pulse`}></div>
-                                                    <span className="text-lg font-semibold">
-                                                        {statusText}
-                                                    </span>
+                                        <div key={`ent-connection-${connection.connectionId}`} className="bg-slate-800/30 border border-slate-700/50 rounded-xl mb-2 hover:border-slate-600/50 transition-all duration-200">
+                                            <div className="flex items-center justify-between px-4 py-3">
+                                                <div className="flex items-center gap-3 min-w-0">
+                                                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? 'bg-emerald-500' : 'bg-amber-500'} animate-pulse`} />
+                                                    <span className="font-medium text-white text-sm truncate">{displayName}</span>
                                                 </div>
-                                                <div className="flex items-center justify-center space-x-2 mt-2">
-                                                    <span className="px-3 py-1 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-400 border border-purple-500/30">
-                                                        ☁️ Enterprise Cloud Agent
+                                                <div className="flex items-center gap-2 flex-shrink-0 ml-3">
+                                                    <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                                                        ☁️ Enterprise
                                                     </span>
+                                                    <button
+                                                        onClick={() => toggleDetails(i)}
+                                                        title={isDetailsShown ? 'Hide details' : 'Show details'}
+                                                        className={`p-1.5 rounded-lg transition-all ${isDetailsShown ? 'text-cyan-300 bg-cyan-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}
+                                                    >
+                                                        {isDetailsShown ? '▲' : '▼'}
+                                                    </button>
                                                 </div>
                                             </div>
-
-                                            <div className="flex space-x-3 mt-4">
-                                                <button
-                                                    onClick={() => toggleDetails(i)}
-                                                    className="px-4 py-2 bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/50 transition-all duration-300 rounded-xl text-white"
-                                                >
-                                                    {isDetailsShown ? '🔼 Hide' : '🔽 Details'}
-                                                </button>
-                                            </div>
-
                                             {isDetailsShown && (
-                                                <div className="mt-6 space-y-4 animate-fadeIn">
+                                                <div className="px-4 pb-4 space-y-3 border-t border-slate-700/50 pt-3 animate-fadeIn">
                                                     <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
-                                                        <label className="text-sm font-semibold text-slate-300 block mb-2">
-                                                            Connection ID
-                                                        </label>
+                                                        <label className="text-sm font-semibold text-slate-300 block mb-2">Connection ID</label>
                                                         <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">
                                                             {connection.connectionId}
                                                         </p>
                                                     </div>
-
                                                     {connection.myDid && (
                                                         <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
                                                             <div className="flex items-center justify-between mb-2">
-                                                                <label className="text-sm font-semibold text-slate-300">
-                                                                    My DID
-                                                                </label>
-                                                                <button
-                                                                    onClick={() => copyToClipboard(connection.myDid!, 'My DID')}
-                                                                    className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors"
-                                                                >
-                                                                    📋 Copy
-                                                                </button>
+                                                                <label className="text-sm font-semibold text-slate-300">My DID</label>
+                                                                <button onClick={() => copyToClipboard(connection.myDid!, 'My DID')} className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">📋 Copy</button>
                                                             </div>
-                                                            <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">
-                                                                {connection.myDid}
-                                                            </p>
+                                                            <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">{connection.myDid}</p>
                                                         </div>
                                                     )}
-
                                                     {connection.theirDid && (
                                                         <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
                                                             <div className="flex items-center justify-between mb-2">
-                                                                <label className="text-sm font-semibold text-slate-300">
-                                                                    Their DID
-                                                                </label>
-                                                                <button
-                                                                    onClick={() => copyToClipboard(connection.theirDid!, 'Their DID')}
-                                                                    className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors"
-                                                                >
-                                                                    📋 Copy
-                                                                </button>
+                                                                <label className="text-sm font-semibold text-slate-300">Their DID</label>
+                                                                <button onClick={() => copyToClipboard(connection.theirDid!, 'Their DID')} className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">📋 Copy</button>
                                                             </div>
-                                                            <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">
-                                                                {connection.theirDid}
-                                                            </p>
+                                                            <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">{connection.theirDid}</p>
                                                         </div>
                                                     )}
                                                 </div>
@@ -747,12 +698,8 @@ export default function App() {
                                     );
                                 });
                             } else {
-                                // Personal mode: render DIDPair[] (original code)
                                 return connections.map((connection, i) => {
                                     const isEstablished = true;
-                                    const statusText = isEstablished ? 'Connected' : 'Pending';
-                                    const statusBgColor = isEstablished ? 'bg-emerald-500/20' : 'bg-amber-500/20';
-                                    const statusTextColor = isEstablished ? 'text-emerald-400' : 'text-amber-400';
                                     const isDetailsShown = showDetails[i] || false;
 
                                     const displayName = connection.name || getConnectionName(
@@ -772,136 +719,89 @@ export default function App() {
                                         }
                                     };
 
+                                    const badgeLabel = isCloudWallet ? '☁️ Cloud' : '🏠 Local';
+                                    const badgeClasses = isCloudWallet
+                                        ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
+                                        : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30';
+
                                     return (
-                                        <div key={`connection${i}`} className={`bg-slate-800/30 border border-slate-700/50 rounded-2xl backdrop-blur-sm p-6 mb-4 ${isEstablished ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500'} hover:transform hover:scale-105 transition-all duration-300`}>
-                                            <div className={`${statusBgColor} ${statusTextColor} rounded-xl p-4 text-center border ${isEstablished ? 'border-emerald-500/30' : 'border-amber-500/30'}`}>
-                                                <h2 className="text-2xl font-bold mb-2 text-white">
-                                                    {displayName}
-                                                </h2>
-                                                <div className="flex items-center justify-center space-x-2 mb-2">
-                                                    <div className={`w-3 h-3 rounded-full ${isEstablished ? 'bg-emerald-500' : 'bg-amber-500'} animate-pulse`}></div>
-                                                    <span className="text-lg font-semibold">
-                                                        {statusText}
-                                                    </span>
+                                        <div key={`connection${i}`} className="bg-slate-800/30 border border-slate-700/50 rounded-xl mb-2 hover:border-slate-600/50 transition-all duration-200">
+                                            <div className="flex items-center justify-between px-4 py-3">
+                                                <div className="flex items-center gap-3 min-w-0">
+                                                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isEstablished ? 'bg-emerald-500' : 'bg-amber-500'} animate-pulse`} />
+                                                    <span className="font-medium text-white text-sm truncate">{displayName}</span>
                                                 </div>
-                                                <div className="flex items-center justify-center space-x-2 mt-2">
-                                                    <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                                                        isCloudWallet
-                                                            ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
-                                                            : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
-                                                    }`}>
-                                                        {isCloudWallet ? '☁️ Cloud Wallet' : '🏠 Local Wallet'}
+                                                <div className="flex items-center gap-2 flex-shrink-0 ml-3">
+                                                    <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${badgeClasses}`}>
+                                                        {badgeLabel}
                                                     </span>
-                                                </div>
-                                            </div>
-
-                                            <div className="flex space-x-3 mt-4">
-                                                <button className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 text-white rounded-xl transition-all duration-300 flex-1">
-                                                    💬 Send Message
-                                                </button>
-                                                <button
-                                                    onClick={() => toggleDetails(i)}
-                                                    className="px-4 py-2 bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/50 text-white transition-all duration-300 rounded-xl"
-                                                >
-                                                    {isDetailsShown ? '🔼 Hide' : '🔽 Details'}
-                                                </button>
-                                                <button
-                                                    onClick={async () => {
-                                                        if (confirm(`Are you sure you want to delete the connection with "${displayName}"?\n\nThis will remove all associated messages and cannot be undone.`)) {
-                                                            try {
-                                                                await app.dispatch(deleteConnection({ connectionHostDID: connection.host.toString() }));
-                                                            } catch (error) {
-                                                                console.error('❌ [UI] Failed to delete connection:', error);
-                                                                alert('Failed to delete connection. Please try again.');
+                                                    <button title="Send Message" className="p-1.5 text-slate-400 hover:text-cyan-300 hover:bg-cyan-500/10 rounded-lg transition-all">
+                                                        💬
+                                                    </button>
+                                                    <button
+                                                        onClick={() => toggleDetails(i)}
+                                                        title={isDetailsShown ? 'Hide details' : 'Show details'}
+                                                        className={`p-1.5 rounded-lg transition-all ${isDetailsShown ? 'text-cyan-300 bg-cyan-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}
+                                                    >
+                                                        {isDetailsShown ? '▲' : '▼'}
+                                                    </button>
+                                                    <button
+                                                        onClick={async () => {
+                                                            if (confirm(`Are you sure you want to delete the connection with "${displayName}"?\n\nThis will remove all associated messages and cannot be undone.`)) {
+                                                                try {
+                                                                    await app.dispatch(deleteConnection({ connectionHostDID: connection.host.toString() }));
+                                                                } catch (error) {
+                                                                    console.error('❌ [UI] Failed to delete connection:', error);
+                                                                    alert('Failed to delete connection. Please try again.');
+                                                                }
                                                             }
-                                                        }
-                                                    }}
-                                                    className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-red-400 hover:text-red-300 rounded-xl transition-all duration-300"
-                                                    title="Delete connection and all associated messages"
-                                                >
-                                                    🗑️ Delete
-                                                </button>
+                                                        }}
+                                                        title="Delete connection"
+                                                        className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all"
+                                                    >
+                                                        🗑
+                                                    </button>
+                                                </div>
                                             </div>
-
                                             {isDetailsShown && (
-                                                <div className="mt-6 space-y-4 animate-fadeIn">
+                                                <div className="px-4 pb-4 space-y-3 border-t border-slate-700/50 pt-3 animate-fadeIn">
                                                     {isCloudWallet && connectionMetadata && (
                                                         <div className="bg-purple-500/20 rounded-xl p-4 border border-purple-500/30 backdrop-blur-sm">
                                                             <div className="flex items-center space-x-2 mb-3">
                                                                 <span className="text-lg">☁️</span>
-                                                                <label className="text-sm font-semibold text-purple-300">
-                                                                    Cloud Wallet Configuration
-                                                                </label>
+                                                                <label className="text-sm font-semibold text-purple-300">Cloud Wallet Configuration</label>
                                                             </div>
-
                                                             {connectionMetadata.prismDid && (
                                                                 <div className="mb-3">
                                                                     <div className="flex items-center justify-between mb-1">
-                                                                        <label className="text-xs font-semibold text-purple-300">
-                                                                            PRISM DID
-                                                                        </label>
-                                                                        <button
-                                                                            onClick={() => copyToClipboard(connectionMetadata.prismDid!, 'PRISM DID')}
-                                                                            className="text-xs text-purple-400 hover:text-purple-300 transition-colors"
-                                                                        >
-                                                                            📋 Copy
-                                                                        </button>
+                                                                        <label className="text-xs font-semibold text-purple-300">PRISM DID</label>
+                                                                        <button onClick={() => copyToClipboard(connectionMetadata.prismDid!, 'PRISM DID')} className="text-xs text-purple-400 hover:text-purple-300 transition-colors">📋 Copy</button>
                                                                     </div>
-                                                                    <p className="text-xs font-mono text-purple-300 break-all bg-purple-900/40 p-2 rounded border border-purple-500/30">
-                                                                        {connectionMetadata.prismDid}
-                                                                    </p>
+                                                                    <p className="text-xs font-mono text-purple-300 break-all bg-purple-900/40 p-2 rounded border border-purple-500/30">{connectionMetadata.prismDid}</p>
                                                                 </div>
                                                             )}
-
                                                             {connectionMetadata.enterpriseAgentUrl && (
                                                                 <div className="mb-3">
-                                                                    <label className="text-xs font-semibold text-purple-300 block mb-1">
-                                                                        Enterprise Agent URL
-                                                                    </label>
-                                                                    <p className="text-xs text-purple-300 break-all bg-purple-900/40 p-2 rounded border border-purple-500/30">
-                                                                        {connectionMetadata.enterpriseAgentUrl}
-                                                                    </p>
+                                                                    <label className="text-xs font-semibold text-purple-300 block mb-1">Enterprise Agent URL</label>
+                                                                    <p className="text-xs text-purple-300 break-all bg-purple-900/40 p-2 rounded border border-purple-500/30">{connectionMetadata.enterpriseAgentUrl}</p>
                                                                 </div>
                                                             )}
-
-                                                            <div className="text-xs text-purple-400 mt-2">
-                                                                ℹ️ This connection uses your company's cloud-managed wallet
-                                                            </div>
+                                                            <div className="text-xs text-purple-400 mt-2">ℹ️ This connection uses your company's cloud-managed wallet</div>
                                                         </div>
                                                     )}
-
                                                     <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
                                                         <div className="flex items-center justify-between mb-2">
-                                                            <label className="text-sm font-semibold text-slate-300">
-                                                                Host DID (Your Identity)
-                                                            </label>
-                                                            <button
-                                                                onClick={() => copyToClipboard(connection.host.toString(), 'Host DID')}
-                                                                className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors"
-                                                            >
-                                                                📋 Copy
-                                                            </button>
+                                                            <label className="text-sm font-semibold text-slate-300">Host DID (Your Identity)</label>
+                                                            <button onClick={() => copyToClipboard(connection.host.toString(), 'Host DID')} className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">📋 Copy</button>
                                                         </div>
-                                                        <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">
-                                                            {connection.host.toString()}
-                                                        </p>
+                                                        <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">{connection.host.toString()}</p>
                                                     </div>
-
                                                     <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
                                                         <div className="flex items-center justify-between mb-2">
-                                                            <label className="text-sm font-semibold text-slate-300">
-                                                                Receiver DID (Connected Party)
-                                                            </label>
-                                                            <button
-                                                                onClick={() => copyToClipboard(connection.receiver.toString(), 'Receiver DID')}
-                                                                className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors"
-                                                            >
-                                                                📋 Copy
-                                                            </button>
+                                                            <label className="text-sm font-semibold text-slate-300">Receiver DID (Connected Party)</label>
+                                                            <button onClick={() => copyToClipboard(connection.receiver.toString(), 'Receiver DID')} className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">📋 Copy</button>
                                                         </div>
-                                                        <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">
-                                                            {connection.receiver.toString()}
-                                                        </p>
+                                                        <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">{connection.receiver.toString()}</p>
                                                     </div>
                                                 </div>
                                             )}
@@ -911,6 +811,34 @@ export default function App() {
                             }
                         })()}
             </Box>
+
+            {/* New Connection Modal */}
+            {showNewConnectionModal && (
+                <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/70 backdrop-blur-sm overflow-y-auto pt-8 pb-8">
+                    <div className="relative w-full max-w-2xl mx-4">
+                        <div className="bg-slate-900 border border-slate-700/50 rounded-2xl shadow-2xl">
+                            <div className="flex items-center justify-between p-5 border-b border-slate-700/50">
+                                <h3 className="text-lg font-bold text-white">New Connection</h3>
+                                <button
+                                    onClick={() => setShowNewConnectionModal(false)}
+                                    className="text-slate-400 hover:text-white transition-colors text-xl font-bold w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-700"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                            <div className="p-5">
+                                <OOB
+                                    agent={app.agent.instance!}
+                                    pluto={app.db.instance!}
+                                    onNewConnectionRequest={saveRequestToPersistentQueue}
+                                    walletContext={walletTab}
+                                    enterpriseConfig={enterpriseConfig}
+                                />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
             </DBConnect>
         </div>
     );

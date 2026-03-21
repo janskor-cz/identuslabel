@@ -25,6 +25,7 @@ interface CredentialCardProps {
   credential: any;
   onDelete?: (credential: any) => void;
   status?: CredentialStatus;
+  protocolStateBadge?: string;
 }
 
 /**
@@ -34,7 +35,7 @@ interface CredentialCardProps {
  * - Collapsed: Name + Type badge + Status badge + Expand button
  * - Expanded: Full type-specific layout with all details
  */
-export function CredentialCard({ credential, onDelete, status }: CredentialCardProps) {
+export function CredentialCard({ credential, onDelete, status, protocolStateBadge }: CredentialCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -56,7 +57,9 @@ export function CredentialCard({ credential, onDelete, status }: CredentialCardP
       case 'ServiceConfiguration':
         return { name: 'Enterprise Config', icon: '🏢', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' };
       case 'EmployeeRole':
-        return { name: 'Employee Role', icon: '👔', color: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30' };
+        return { name: 'Enterprise ID', icon: '🏢', color: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30' };
+      case 'CISTrainingCertificate':
+        return { name: 'CIS Training', icon: '🎓', color: 'bg-green-500/20 text-green-400 border-green-500/30' };
       default:
         return { name: 'Unknown', icon: '❓', color: 'bg-slate-500/20 text-slate-400 border-slate-500/30' };
     }
@@ -104,7 +107,7 @@ export function CredentialCard({ credential, onDelete, status }: CredentialCardP
     } ${isDeleting ? 'opacity-50' : ''}`}>
       {/* Collapsed View - Always Visible */}
       <div
-        className="p-4 cursor-pointer hover:bg-slate-700/30 transition-colors"
+        className="p-3 cursor-pointer hover:bg-slate-700/30 transition-colors"
         onClick={() => setIsExpanded(!isExpanded)}
       >
         <div className="flex items-center justify-between">
@@ -121,11 +124,16 @@ export function CredentialCard({ credential, onDelete, status }: CredentialCardP
 
             {/* Credential Name */}
             <div className="flex-1">
-              <div className="font-semibold text-white">{holderName}</div>
+              <div className="text-sm font-semibold text-white">{holderName}</div>
               <div className="flex items-center gap-2 mt-1">
                 <span className={`px-2 py-0.5 text-xs font-medium border rounded-full ${typeInfo.color}`}>
                   {typeInfo.icon} {typeInfo.name}
                 </span>
+                {protocolStateBadge && (
+                  <span className="px-2 py-0.5 text-xs font-medium border rounded-full bg-slate-700/50 text-slate-400 border-slate-600/30">
+                    {protocolStateBadge}
+                  </span>
+                )}
               </div>
             </div>
           </div>

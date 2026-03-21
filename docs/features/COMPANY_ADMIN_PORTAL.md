@@ -38,6 +38,7 @@ A dedicated Node.js/Express application providing company-specific administratio
 - **🎫 Credential Issuance**: Issue verifiable credentials to connected employees
 - **🔒 Session-Based Authentication**: Secure company-scoped access control
 - **🌐 Multitenancy Integration**: Connects to dedicated Cloud Agent (port 8200)
+- **📋 Access Log Viewer**: Audit trail of all document access events (granted and denied) scoped per company
 
 ## Architecture
 
@@ -95,6 +96,7 @@ curl https://identuslabel.cz/company-admin/api/health
 - `DELETE /api/company/connections/:id` - Remove employee
 - `POST /api/company/issue-credential` - Issue credential to employee
 - `GET /api/company/credentials` - List issued credentials
+- `GET /api/admin/access-logs` — Paginated access log for authenticated company's documents
 
 ## User Guide
 
@@ -335,6 +337,82 @@ GET /api/company/credentials?filter={status}
 - **[CREDENTIAL_ISSUANCE_WORKFLOW.md](./company-admin-portal/docs/CREDENTIAL_ISSUANCE_WORKFLOW.md)** - Complete issuance workflow guide
 - **[API_REFERENCE.md](./company-admin-portal/docs/API_REFERENCE.md)** - API endpoint documentation
 
+## Document Access Logs
+
+**NEW — March 2026**
+
+**Feature**: Company admins can view a full audit trail of every document access attempt — both granted and denied — for documents owned by their company.
+
+### How It Works
+
+Every request to `POST /api/access-gate/present` now appends a log entry to `data/access-gate-log.jsonl`. Entries are scoped to the **document owner's company** (`document.ownerCompanyDID`), so TechCorp admins only see access to TechCorp documents, not ACME's.
+
+### Log Entry Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | ISO-8601 string | When the access was attempted |
+| `viewerName` | string \| null | Email address of the accessing employee |
+| `documentDID` | string | DID of the requested document |
+| `documentTitle` | string \| null | Human-readable document title (if available) |
+| `clearanceLevel` | string \| null | Clearance level from the employee's VC |
+| `companyDID` | string \| null | Owner company's DID (used for filtering) |
+| `accessGranted` | boolean | Whether access was granted |
+| `denialReason` | string \| null | `RELEASABILITY_DENIED`, `CLEARANCE_DENIED`, or `CREDENTIAL_REVOKED` |
+| `copyId` | UUID \| null | Unique copy ID assigned on grant; null on denial |
+| `clientIp` | string \| null | Client IP address |
+
+### API Endpoint
+
+```
+GET /api/admin/access-logs?limit=200&offset=0
+```
+
+- Requires company authentication (`requireCompany` middleware)
+- Returns only entries where `companyDID` matches the authenticated company's DID
+- Results are returned most-recent-first
+- Max `limit` is 1000
+
+**Response**:
+```json
+{
+  "success": true,
+  "total": 42,
+  "logs": [
+    {
+      "timestamp": "2026-03-15T16:15:04.163Z",
+      "viewerName": "vaclav.private2@acme.test",
+      "documentDID": "did:prism:classified:doc-0897c112-...",
+      "documentTitle": null,
+      "clearanceLevel": null,
+      "companyDID": "did:prism:6ee757c2...",
+      "accessGranted": true,
+      "denialReason": null,
+      "copyId": "68a28424-1c67-4179-a9dd-007f0e3d165b",
+      "clientIp": "81.245.122.117"
+    }
+  ]
+}
+```
+
+### ownerCompanyDID on Documents
+
+`DocumentRegistry.registerDocument()` and `registerClassifiedDocument()` now accept and store an `ownerCompanyDID` field. Both upload routes in `server.js` pass `session.issuerDID` as the owner, linking the document to the uploading employee's company.
+
+Documents uploaded before this change do not have `ownerCompanyDID` set (`null`) and will not appear in any company's access log filter.
+
+### Log File
+
+**Path**: `/root/company-admin-portal/data/access-gate-log.jsonl`
+
+```bash
+# Watch live
+tail -f /root/company-admin-portal/data/access-gate-log.jsonl
+
+# Pretty-print
+cat /root/company-admin-portal/data/access-gate-log.jsonl | jq .
+```
+
 ## Complete Documentation
 
 Full documentation available at:
@@ -347,6 +425,6 @@ Full documentation available at:
 
 ---
 
-**Last Updated**: November 8, 2025
+**Last Updated**: March 15, 2026
 **Status**: Production Ready
 **Version**: 1.0

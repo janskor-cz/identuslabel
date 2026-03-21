@@ -23,7 +23,7 @@ class ServiceConfigVCBuilder {
      * @param {string} employeeData.connectionId - DIDComm connection ID
      * @returns {Promise<Object>} { credentialSubject, employeeWallet }
      */
-    static async buildServiceConfigClaims(employeeData) {
+    static async buildServiceConfigClaims(employeeData, company = null) {
         try {
             console.log(`\n🏗️  [ServiceConfigVCBuilder] Building ServiceConfig claims for: ${employeeData.name}`);
 
@@ -33,7 +33,7 @@ class ServiceConfigVCBuilder {
                 email: employeeData.email,
                 name: employeeData.name,
                 department: employeeData.department
-            });
+            }, company?.did);
 
             console.log(`  ✅ Employee wallet created:`);
             console.log(`     Wallet ID: ${employeeWallet.walletId}`);
@@ -45,7 +45,7 @@ class ServiceConfigVCBuilder {
             const credentialSubject = {
                 // Enterprise Cloud Agent connection (ONLY essentials)
                 enterpriseAgentUrl: "https://identuslabel.cz/enterprise",
-                enterpriseAgentName: "TechCorp Enterprise Agent",
+                enterpriseAgentName: company?.enterpriseAgentName || "TechCorp Enterprise Agent",
                 enterpriseAgentApiKey: employeeWallet.apiKey,
                 enterpriseAgentWalletId: employeeWallet.walletId  // CRITICAL: Required for API key encryption
             };

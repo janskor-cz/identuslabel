@@ -73,7 +73,8 @@ const SCHEMA_GUID_MAP: Record<string, string> = {
   'ba309a53-9661-33df-92a3-2023b4a56fd5': 'SecurityClearance',
   'f600cf0b-326c-345d-a17a-4c033c02c241': 'ServiceConfiguration',  // TechCorp Multitenancy Cloud Agent (older)
   'c8d20a5e-3060-3655-bf0b-35e8542c927f': 'ServiceConfiguration',  // Multitenancy Cloud Agent (v2.0.0)
-  '8fb9b1d4-a47a-3f60-8bf1-1145d3eaab72': 'ServiceConfiguration'   // Multitenancy Cloud Agent (v3.0.0 with walletId)
+  '8fb9b1d4-a47a-3f60-8bf1-1145d3eaab72': 'ServiceConfiguration',  // Multitenancy Cloud Agent (v3.0.0 with walletId)
+  '49dbc36d-c1ac-348f-8cd4-3b914fcbc406': 'ServiceConfiguration'   // TechCorp tenant on Multitenancy Cloud Agent (91.99.4.54:8200)
 };
 
 /**

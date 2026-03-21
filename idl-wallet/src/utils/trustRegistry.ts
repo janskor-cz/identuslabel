@@ -62,6 +62,18 @@ const TRUSTED_ISSUERS: Record<string, TrustedIssuer> = {
   }
 
   /**
+   * ACME Corporation
+   * Trusted to issue ServiceConfiguration VCs to their employees
+   */,
+  'did:prism:474c91516a875ba9af9f39a3b9747cb70ad7684f0b3fb8ee2b7b145efac286b9': {
+    name: 'ACME Corporation',
+    authorizedCredentialTypes: ['ServiceConfiguration'],
+    organizationType: 'Company',
+    jurisdiction: 'Hyperledger Identus Ecosystem',
+    trustedSince: '2026-03-14'
+  }
+
+  /**
    * Example: How to add additional trusted issuers
    *
    * 'did:prism:abc123...': {

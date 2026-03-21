@@ -923,3 +923,5 @@ code {
         grid-column: 1;
     }
 }
+
+.denied-row { background: #fff5f5; }

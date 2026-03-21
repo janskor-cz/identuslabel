@@ -23,6 +23,9 @@ class DocumentRegistry {
         // In-memory document storage (replace with PostgreSQL in production)
         this.documents = new Map();
 
+        // Immutable version chain: documentDID → [ versionRecord, … ]
+        this.documentVersions = new Map();
+
         // Bloom filter configuration
         this.BLOOM_SIZE = 1024; // bits
         this.HASH_FUNCTIONS = 3;
@@ -45,11 +48,13 @@ class DocumentRegistry {
         console.log('[DocumentRegistry] Initializing...');
 
         try {
-            const loadedDocuments = await this.persistence.loadRegistry();
+            const loaded = await this.persistence.loadRegistry();
 
-            if (loadedDocuments) {
-                this.documents = loadedDocuments;
+            if (loaded) {
+                this.documents = loaded.documents;
+                this.documentVersions = loaded.documentVersions || new Map();
                 console.log(`[DocumentRegistry] ✅ Loaded ${this.documents.size} documents from persistent storage`);
+                console.log(`[DocumentRegistry] ✅ Loaded version history for ${this.documentVersions.size} documents`);
             } else {
                 console.log('[DocumentRegistry] No saved registry found (fresh start)');
             }
@@ -91,7 +96,8 @@ class DocumentRegistry {
             contentEncryptionKey,
             metadata = {},
             metadataVCRecordId = null,
-            iagonStorage = null
+            iagonStorage = null,
+            ownerCompanyDID = null
         } = documentMetadata;
 
         // Validate required fields
@@ -100,7 +106,7 @@ class DocumentRegistry {
         }
 
         // Validate classification level (standardized to CA Portal naming)
-        const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
+        const validLevels = ['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET', 'TOP-SECRET'];
         if (!validLevels.includes(classificationLevel)) {
             throw new Error(`Invalid classification level: ${classificationLevel}`);
         }
@@ -124,6 +130,7 @@ class DocumentRegistry {
             contentEncryptionKey, // ABE-encrypted content key
             metadataVCRecordId, // (SSI) Cloud Agent record ID for crash recovery
             iagonStorage, // Iagon decentralized storage metadata (nodeId, filename, url, encryptionInfo)
+            ownerCompanyDID, // Company that uploaded/owns this document
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
@@ -137,7 +144,7 @@ class DocumentRegistry {
 
         // Persist to disk for crash recovery
         try {
-            await this.persistence.saveRegistry(this.documents);
+            await this.persistence.saveRegistry(this.documents, this.documentVersions);
         } catch (error) {
             console.error(`[DocumentRegistry] ⚠️  Failed to persist registry: ${error.message}`);
             // Don't fail registration if persistence fails
@@ -226,11 +233,11 @@ class DocumentRegistry {
     meetsClassificationRequirement(employeeClearance, documentClassification) {
         // Define clearance hierarchy (standardized to CA Portal naming, with legacy support)
         const clearanceLevels = {
+            'UNCLASSIFIED': 0,
             'INTERNAL': 1,
-            'UNCLASSIFIED': 1,  // Legacy
             'CONFIDENTIAL': 2,
             'RESTRICTED': 3,
-            'SECRET': 3,  // Legacy
+            'SECRET': 4,
             'TOP-SECRET': 4,
             'TOP_SECRET': 4,  // Legacy (underscore variant)
             'TOPSECRET': 4    // Legacy (no separator)
@@ -496,6 +503,7 @@ class DocumentRegistry {
                 'INTERNAL': 0,
                 'CONFIDENTIAL': 0,
                 'RESTRICTED': 0,
+                'SECRET': 0,
                 'TOP-SECRET': 0
             },
             classifiedDocuments: 0,
@@ -506,7 +514,7 @@ class DocumentRegistry {
         const normalizeLevel = (level) => {
             const mapping = {
                 'UNCLASSIFIED': 'INTERNAL',
-                'SECRET': 'RESTRICTED',
+                'SECRET': 'SECRET',
                 'TOP_SECRET': 'TOP-SECRET',
                 'TOPSECRET': 'TOP-SECRET'
             };
@@ -548,7 +556,8 @@ class DocumentRegistry {
             releasableTo,
             encryptedPackage,
             iagonStorage,
-            sourceInfo = {}
+            sourceInfo = {},
+            ownerCompanyDID = null
         } = classifiedDocumentData;
 
         // Validate required fields
@@ -557,7 +566,7 @@ class DocumentRegistry {
         }
 
         // Validate classification level (CA Portal naming)
-        const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
+        const validLevels = ['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET', 'TOP-SECRET'];
         if (!validLevels.includes(overallClassification)) {
             throw new Error(`Invalid classification level: ${overallClassification}`);
         }
@@ -610,6 +619,7 @@ class DocumentRegistry {
                 uploadedAt: new Date().toISOString()
             },
             documentType: 'classified', // Mark as classified document
+            ownerCompanyDID, // Company that uploaded/owns this document
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
@@ -625,7 +635,7 @@ class DocumentRegistry {
 
         // Persist to disk for crash recovery
         try {
-            await this.persistence.saveRegistry(this.documents);
+            await this.persistence.saveRegistry(this.documents, this.documentVersions);
         } catch (error) {
             console.error(`[DocumentRegistry] ⚠️  Failed to persist registry: ${error.message}`);
         }
@@ -668,17 +678,17 @@ class DocumentRegistry {
 
         // Calculate section visibility based on user clearance (CA Portal naming with legacy support)
         const clearanceLevels = {
+            'UNCLASSIFIED': 0,
             'INTERNAL': 1,
-            'UNCLASSIFIED': 1,  // Legacy
             'CONFIDENTIAL': 2,
             'RESTRICTED': 3,
-            'SECRET': 3,  // Legacy
+            'SECRET': 4,
             'TOP-SECRET': 4,
             'TOP_SECRET': 4,  // Legacy
             'TOPSECRET': 4    // Legacy
         };
 
-        const userLevel = clearanceLevels[userClearance] || 1;
+        const userLevel = clearanceLevels[userClearance] ?? 0;
 
         let visibleSections = [];
         let redactedSections = [];
@@ -735,17 +745,17 @@ class DocumentRegistry {
 
         // CA Portal naming convention with legacy support
         const clearanceLevels = {
+            'UNCLASSIFIED': 0,
             'INTERNAL': 1,
-            'UNCLASSIFIED': 1,  // Legacy
             'CONFIDENTIAL': 2,
             'RESTRICTED': 3,
-            'SECRET': 3,  // Legacy
+            'SECRET': 4,
             'TOP-SECRET': 4,
             'TOP_SECRET': 4,  // Legacy
             'TOPSECRET': 4    // Legacy
         };
 
-        const userLevel = clearanceLevel ? (clearanceLevels[clearanceLevel] || 1) : 1;
+        const userLevel = clearanceLevel ? (clearanceLevels[clearanceLevel] ?? 0) : 0;
         const classifiedDocuments = [];
 
         for (const [documentDID, documentRecord] of this.documents.entries()) {
@@ -797,7 +807,7 @@ class DocumentRegistry {
         }
 
         console.log(`[DocumentRegistry] Classified documents query for issuer: ${issuerDID}`);
-        console.log(`[DocumentRegistry] User clearance: ${clearanceLevel || 'INTERNAL'}`);
+        console.log(`[DocumentRegistry] User clearance: ${clearanceLevel || 'UNCLASSIFIED'}`);
         console.log(`[DocumentRegistry] Found: ${classifiedDocuments.length} classified documents`);
 
         return classifiedDocuments;
@@ -860,7 +870,7 @@ class DocumentRegistry {
 
         // Persist changes
         try {
-            await this.persistence.saveRegistry(this.documents);
+            await this.persistence.saveRegistry(this.documents, this.documentVersions);
         } catch (error) {
             console.error(`[DocumentRegistry] Failed to persist access log: ${error.message}`);
         }
@@ -870,6 +880,56 @@ class DocumentRegistry {
             documentDID,
             sectionsViewed: sectionsViewed.length
         };
+    }
+
+    /**
+     * Record a new version of a DOCX document (immutable version chain).
+     * Only iagonStorage.originalDocxFileId and updatedAt change in the document record.
+     *
+     * @param {string} documentDID
+     * @param {Object} opts
+     * @param {string} opts.newDocxFileId
+     * @param {string} opts.contentHash
+     * @param {string} opts.editorDID
+     * @param {string} opts.clearanceLevel
+     * @returns {Promise<Object>} newVersion record
+     */
+    async addDocumentVersion(documentDID, { newDocxFileId, contentHash, editorDID, clearanceLevel }) {
+        const record = this.documents.get(documentDID);
+        if (!record) throw new Error(`Document not found: ${documentDID}`);
+
+        const versions = this.documentVersions.get(documentDID) || [];
+        const newVersion = {
+            versionId:    `v${versions.length + 1}`,
+            fileId:       newDocxFileId,
+            contentHash,
+            editorDID,
+            clearanceLevel,
+            createdAt:    new Date().toISOString(),
+            isCurrent:    true
+        };
+
+        // Mark previous versions as superseded
+        versions.forEach(v => { v.isCurrent = false; });
+        versions.push(newVersion);
+        this.documentVersions.set(documentDID, versions);
+
+        // Update live document record's active fileId pointer
+        record.iagonStorage.originalDocxFileId = newDocxFileId;
+        record.updatedAt = new Date().toISOString();
+
+        await this.persistence.saveRegistry(this.documents, this.documentVersions);
+        return newVersion;
+    }
+
+    /**
+     * Get version history for a document.
+     *
+     * @param {string} documentDID
+     * @returns {Array} version records (empty array if no history)
+     */
+    getDocumentVersions(documentDID) {
+        return this.documentVersions.get(documentDID) || [];
     }
 }
 

@@ -336,9 +336,27 @@ export const acceptCredentialOffer = createAsyncThunk<
             api.dispatch(refreshPrismDIDs({ agent }));
             console.log('🔄 [CREDENTIAL OFFER] Refreshed PRISM DIDs list');
 
-        } catch (err) {
+        } catch (err: any) {
             console.error('❌ Failed to send credential request:', err);
-            throw err; // Re-throw the error instead of silencing it
+            console.error('❌ Error details:', JSON.stringify({
+                message: err?.message,
+                status: err?.status,
+                statusCode: err?.statusCode,
+                code: err?.code,
+                name: err?.name,
+            }));
+
+            // Always delete the offer from Pluto on any sendMessage failure.
+            // A failed send means the offer can never be accepted, and leaving it
+            // in Pluto causes it to reappear on every wallet restart.
+            try {
+                await agent.pluto.deleteMessage(message.id);
+                console.log('🗑️ [CREDENTIAL OFFER] Deleted failed offer from Pluto:', message.id);
+            } catch (deleteErr) {
+                console.warn('⚠️ [CREDENTIAL OFFER] Could not delete offer from Pluto:', deleteErr);
+            }
+
+            throw err;
         }
         return api.fulfillWithValue(null);
     } catch (err) {
@@ -606,7 +624,7 @@ async function handleMessages(
                         const sortedCredentials = matchingCredentials.sort((a, b) => {
                             const levelA = getVCClearanceLevel(a) || 0;
                             const levelB = getVCClearanceLevel(b) || 0;
-                            return levelB - levelA; // Descending order (TOP-SECRET=3 > SECRET=2 > CONFIDENTIAL=1)
+                            return levelB - levelA; // Descending order (SECRET=4 > RESTRICTED=3 > CONFIDENTIAL=2)
                         });
 
                         const selectedCredential = sortedCredentials[0];

@@ -44,7 +44,7 @@ const TECHCORP_PRISM_DID = process.env.TECHCORP_PRISM_DID || 'did:prism:6ee757c2
  * @param {string} employeeData.department - Department (for metadata)
  * @returns {Promise<Object>} Created wallet details
  */
-async function createEmployeeWallet(employeeData) {
+async function createEmployeeWallet(employeeData, companyDID = null) {
   const { email, name, department } = employeeData;
 
   console.log(`🏗️  [EmployeeWalletMgr] Creating wallet for: ${name} (${email})`);
@@ -190,7 +190,7 @@ async function createEmployeeWallet(employeeData) {
       prismDid: partialData.prismDid,
       employeeId: employeeId,
       email: email, // Administrator-provided email for portal authentication
-      issuerDID: TECHCORP_PRISM_DID, // DID of the credential issuer (TechCorp) - enables document releasability filtering
+      issuerDID: companyDID || TECHCORP_PRISM_DID, // DID of the credential issuer (company-specific) - enables document releasability filtering
       role: employeeData.role || "Engineer",
       department: employeeData.department || department || "Engineering",
       hireDate: new Date().toISOString(),

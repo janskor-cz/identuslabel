@@ -14,24 +14,30 @@ const xml2js = require('xml2js');
 
 // Clearance level hierarchy (standardized to CA Portal naming)
 const CLEARANCE_LEVELS = {
+  'UNCLASSIFIED': 0,
   'INTERNAL': 1,
   'CONFIDENTIAL': 2,
   'RESTRICTED': 3,
-  'TOP-SECRET': 4
+  'SECRET': 4,
+  'TOP-SECRET': 4  // legacy alias
 };
 
 // Style name to clearance mapping (matches DocxClearanceParser and template)
 const STYLE_CLEARANCE_MAP = {
   // Paragraph styles
+  'unclassified': 'UNCLASSIFIED',
+  'public': 'UNCLASSIFIED',
   'internal': 'INTERNAL',
   'confidential': 'CONFIDENTIAL',
   'restricted': 'RESTRICTED',
-  'topsecret': 'TOP-SECRET',
-  'top-secret': 'TOP-SECRET',
+  'secret': 'SECRET',
+  'topsecret': 'SECRET',
+  'top-secret': 'SECRET',
   // Character styles (inline)
   'confidentialinline': 'CONFIDENTIAL',
   'restrictedinline': 'RESTRICTED',
-  'topsecretinline': 'TOP-SECRET'
+  'secretinline': 'SECRET',
+  'topsecretinline': 'SECRET'
 };
 
 class DocxRedactionService {
@@ -41,10 +47,16 @@ class DocxRedactionService {
    */
   static async applyRedactions(docxBuffer, userClearance, sectionMetadata = []) {
     const userLevel = typeof userClearance === 'string'
-      ? CLEARANCE_LEVELS[userClearance.toUpperCase()] || 1
+      ? (CLEARANCE_LEVELS[userClearance.toUpperCase()] ?? 0)
       : userClearance;
 
     console.log(`[DocxRedaction] Applying redactions for clearance level: ${userLevel}`);
+
+    // Validate DOCX is a valid ZIP file (magic bytes: 0x50 0x4B)
+    if (!docxBuffer || docxBuffer.length < 4 ||
+        docxBuffer[0] !== 0x50 || docxBuffer[1] !== 0x4B) {
+      throw new Error('InvalidDocxFormat: File is not a valid DOCX (ZIP) archive');
+    }
 
     try {
       // 1. Load the DOCX as a ZIP archive

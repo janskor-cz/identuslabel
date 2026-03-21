@@ -54,8 +54,11 @@ export const Scanner: React.FC<ScannerProps> = ({
   const [scanning, setScanning] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Handle QR code detection
-  const handleDecode = async (result: string) => {
+  // Handle QR code detection — v2.x passes IDetectedBarcode[]
+  const handleDecode = async (detections: { rawValue: string }[]) => {
+    const result = detections?.[0]?.rawValue;
+    if (!result) return;
+
     // Prevent duplicate scans
     if (result === lastScan && pauseAfterScan) {
       console.log('⚠️ [Scanner] Duplicate scan detected, ignoring');
@@ -145,16 +148,15 @@ export const Scanner: React.FC<ScannerProps> = ({
       <div className="scanner-view relative">
         {scanning && (
           <QRScanner
-            onDecode={handleDecode}
+            onScan={handleDecode}
             onError={handleError}
             paused={isPaused}
+            formats={['qr_code']}
             constraints={{
               facingMode: preferredCamera === 'front' ? 'user' : 'environment',
-              aspectRatio: 1,
             }}
-            scanDelay={500} // Prevent rapid duplicate scans
+            scanDelay={500}
             components={{
-              audio: true, // Beep on successful scan
               torch: enableTorch,
             }}
             styles={{

@@ -7,7 +7,7 @@ const CLEARANCE_HIERARCHY = {
   'INTERNAL': 1,
   'CONFIDENTIAL': 2,
   'RESTRICTED': 3,
-  'TOP-SECRET': 4
+  'SECRET': 4
 };
 
 // Local content storage (Phase 1)
@@ -36,7 +36,7 @@ This is a secure information system that provides access to classified informati
 - INTERNAL: Basic organizational information
 - CONFIDENTIAL: Sensitive business information
 - RESTRICTED: Highly sensitive strategic information
-- TOP-SECRET: Classified information requiring highest clearance`
+- SECRET: Classified information requiring highest clearance`
     },
     {
       id: 'internal-1',
@@ -218,9 +218,9 @@ Automated security systems detected unauthorized access attempts targeting inter
       id: 'topsecret-1',
       title: 'Strategic Intelligence Brief - Market Position',
       requiredLevel: 4,
-      clearanceBadge: 'TOP-SECRET',
+      clearanceBadge: 'SECRET',
       category: 'strategic',
-      content: `TOP-SECRET - EXECUTIVE LEVEL ONLY
+      content: `SECRET - EXECUTIVE LEVEL ONLY
 UNAUTHORIZED DISCLOSURE PROHIBITED
 
 **Strategic Market Intelligence Summary**
@@ -294,7 +294,7 @@ UNAUTHORIZED DISCLOSURE PROHIBITED
 ---
 
 **Distribution:** CEO, CTO, CFO, Board of Directors
-**Classification:** TOP-SECRET
+**Classification:** SECRET
 **Review Date:** Quarterly
 **Document Control:** #TS-2025-STRAT-001`
     }
@@ -357,7 +357,7 @@ class ContentDatabase {
       'INTERNAL': '#2196F3',
       'CONFIDENTIAL': '#FF9800',
       'RESTRICTED': '#9C27B0',
-      'TOP-SECRET': '#F44336'
+      'SECRET': '#F44336'
     };
     return colors[badge] || '#9E9E9E';
   }

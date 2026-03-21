@@ -8,12 +8,15 @@ import { useAppSelector } from "@/reducers/store";
 import { DBConnect } from "@/components/DBConnect";
 import { Credential } from "@/components/Credential";
 import { CredentialCard } from "@/components/CredentialCard";
+import { getCredentialLayout } from '@/components/CredentialCardTypeLayouts';
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { verifyCredentialStatus } from "@/utils/credentialStatus";
 import {
     getCredentialType,
     isCredentialExpired,
-    sortCredentialsAlphabetically
+    sortCredentialsAlphabetically,
+    getEnterpriseCredentialType,
+    getEnterpriseAttr
 } from "@/utils/credentialTypeDetector";
 import { IdentificationIcon, ShieldCheckIcon, ClockIcon, OfficeBuildingIcon } from '@heroicons/react/solid';
 import {
@@ -102,19 +105,57 @@ function cleanupStatusCache(validCredentialIds: string[]) {
     }
 }
 
+function buildEnterpriseCredentialAdapter(rawCred: any) {
+    // Handle both JWT format (claims as plain object) and AnonCreds (credentialAttributes array)
+    let attrMap: Record<string, string> = {};
+    if (rawCred.claims && typeof rawCred.claims === 'object' && !Array.isArray(rawCred.claims)) {
+        // JWT: claims is a flat object
+        Object.entries(rawCred.claims).forEach(([k, v]) => { attrMap[k] = String(v ?? ''); });
+    } else if (Array.isArray(rawCred.credentialAttributes)) {
+        // AnonCreds: [{name, value}] array
+        rawCred.credentialAttributes.forEach((a: any) => { attrMap[a.name] = a.value; });
+    }
+    const enterpriseType = getEnterpriseCredentialType(rawCred);
+    const holderName = attrMap.employeeName || attrMap.email || attrMap.employeeId || 'Enterprise User';
+
+    // Derive companyName from email domain if not explicitly set
+    if (!attrMap.companyName && attrMap.email) {
+        const domain = attrMap.email.split('@')[1] || '';
+        // Strip TLD and capitalize: "techcorp.test" → "Techcorp"
+        const base = domain.split('.')[0];
+        attrMap.companyName = base.charAt(0).toUpperCase() + base.slice(1);
+    }
+
+    // Derive issuedAt from cloud agent createdAt if not set
+    const issuedAt = rawCred.issuedAt || rawCred.createdAt || attrMap.hireDate || attrMap.effectiveDate || '';
+
+    return {
+        ...rawCred,
+        issuedAt,
+        credentialSubject: {
+            ...attrMap,
+            credentialType: enterpriseType,
+            holderName,
+        },
+        id: rawCred.recordId,
+        issuanceDate: issuedAt,
+    };
+}
+
 export default function App() {
     const app = useMountedApp();
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [deletingCredentialId, setDeletingCredentialId] = useState<string | null>(null);
     const [refreshKey, setRefreshKey] = useState(0);
-    const [showRevoked, setShowRevoked] = useState(false);
-    const [showExpired, setShowExpired] = useState(false);
+    // Top-level wallet tab
+    const [walletTab, setWalletTab] = useState<'personal' | 'enterprise'>('personal');
+    // Sub-tabs for personal wallet
+    const [activeTab, setActiveTab] = useState<'active' | 'old' | 'others'>('active');
 
     // Grouped credentials (Personal Wallet)
-    const [identityCredentials, setIdentityCredentials] = useState<any[]>([]);
-    const [clearanceCredentials, setClearanceCredentials] = useState<any[]>([]);
-    const [expiredCredentials, setExpiredCredentials] = useState<any[]>([]);
-    const [revokedCredentials, setRevokedCredentials] = useState<any[]>([]);
+    const [activeCredentials, setActiveCredentials] = useState<any[]>([]);
+    const [oldCredentials, setOldCredentials] = useState<any[]>([]);
+    const [otherCredentials, setOtherCredentials] = useState<any[]>([]);
     const [credentialStatuses, setCredentialStatuses] = useState<Map<string, any>>(new Map());
 
     // Enterprise Wallet State
@@ -128,25 +169,45 @@ export default function App() {
         const checkAndGroupCredentials = async () => {
             console.log('🔄 [Credentials] Starting credential grouping and status check...');
 
-            const identity: any[] = [];
-            const clearance: any[] = [];
-            const expired: any[] = [];
-            const revoked: any[] = [];
+            const active: any[] = [];
+            const old: any[] = [];
+            const others: any[] = [];
             const statusMap = new Map();
 
+            // Deduplicate credentials by semantic content key.
+            // Keep the last (most recently issued) copy when duplicates exist.
+            const deduped = new Map<string, any>();
+            for (const credential of app.credentials) {
+                // Extract subject from credentialSubject getter (works for SDK JWTCredential)
+                let sub: any = null;
+                try { sub = (credential as any).credentialSubject; } catch { /* ignore */ }
+                const key: string =
+                    sub?.enterpriseAgentWalletId ||   // ServiceConfiguration: unique per employee wallet
+                    sub?.uniqueId ||                   // RealPersonIdentity
+                    sub?.credentialId ||               // SecurityClearance / others
+                    credential.id;                     // fallback: treat every JWT as unique
+                // Later entries overwrite earlier ones — keeps newest issued copy
+                deduped.set(key, credential);
+            }
+            const dedupedCredentials = Array.from(deduped.values());
+            const removedCount = app.credentials.length - dedupedCredentials.length;
+            if (removedCount > 0) {
+                console.log(`🧹 [Credentials] Deduplicated ${removedCount} duplicate credential(s)`);
+            }
+
             // Clean up cache for deleted credentials
-            const validCredentialIds = app.credentials.map(c => c.id);
+            const validCredentialIds = dedupedCredentials.map(c => c.id);
             cleanupStatusCache(validCredentialIds);
 
-            for (const credential of app.credentials) {
+            for (const credential of dedupedCredentials) {
                 try {
                     // Check revocation status WITH CACHING
                     const status = await getCachedCredentialStatus(credential);
                     statusMap.set(credential.id, status);
 
-                    // If revoked/suspended, add to revoked list
+                    // If revoked/suspended, add to old
                     if (status.revoked || status.suspended) {
-                        revoked.push(credential);
+                        old.push(credential);
                         continue;
                     }
 
@@ -154,42 +215,32 @@ export default function App() {
                     const expired_flag = isCredentialExpired(credential);
 
                     if (expired_flag) {
-                        expired.push(credential);
+                        old.push(credential);
                     } else {
-                        // Group by type (only valid, non-expired credentials)
                         const type = getCredentialType(credential);
-
-                        if (type === 'RealPersonIdentity') {
-                            identity.push(credential);
-                        } else if (type === 'SecurityClearance') {
-                            clearance.push(credential);
-                        } else if (type === 'CertificationAuthorityIdentity') {
-                            // Skip - these are issuer/organization identity credentials, not user's own VCs
-                            console.log('⏭️ [Credentials] Skipping issuer credential:', type);
+                        if (type === 'ServiceConfiguration') {
+                            // Shown in Configuration tab only — skip here
+                        } else if (type === 'CertificationAuthorityIdentity' || type === 'CompanyIdentity') {
+                            others.push(credential);
                         } else {
-                            // Other types (EmployeeRole, ServiceConfiguration, etc.) go in identity
-                            identity.push(credential);
+                            active.push(credential);
                         }
                     }
                 } catch (error) {
                     console.error('Error checking credential status:', error);
-                    // On error, treat as valid identity credential
-                    identity.push(credential);
+                    active.push(credential);
                 }
             }
 
-            // Sort each group alphabetically
-            setIdentityCredentials(sortCredentialsAlphabetically(identity));
-            setClearanceCredentials(sortCredentialsAlphabetically(clearance));
-            setExpiredCredentials(sortCredentialsAlphabetically(expired));
-            setRevokedCredentials(revoked);
+            setActiveCredentials(sortCredentialsAlphabetically(active));
+            setOldCredentials(sortCredentialsAlphabetically(old));
+            setOtherCredentials(sortCredentialsAlphabetically(others));
             setCredentialStatuses(statusMap);
 
             console.log('✅ [Credentials] Grouping completed:', {
-                identity: identity.length,
-                clearance: clearance.length,
-                expired: expired.length,
-                revoked: revoked.length,
+                active: active.length,
+                old: old.length,
+                others: others.length,
                 cacheSize: statusCheckCache.size
             });
         };
@@ -444,281 +495,206 @@ export default function App() {
                             </p>
                         </div>
 
-                        {/* Credentials List - Grouped by Type */}
-                        {
-                            app.credentials.length <= 0 ?
-                                <div className="text-center py-8">
-                                    <p className="text-lg font-normal text-slate-300 lg:text-xl">
-                                        No credentials found.
-                                    </p>
-                                    <p className="text-sm text-slate-400 mt-2">
-                                        If you have accepted credential offers, try clicking "Refresh Credentials" above.
-                                    </p>
-                                </div>
-                                :
-                                <>
-                                    {/* Identity Credentials Section */}
-                                    {identityCredentials.length > 0 && (
-                                        <section className="mb-8">
-                                            <div className="flex items-center gap-3 mb-4">
-                                                <IdentificationIcon className="w-8 h-8 text-cyan-400" />
-                                                <h2 className="text-2xl font-bold text-white">
-                                                    Identity Credentials
-                                                </h2>
-                                                <span className="px-3 py-1 bg-cyan-500/20 text-cyan-400 text-sm font-semibold rounded-full border border-cyan-500/30">
-                                                    {identityCredentials.length}
-                                                </span>
-                                            </div>
-                                            <div className="space-y-4">
-                                                {identityCredentials.map((credential, i) => (
-                                                    <ErrorBoundary
-                                                        key={`identity-${refreshKey}-${credential.id}-${i}`}
-                                                        componentName={`CredentialCard-Identity-${i}`}
-                                                    >
-                                                        <CredentialCard
-                                                            credential={credential}
-                                                            onDelete={handleDeleteCredential}
-                                                            status={credentialStatuses.get(credential.id)}
-                                                        />
-                                                    </ErrorBoundary>
-                                                ))}
-                                            </div>
-                                        </section>
+                        {/* Wallet Tabs */}
+                        <div className="flex gap-1 mb-6 bg-slate-800/60 p-1 rounded-xl border border-slate-700/50 w-fit">
+                            <button
+                                onClick={() => setWalletTab('personal')}
+                                className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold transition-all ${
+                                    walletTab === 'personal'
+                                        ? 'bg-slate-700 text-white shadow'
+                                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'
+                                }`}
+                            >
+                                🪪 Personal
+                                {activeCredentials.length > 0 && (
+                                    <span className={`px-1.5 py-0.5 text-xs rounded-full ${walletTab === 'personal' ? 'bg-cyan-500/30 text-cyan-300' : 'bg-slate-700 text-slate-400'}`}>
+                                        {activeCredentials.length}
+                                    </span>
+                                )}
+                            </button>
+                            {isEnterpriseConfigured && (
+                                <button
+                                    onClick={() => setWalletTab('enterprise')}
+                                    className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold transition-all ${
+                                        walletTab === 'enterprise'
+                                            ? 'bg-slate-700 text-white shadow'
+                                            : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'
+                                    }`}
+                                >
+                                    🏢 {enterpriseConfig?.agentName || 'Enterprise'}
+                                    {enterpriseCredentials.length > 0 && (
+                                        <span className={`px-1.5 py-0.5 text-xs rounded-full ${walletTab === 'enterprise' ? 'bg-cyan-500/30 text-cyan-300' : 'bg-slate-700 text-slate-400'}`}>
+                                            {enterpriseCredentials.length}
+                                        </span>
                                     )}
-
-                                    {/* Security Clearances Section */}
-                                    {clearanceCredentials.length > 0 && (
-                                        <section className="mb-8">
-                                            <div className="flex items-center gap-3 mb-4">
-                                                <ShieldCheckIcon className="w-8 h-8 text-purple-400" />
-                                                <h2 className="text-2xl font-bold text-white">
-                                                    Security Clearances
-                                                </h2>
-                                                <span className="px-3 py-1 bg-purple-500/20 text-purple-400 text-sm font-semibold rounded-full border border-purple-500/30">
-                                                    {clearanceCredentials.length}
-                                                </span>
-                                            </div>
-                                            <div className="space-y-4">
-                                                {clearanceCredentials.map((credential, i) => (
-                                                    <ErrorBoundary
-                                                        key={`clearance-${refreshKey}-${credential.id}-${i}`}
-                                                        componentName={`CredentialCard-Clearance-${i}`}
-                                                    >
-                                                        <CredentialCard
-                                                            credential={credential}
-                                                            onDelete={handleDeleteCredential}
-                                                            status={credentialStatuses.get(credential.id)}
-                                                        />
-                                                    </ErrorBoundary>
-                                                ))}
-                                            </div>
-                                        </section>
+                                    {isLoadingEnterpriseCredentials && (
+                                        <svg className="animate-spin h-3.5 w-3.5 text-cyan-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
                                     )}
+                                </button>
+                            )}
+                        </div>
 
-                                    {/* Expired Credentials Section */}
-                                    {expiredCredentials.length > 0 && (
-                                        <section className="mb-8">
+                        {/* ── PERSONAL WALLET ── */}
+                        {walletTab === 'personal' && (
+                        <>
+                        {app.credentials.length <= 0 ? (
+                            <div className="text-center py-8">
+                                <p className="text-lg font-normal text-slate-300 lg:text-xl">No credentials found.</p>
+                                <p className="text-sm text-slate-400 mt-2">If you have accepted credential offers, try clicking "Refresh Credentials" above.</p>
+                            </div>
+                        ) : (
+                            <>
+                                {/* Sub-Tab Bar */}
+                                <div className="flex gap-1 mb-6 bg-slate-800/50 p-1 rounded-xl border border-slate-700/50 w-fit">
+                                    {(['active', 'old', 'others'] as const).map(tab => {
+                                        const count = tab === 'active' ? activeCredentials.length : tab === 'old' ? oldCredentials.length : otherCredentials.length;
+                                        const labels = { active: 'Active', old: 'Old', others: 'Others' };
+                                        const isActive = activeTab === tab;
+                                        return (
                                             <button
-                                                onClick={() => setShowExpired(!showExpired)}
-                                                className="flex items-center gap-3 mb-4 hover:opacity-80 transition-opacity"
+                                                key={tab}
+                                                onClick={() => setActiveTab(tab)}
+                                                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                                    isActive
+                                                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                                                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'
+                                                }`}
                                             >
-                                                <ClockIcon className="w-8 h-8 text-amber-400" />
-                                                <h2 className="text-2xl font-bold text-white">
-                                                    Expired Credentials
-                                                </h2>
-                                                <span className="px-3 py-1 bg-amber-500/20 text-amber-400 text-sm font-semibold rounded-full border border-amber-500/30">
-                                                    {expiredCredentials.length}
-                                                </span>
-                                                <span className="text-2xl text-slate-400">
-                                                    {showExpired ? '▼' : '▶'}
-                                                </span>
-                                            </button>
-
-                                            {showExpired && (
-                                                <div className="space-y-4 animate-fadeIn">
-                                                    {expiredCredentials.map((credential, i) => (
-                                                        <ErrorBoundary
-                                                            key={`expired-${refreshKey}-${credential.id}-${i}`}
-                                                            componentName={`CredentialCard-Expired-${i}`}
-                                                        >
-                                                            <CredentialCard
-                                                                credential={credential}
-                                                                onDelete={handleDeleteCredential}
-                                                                status={credentialStatuses.get(credential.id)}
-                                                            />
-                                                        </ErrorBoundary>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </section>
-                                    )}
-
-                                    {/* Revoked Credentials Section */}
-                                    {revokedCredentials.length > 0 && (
-                                        <section className="mb-8">
-                                            <button
-                                                onClick={() => setShowRevoked(!showRevoked)}
-                                                className="flex items-center gap-3 mb-4 hover:opacity-80 transition-opacity"
-                                            >
-                                                <div className="w-8 h-8 bg-red-500/20 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 font-bold">
-                                                    ✗
-                                                </div>
-                                                <h2 className="text-2xl font-bold text-white">
-                                                    Revoked Credentials
-                                                </h2>
-                                                <span className="px-3 py-1 bg-red-500/20 text-red-400 text-sm font-semibold rounded-full border border-red-500/30">
-                                                    {revokedCredentials.length}
-                                                </span>
-                                                <span className="text-2xl text-slate-400">
-                                                    {showRevoked ? '▼' : '▶'}
-                                                </span>
-                                            </button>
-
-                                            {showRevoked && (
-                                                <div className="space-y-4 animate-fadeIn">
-                                                    {revokedCredentials.map((credential, i) => (
-                                                        <div
-                                                            key={`revoked-${refreshKey}-${credential.id}-${i}`}
-                                                            className="border-2 border-red-500/30 rounded-xl overflow-hidden bg-slate-800/30"
-                                                        >
-                                                            <div className="bg-red-500/20 px-4 py-2 border-b-2 border-red-500/30">
-                                                                <div className="text-red-400 font-semibold text-sm">
-                                                                    ⚠️ REVOKED OR SUSPENDED
-                                                                </div>
-                                                            </div>
-                                                            <div className="p-4 bg-red-500/10">
-                                                                <Credential credential={credential} />
-                                                            </div>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </section>
-                                    )}
-
-                                    {/* No Valid Credentials Message */}
-                                    {identityCredentials.length === 0 &&
-                                     clearanceCredentials.length === 0 &&
-                                     expiredCredentials.length === 0 &&
-                                     revokedCredentials.length > 0 && (
-                                        <div className="text-center py-8 text-slate-300">
-                                            <p>All your credentials are revoked or suspended.</p>
-                                            <p className="text-sm mt-2 text-slate-400">Expand the "Revoked Credentials" section above to view them.</p>
-                                        </div>
-                                    )}
-
-                                    {/* === VISUAL SEPARATOR === */}
-                                    {isEnterpriseConfigured && (
-                                        <div className="my-12 border-t-4 border-cyan-500/30"></div>
-                                    )}
-
-                                    {/* === ENTERPRISE WALLET CREDENTIALS === */}
-                                    {isEnterpriseConfigured && (
-                                        <section className="mt-8">
-                                            {/* Enterprise Header */}
-                                            <div className="flex items-center gap-4 mb-6 bg-gradient-to-r from-cyan-500/20 to-purple-500/20 p-4 rounded-2xl border-2 border-cyan-500/30 backdrop-blur-sm">
-                                                <OfficeBuildingIcon className="w-10 h-10 text-cyan-400" />
-                                                <div className="flex-1">
-                                                    <h2 className="text-3xl font-bold text-white">
-                                                        🏢 Enterprise Wallet
-                                                    </h2>
-                                                    <p className="text-sm text-slate-300 mt-1">
-                                                        {enterpriseConfig?.agentName || 'Enterprise Cloud Agent'}
-                                                    </p>
-                                                </div>
-                                                {isLoadingEnterpriseCredentials && (
-                                                    <div className="flex items-center gap-2 text-cyan-400">
-                                                        <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                                        </svg>
-                                                        <span className="text-sm">Loading...</span>
-                                                    </div>
+                                                {labels[tab]}
+                                                {count > 0 && (
+                                                    <span className={`px-1.5 py-0.5 text-xs rounded-full ${isActive ? 'bg-cyan-500/30 text-cyan-300' : 'bg-slate-700 text-slate-400'}`}>
+                                                        {count}
+                                                    </span>
                                                 )}
-                                            </div>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
 
-                                            {/* Enterprise Credentials List */}
-                                            {!isLoadingEnterpriseCredentials && enterpriseCredentials.length === 0 && (
-                                                <div className="text-center py-8 bg-cyan-500/10 rounded-2xl border-2 border-cyan-500/30">
-                                                    <p className="text-lg font-normal text-slate-300">
-                                                        No enterprise credentials found.
-                                                    </p>
-                                                    <p className="text-sm text-slate-400 mt-2">
-                                                        Enterprise credentials will appear here when issued by your organization.
-                                                    </p>
-                                                </div>
-                                            )}
+                                {/* Active Tab */}
+                                {activeTab === 'active' && (
+                                    activeCredentials.length === 0 ? (
+                                        <div className="text-center py-8 text-slate-400">No active credentials.</div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            {activeCredentials.map((credential, i) => (
+                                                <ErrorBoundary key={`active-${refreshKey}-${credential.id}-${i}`} componentName={`CredentialCard-Active-${i}`}>
+                                                    <div className="relative">
+                                                        <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+                                                            <span className="px-2 py-0.5 text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full">✓ Valid</span>
+                                                            <button onClick={() => handleDeleteCredential(credential)} className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
+                                                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
+                                                            </button>
+                                                        </div>
+                                                        {getCredentialLayout(credential)}
+                                                    </div>
+                                                </ErrorBoundary>
+                                            ))}
+                                        </div>
+                                    )
+                                )}
 
-                                            {!isLoadingEnterpriseCredentials && enterpriseCredentials.length > 0 && (
-                                                <div className="space-y-4">
-                                                    {enterpriseCredentials.map((credential, i) => (
-                                                        <ErrorBoundary
-                                                            key={`enterprise-${refreshKey}-${credential.recordId || i}`}
-                                                            componentName={`EnterpriseCredential-${i}`}
-                                                        >
-                                                            <div className="border-2 border-cyan-500/30 rounded-2xl overflow-hidden bg-slate-800/30 backdrop-blur-sm shadow-sm hover:shadow-md transition-shadow">
-                                                                <div className="bg-cyan-500/20 px-4 py-2 border-b-2 border-cyan-500/30">
-                                                                    <div className="flex items-center justify-between">
-                                                                        <div className="text-cyan-400 font-semibold text-sm flex items-center gap-2">
-                                                                            <OfficeBuildingIcon className="w-4 h-4" />
-                                                                            Enterprise Credential
-                                                                        </div>
-                                                                        <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
-                                                                            credential.protocolState === 'CredentialReceived'
-                                                                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                                                                                : credential.protocolState === 'CredentialSent'
-                                                                                ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
-                                                                                : 'bg-slate-700/50 text-slate-300 border border-slate-600/30'
-                                                                        }`}>
-                                                                            {credential.protocolState || 'Unknown'}
-                                                                        </span>
-                                                                    </div>
-                                                                </div>
-                                                                <div className="p-4">
-                                                                    <div className="space-y-2 text-sm">
-                                                                        <div className="flex justify-between">
-                                                                            <span className="font-semibold text-slate-300">Record ID:</span>
-                                                                            <span className="text-slate-400 font-mono text-xs">{credential.recordId}</span>
-                                                                        </div>
-                                                                        {credential.credentialDefinitionId && (
-                                                                            <div className="flex justify-between">
-                                                                                <span className="font-semibold text-slate-300">Definition ID:</span>
-                                                                                <span className="text-slate-400 font-mono text-xs truncate max-w-xs">{credential.credentialDefinitionId}</span>
-                                                                            </div>
-                                                                        )}
-                                                                        {credential.issuedAt && (
-                                                                            <div className="flex justify-between">
-                                                                                <span className="font-semibold text-slate-300">Issued:</span>
-                                                                                <span className="text-slate-400">{new Date(credential.issuedAt).toLocaleDateString()}</span>
-                                                                            </div>
-                                                                        )}
-                                                                        {credential.updatedAt && (
-                                                                            <div className="flex justify-between">
-                                                                                <span className="font-semibold text-slate-300">Updated:</span>
-                                                                                <span className="text-slate-400">{new Date(credential.updatedAt).toLocaleDateString()}</span>
-                                                                            </div>
-                                                                        )}
-                                                                        {/* Full credential details in collapsed format */}
-                                                                        <details className="mt-4">
-                                                                            <summary className="cursor-pointer text-cyan-400 hover:text-cyan-300 font-semibold">
-                                                                                📋 View Full Details
-                                                                            </summary>
-                                                                            <pre className="mt-2 p-3 bg-slate-900/50 rounded text-xs overflow-x-auto border border-slate-700/50 text-slate-300">
-                                                                                {JSON.stringify(credential, null, 2)}
-                                                                            </pre>
-                                                                        </details>
-                                                                    </div>
-                                                                </div>
+                                {/* Old Tab */}
+                                {activeTab === 'old' && (
+                                    oldCredentials.length === 0 ? (
+                                        <div className="text-center py-8 text-slate-400">No expired or revoked credentials.</div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            {oldCredentials.map((credential, i) => {
+                                                const st = credentialStatuses.get(credential.id);
+                                                const isRevoked = st?.revoked || st?.suspended;
+                                                return (
+                                                    <ErrorBoundary key={`old-${refreshKey}-${credential.id}-${i}`} componentName={`CredentialCard-Old-${i}`}>
+                                                        <div className="relative opacity-70">
+                                                            <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+                                                                {isRevoked
+                                                                    ? <span className="px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/30 rounded-full">✗ Revoked</span>
+                                                                    : <span className="px-2 py-0.5 text-xs font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full">⏱ Expired</span>
+                                                                }
+                                                                <button onClick={() => handleDeleteCredential(credential)} className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
+                                                                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
+                                                                </button>
                                                             </div>
-                                                        </ErrorBoundary>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </section>
-                                    )}
+                                                            {getCredentialLayout(credential)}
+                                                        </div>
+                                                    </ErrorBoundary>
+                                                );
+                                            })}
+                                        </div>
+                                    )
+                                )}
 
-                                </>
-                        }
+                                {/* Others Tab */}
+                                {activeTab === 'others' && (
+                                    otherCredentials.length === 0 ? (
+                                        <div className="text-center py-8 text-slate-400">No other credentials.</div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            {otherCredentials.map((credential, i) => (
+                                                <ErrorBoundary key={`others-${refreshKey}-${credential.id}-${i}`} componentName={`CredentialCard-Others-${i}`}>
+                                                    <div className="relative">
+                                                        <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+                                                            <button onClick={() => handleDeleteCredential(credential)} className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
+                                                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
+                                                            </button>
+                                                        </div>
+                                                        {getCredentialLayout(credential)}
+                                                    </div>
+                                                </ErrorBoundary>
+                                            ))}
+                                        </div>
+                                    )
+                                )}
+
+                            </>
+                        )}
+                        </>
+                        )}
+
+                        {/* ── ENTERPRISE WALLET ── */}
+                        {walletTab === 'enterprise' && isEnterpriseConfigured && (
+                            <>
+                                {isLoadingEnterpriseCredentials && (
+                                    <div className="flex items-center gap-2 text-cyan-400 py-4">
+                                        <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        <span className="text-sm">Loading enterprise credentials…</span>
+                                    </div>
+                                )}
+                                {!isLoadingEnterpriseCredentials && enterpriseCredentials.length === 0 && (
+                                    <div className="text-center py-8 text-slate-400">
+                                        No enterprise credentials found.
+                                    </div>
+                                )}
+                                {!isLoadingEnterpriseCredentials && enterpriseCredentials.length > 0 && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        {enterpriseCredentials.map((rawCredential, i) => {
+                                            const adapted = buildEnterpriseCredentialAdapter(rawCredential);
+                                            return (
+                                                <ErrorBoundary
+                                                    key={`enterprise-${refreshKey}-${rawCredential.recordId || i}`}
+                                                    componentName={`EnterpriseCredential-${i}`}
+                                                >
+                                                    <div className="relative">
+                                                        {rawCredential.protocolState && (
+                                                            <span className="absolute top-3 right-3 z-10 px-2 py-0.5 text-xs font-medium border rounded-full bg-slate-700/50 text-slate-400 border-slate-600/30">
+                                                                {rawCredential.protocolState}
+                                                            </span>
+                                                        )}
+                                                        {getCredentialLayout(adapted)}
+                                                    </div>
+                                                </ErrorBoundary>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </>
+                        )}
                 </Box>
             </DBConnect>
         </div>

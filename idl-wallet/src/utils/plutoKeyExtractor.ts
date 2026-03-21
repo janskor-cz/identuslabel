@@ -207,6 +207,59 @@ export async function findKeyByFingerprintInPluto(
 }
 
 /**
+ * Extract the first Ed25519 key found across all Peer DIDs stored in Pluto.
+ *
+ * When `agent.createNewPeerDID()` runs, the SDK stores the peer DID's Ed25519
+ * private key in local Pluto via `StorePeerDID()`. This function retrieves it
+ * so the documents page can use a DID-bound signing key even when no PRISM DID
+ * keys exist locally (PRISM DID private keys live in the Cloud Agent, not Pluto).
+ *
+ * @param agent - SDK Agent instance (must be started)
+ * @returns Promise with raw key bytes + peer DID string, or null if not found
+ */
+export async function extractEd25519FromPeerDIDs(
+  agent: SDK.Agent
+): Promise<{ privateKeyBytes: Uint8Array; publicKeyBytes: Uint8Array; peerDID: string } | null> {
+  try {
+    console.log('[PlutoKeyExtractor] Searching peer DIDs for Ed25519 key...');
+
+    const peerDIDs = await agent.pluto.getAllPeerDIDs();
+    if (!peerDIDs || peerDIDs.length === 0) {
+      console.warn('[PlutoKeyExtractor] No peer DIDs found in Pluto');
+      return null;
+    }
+
+    console.log(`[PlutoKeyExtractor] Checking ${peerDIDs.length} peer DID(s)...`);
+
+    for (const peerDID of peerDIDs) {
+      const did = peerDID.did ?? peerDID;
+      const privateKeys = await agent.pluto.getDIDPrivateKeysByDID(did);
+
+      if (!privateKeys || privateKeys.length === 0) continue;
+
+      for (const privateKey of privateKeys) {
+        if (privateKey.curve?.toLowerCase() === 'ed25519') {
+          const publicKey = privateKey.publicKey();
+          console.log(`[PlutoKeyExtractor] Found Ed25519 key in peer DID: ${did.toString().substring(0, 50)}...`);
+          return {
+            privateKeyBytes: privateKey.raw,
+            publicKeyBytes: publicKey.raw,
+            peerDID: did.toString()
+          };
+        }
+      }
+    }
+
+    console.warn('[PlutoKeyExtractor] No Ed25519 key found in any peer DID');
+    return null;
+
+  } catch (error: any) {
+    console.error('[PlutoKeyExtractor] Error searching peer DIDs for Ed25519 key:', error);
+    return null;
+  }
+}
+
+/**
  * Convert Pluto extracted keys to SecurityKeyDual format
  *
  * This allows keys from Pluto to be used seamlessly with the existing

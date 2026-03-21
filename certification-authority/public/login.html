@@ -318,6 +318,13 @@
         window.addEventListener('load', async () => {
             console.log('🔐 [DIDCOMM-LOGIN] Initializing DIDComm authentication...');
 
+            // Prefill Unique ID from query param (?uid=...)
+            const uid = new URLSearchParams(window.location.search).get('uid');
+            if (uid) {
+                const el = document.getElementById('userIdentifier');
+                if (el) el.value = uid;
+            }
+
             try {
                 const response = await fetch(apiUrl('/api/auth/create-session'), {
                     method: 'POST',

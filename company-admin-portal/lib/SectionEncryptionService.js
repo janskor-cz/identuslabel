@@ -135,37 +135,60 @@ function createKeyring(masterKeys) {
   // Each level stores its own key and all lower-level keys
   const keyring = {};
 
-  // TOP_SECRET can access all keys
-  keyring.TOP_SECRET = {
+  // TOP-SECRET can access all keys
+  keyring['TOP-SECRET'] = {
     keys: {
-      TOP_SECRET: masterKeys.TOP_SECRET.toString('base64'),
-      SECRET: masterKeys.SECRET.toString('base64'),
-      CONFIDENTIAL: masterKeys.CONFIDENTIAL.toString('base64'),
-      UNCLASSIFIED: masterKeys.UNCLASSIFIED.toString('base64')
+      'TOP-SECRET':  masterKeys['TOP-SECRET'].toString('base64'),
+      SECRET:        masterKeys.SECRET.toString('base64'),
+      RESTRICTED:    masterKeys.RESTRICTED.toString('base64'),
+      CONFIDENTIAL:  masterKeys.CONFIDENTIAL.toString('base64'),
+      INTERNAL:      masterKeys.INTERNAL.toString('base64'),
+      UNCLASSIFIED:  masterKeys.UNCLASSIFIED.toString('base64')
     }
   };
 
-  // SECRET can access SECRET, CONFIDENTIAL, UNCLASSIFIED
+  // SECRET can access SECRET and below
   keyring.SECRET = {
     keys: {
-      SECRET: masterKeys.SECRET.toString('base64'),
-      CONFIDENTIAL: masterKeys.CONFIDENTIAL.toString('base64'),
-      UNCLASSIFIED: masterKeys.UNCLASSIFIED.toString('base64')
+      SECRET:        masterKeys.SECRET.toString('base64'),
+      RESTRICTED:    masterKeys.RESTRICTED.toString('base64'),
+      CONFIDENTIAL:  masterKeys.CONFIDENTIAL.toString('base64'),
+      INTERNAL:      masterKeys.INTERNAL.toString('base64'),
+      UNCLASSIFIED:  masterKeys.UNCLASSIFIED.toString('base64')
     }
   };
 
-  // CONFIDENTIAL can access CONFIDENTIAL, UNCLASSIFIED
+  // RESTRICTED can access RESTRICTED and below
+  keyring.RESTRICTED = {
+    keys: {
+      RESTRICTED:    masterKeys.RESTRICTED.toString('base64'),
+      CONFIDENTIAL:  masterKeys.CONFIDENTIAL.toString('base64'),
+      INTERNAL:      masterKeys.INTERNAL.toString('base64'),
+      UNCLASSIFIED:  masterKeys.UNCLASSIFIED.toString('base64')
+    }
+  };
+
+  // CONFIDENTIAL can access CONFIDENTIAL and below
   keyring.CONFIDENTIAL = {
     keys: {
-      CONFIDENTIAL: masterKeys.CONFIDENTIAL.toString('base64'),
-      UNCLASSIFIED: masterKeys.UNCLASSIFIED.toString('base64')
+      CONFIDENTIAL:  masterKeys.CONFIDENTIAL.toString('base64'),
+      INTERNAL:      masterKeys.INTERNAL.toString('base64'),
+      UNCLASSIFIED:  masterKeys.UNCLASSIFIED.toString('base64')
+    }
+  };
+
+  // INTERNAL can access INTERNAL and below
+  keyring.INTERNAL = {
+    keys: {
+      INTERNAL:      masterKeys.INTERNAL.toString('base64'),
+      UNCLASSIFIED:  masterKeys.UNCLASSIFIED.toString('base64')
     }
   };
 
   // UNCLASSIFIED can only access UNCLASSIFIED
   keyring.UNCLASSIFIED = {
     keys: {
-      UNCLASSIFIED: masterKeys.UNCLASSIFIED.toString('base64')
+      UNCLASSIFIED:  masterKeys.UNCLASSIFIED.toString('base64')
     }
   };
 

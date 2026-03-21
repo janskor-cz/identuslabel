@@ -17,7 +17,7 @@ export function SecurityClearanceRequestor(props: SecurityClearanceRequestorProp
         { value: 'internal', label: 'Internal', description: 'Basic internal access level' },
         { value: 'confidential', label: 'Confidential', description: 'Standard confidential clearance' },
         { value: 'restricted', label: 'Restricted', description: 'Higher restricted clearance' },
-        { value: 'top-secret', label: 'Top Secret', description: 'Highest security clearance' }
+        { value: 'secret', label: 'Secret', description: 'Highest security clearance' }
     ];
 
     const requestSecurityClearance = async () => {

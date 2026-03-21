@@ -20,7 +20,7 @@ function getBadgeColorClasses(level: SecurityLevel, canDecrypt: boolean): string
   const opacity = canDecrypt ? '' : 'opacity-90';
 
   switch (level) {
-    case SecurityLevel.TOP_SECRET:
+    case SecurityLevel.SECRET:
       return `bg-red-500 text-white border-red-600 ${opacity}`;
     case SecurityLevel.RESTRICTED:
       return `bg-orange-500 text-white border-orange-600 ${opacity}`;

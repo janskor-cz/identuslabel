@@ -63,8 +63,8 @@ export const applyConfiguration = createAsyncThunk(
         throw new Error(result.message);
       }
 
-      // Update Redux state with configuration
-      dispatch(setConfiguration(config));
+      // Update Redux state with isActive: true (setActiveConfiguration sets this in localStorage)
+      dispatch(setConfiguration({ ...config, isActive: true }));
 
       // Auto-refresh enterprise data after store is ready
       // Delay ensures Redux store is fully initialized before accessing getState

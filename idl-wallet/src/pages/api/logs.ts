@@ -33,6 +33,9 @@ const LOG_DIR = '/root/logs';
 const MAX_LOG_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_LOG_FILES = 50;
 
+// One log file per server process (resets on every yarn dev restart)
+let sessionLogFile: string | null = null;
+
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<ApiResponse>
@@ -87,25 +90,14 @@ export default async function handler(
  * Get the log file path for the current session
  */
 function getLogFilePath(walletId: string): string {
-  // Check if we have an active log file for today
-  const files = getWalletLogFiles(walletId);
+  // Reuse the file created for this server process
+  if (sessionLogFile) return sessionLogFile;
 
-  if (files.length > 0) {
-    // Use the most recent file if it's not too large
-    const latestFile = files[0];
-    const stats = fs.statSync(latestFile);
-
-    if (stats.size < MAX_LOG_FILE_SIZE) {
-      return latestFile;
-    }
-  }
-
-  // Create a new log file with timestamp
+  // New server start → new log file with timestamp
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T').join('-').slice(0, 19);
   const filename = `wallet-debug-${walletId}-${timestamp}.log`;
   const filepath = path.join(LOG_DIR, filename);
 
-  // Create file with header
   const header = `==========================================================
 Wallet Debug Log - ${walletId}
 Session started: ${new Date().toISOString()}
@@ -113,6 +105,7 @@ Session started: ${new Date().toISOString()}
 
 `;
   fs.writeFileSync(filepath, header, 'utf-8');
+  sessionLogFile = filepath;
 
   return filepath;
 }
