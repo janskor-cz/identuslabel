@@ -207,23 +207,38 @@ class EnterpriseDocumentManager {
    * @param {object} iagonInfo - Iagon storage info { fileId, downloadUrl }
    * @returns {Promise<object>} - Result with DID and operation details
    */
-  async createDocumentDIDWithServiceEndpoint(department, metadata, iagonInfo) {
+  /**
+   * Create a document DID with Iagon service endpoint and optional extra service entries.
+   *
+   * Extra services (e.g. DocumentAccessGate, DocumentPolicy) are passed via the
+   * `additionalServices` parameter and included in the DID document before
+   * blockchain publication.
+   *
+   * @param {string} department
+   * @param {object} metadata
+   * @param {object} iagonInfo - { fileId, downloadUrl }
+   * @param {object[]} [additionalServices] - Extra DID service entries
+   */
+  async createDocumentDIDWithServiceEndpoint(department, metadata, iagonInfo, additionalServices = []) {
     console.log(`[EnterpriseDocManager] Creating document DID with Iagon service endpoint for department: ${department}`);
     console.log(`[EnterpriseDocManager] Iagon fileId: ${iagonInfo.fileId}`);
     console.log(`[EnterpriseDocManager] Classification: ${metadata.classificationLevel || 'UNCLASSIFIED'}`);
+    console.log(`[EnterpriseDocManager] Additional services: ${additionalServices.length}`);
 
     try {
-      // Build service endpoint for Iagon storage
-      const serviceEndpoint = {
+      // Build service endpoints
+      const iagonServiceEndpoint = {
         id: 'iagon-storage',
         type: 'IagonStorage',
         serviceEndpoint: [iagonInfo.downloadUrl]
       };
 
-      console.log(`[EnterpriseDocManager] Service endpoint:`, JSON.stringify(serviceEndpoint, null, 2));
+      const services = [iagonServiceEndpoint, ...additionalServices];
 
-      // Step 1: Create unpublished DID WITH service endpoint
-      console.log(`[EnterpriseDocManager] Step 1: Creating unpublished DID with Iagon service endpoint...`);
+      console.log(`[EnterpriseDocManager] Service endpoints:`, JSON.stringify(services, null, 2));
+
+      // Step 1: Create unpublished DID WITH service endpoints
+      console.log(`[EnterpriseDocManager] Step 1: Creating unpublished DID with service endpoints...`);
 
       const headers = {
         'Content-Type': 'application/json'
@@ -233,14 +248,14 @@ class EnterpriseDocumentManager {
         headers['apikey'] = this.apiKey;
       }
 
-      // Create DID with Iagon service endpoint included
+      // Create DID with all service endpoints included
       const createResponse = await fetch(`${this.baseUrl}/did-registrar/dids`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
           documentTemplate: {
             publicKeys: [],
-            services: [serviceEndpoint]
+            services
           }
         })
       });
@@ -288,7 +303,8 @@ class EnterpriseDocumentManager {
       const result = {
         documentDID: longFormDid,
         operationId: operationId,
-        serviceEndpoint: serviceEndpoint,
+        serviceEndpoint: iagonServiceEndpoint,
+        services,
         iagonFileId: iagonInfo.fileId,
         iagonDownloadUrl: iagonInfo.downloadUrl,
         metadata: {

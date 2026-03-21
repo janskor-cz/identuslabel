@@ -1,6 +1,6 @@
 import React from 'react';
 
-type Classification = 'public' | 'internal' | 'confidential' | 'unclassified' | 'secret' | 'top_secret';
+type Classification = 'public' | 'internal' | 'confidential' | 'unclassified' | 'secret';
 
 interface DocumentRowProps {
   name: string;
@@ -16,8 +16,7 @@ export const DocumentRow: React.FC<DocumentRowProps> = ({ name, classification, 
     public: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
     internal: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
     confidential: 'bg-red-500/20 text-red-400 border-red-500/30',
-    secret: 'bg-red-600/20 text-red-500 border-red-600/30',
-    top_secret: 'bg-red-700/20 text-red-600 border-red-700/30'
+    secret: 'bg-red-700/20 text-red-600 border-red-700/30'
   };
 
   const displayLabel = classification.replace('_', ' ').toUpperCase();

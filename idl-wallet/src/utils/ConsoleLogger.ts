@@ -239,6 +239,11 @@ class ConsoleLogger {
         if (data.logFilePath && !this.logFilePathDisplayed) {
           this.originalConsole.log(`📁 [ConsoleLogger] Logging to: ${data.logFilePath}`);
           this.logFilePathDisplayed = true;
+          // Store for UI display
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem('wallet-log-file-path', data.logFilePath);
+            window.dispatchEvent(new CustomEvent('wallet-log-path', { detail: data.logFilePath }));
+          }
         }
       }
     } catch (error) {

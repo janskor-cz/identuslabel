@@ -20,7 +20,7 @@ interface SecurityLevelSelectorProps {
  */
 function getBadgeColorClasses(level: SecurityLevel): string {
   switch (level) {
-    case SecurityLevel.TOP_SECRET:
+    case SecurityLevel.SECRET:
       return 'bg-red-100 text-red-800 border-red-300 dark:bg-red-900 dark:text-red-200 dark:border-red-700';
     case SecurityLevel.RESTRICTED:
       return 'bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-900 dark:text-orange-200 dark:border-orange-700';
@@ -37,7 +37,7 @@ function getBadgeColorClasses(level: SecurityLevel): string {
  */
 function getSelectColorClasses(level: SecurityLevel): string {
   switch (level) {
-    case SecurityLevel.TOP_SECRET:
+    case SecurityLevel.SECRET:
       return 'border-red-400 focus:border-red-500 focus:ring-red-500';
     case SecurityLevel.RESTRICTED:
       return 'border-orange-400 focus:border-orange-500 focus:ring-orange-500';

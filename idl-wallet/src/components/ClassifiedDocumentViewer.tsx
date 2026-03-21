@@ -44,7 +44,7 @@ const getClassificationBadge = (level: string) => {
     case 'SECRET':
       return { color: 'bg-orange-600', label: 'SECRET' };
     case 'TOP_SECRET':
-      return { color: 'bg-red-600', label: 'TOP SECRET' };
+      return { color: 'bg-red-600', label: 'SECRET' };
     default:
       return { color: 'bg-gray-600', label: level || 'CLASSIFIED' };
   }
@@ -155,6 +155,15 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
 
       try {
         console.log('[ClassifiedDocumentViewer] Decrypting document:', document.ephemeralDID);
+
+        // Plaintext documents (VC-gate access flow — no decryption needed)
+        if (document.encryptionInfo?.algorithm === 'plaintext') {
+          const bytes = new Uint8Array(document.encryptedContent);
+          setDecryptedBytes(bytes);
+          setDecryptedContent(new TextDecoder('utf-8').decode(bytes));
+          setIsDecrypting(false);
+          return;
+        }
 
         // Try to decrypt with available keys
         let decrypted: Uint8Array | null = null;
@@ -499,7 +508,7 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
                 background: #FF9800;
                 color: white;
               }
-              .classified-doc-content [data-clearance="TOP_SECRET"]::before {
+              .classified-doc-content [data-clearance="SECRET"]::before {
                 background: #f44336;
                 color: white;
               }

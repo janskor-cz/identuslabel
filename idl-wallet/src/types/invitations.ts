@@ -79,7 +79,7 @@ export interface PresentationRequestConfig {
  * Security Clearance VC data structure
  */
 export interface SecurityClearanceVCData {
-  clearanceLevel?: 'RESTRICTED' | 'CONFIDENTIAL' | 'SECRET' | 'TOP SECRET';
+  clearanceLevel?: 'RESTRICTED' | 'CONFIDENTIAL' | 'SECRET';
   clearanceId?: string;
   holderUniqueId?: string;
   issuedDate?: string;

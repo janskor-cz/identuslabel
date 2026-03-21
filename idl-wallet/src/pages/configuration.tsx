@@ -5,6 +5,7 @@
  * and allows users to apply/manage wallet configurations.
  */
 
+import '../app/index.css';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useMountedApp } from '../reducers/store';
 import { DBConnect } from '../components/DBConnect';

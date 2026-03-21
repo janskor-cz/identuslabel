@@ -16,7 +16,7 @@ export interface StandardMessageBody {
   encrypted: boolean;
 
   /** Security classification level (only for encrypted messages) */
-  securityLevel?: "UNCLASSIFIED" | "CONFIDENTIAL" | "SECRET" | "TOP-SECRET";
+  securityLevel?: "UNCLASSIFIED" | "CONFIDENTIAL" | "SECRET";
 
   /** Numeric security level (only for encrypted messages) */
   classificationNumeric?: number;

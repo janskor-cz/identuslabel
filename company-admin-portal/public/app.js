@@ -155,6 +155,7 @@ const app = {
         await this.loadCompanyInfo();
         await this.loadEmployees();
         await loadCompanyCredentials(); // Load credentials after authentication
+        this.loadAccessLogs();
     },
 
     /**
@@ -693,6 +694,29 @@ const app = {
         setTimeout(() => {
             toast.classList.add('hidden');
         }, 3000);
+    },
+
+    async loadAccessLogs() {
+        try {
+            const res  = await fetch('/company-admin/api/admin/access-logs?limit=200');
+            const data = await res.json();
+            const tbody = document.getElementById('access-log-tbody');
+            if (!data.success || !data.logs.length) {
+                tbody.innerHTML = '<tr><td colspan="6">No access events recorded yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = data.logs.map(e => `
+              <tr class="${e.accessGranted ? '' : 'denied-row'}">
+                <td>${new Date(e.timestamp).toLocaleString()}</td>
+                <td>${e.viewerName || '—'}</td>
+                <td title="${e.documentDID}">${e.documentTitle || (e.documentDID?.substring(0, 20) + '…')}</td>
+                <td>${e.clearanceLevel || '—'}</td>
+                <td>${e.accessGranted ? '✅ Granted' : '❌ Denied'}</td>
+                <td>${e.denialReason || '—'}</td>
+              </tr>`).join('');
+        } catch (err) {
+            console.error('[AccessLogs] Failed to load:', err);
+        }
     }
 };
 

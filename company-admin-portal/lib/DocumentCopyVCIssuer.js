@@ -98,7 +98,7 @@ async function createDocumentCopyCredentialOffer(options) {
   console.log('[DocumentCopyVCIssuer]   Expires:', accessRights.expiresAt);
 
   try {
-    const response = await fetch(`${CLOUD_AGENT_URL}/cloud-agent/issue-credentials/credential-offers`, {
+    const response = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/credential-offers`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

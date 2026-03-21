@@ -5,7 +5,8 @@
  * Supports data-clearance attributes on sections, paragraphs, spans, tables, etc.
  *
  * Clearance Hierarchy (Standardized to CA Portal names):
- * - INTERNAL (1) - Basic organizational access
+ * - UNCLASSIFIED (0) - Public access, no VC required
+ * - INTERNAL (1) - Basic organizational access (requires VC)
  * - CONFIDENTIAL (2) - Sensitive business information
  * - RESTRICTED (3) - Highly sensitive strategic information
  * - TOP-SECRET (4) - Classified information (highest)
@@ -16,10 +17,12 @@ const crypto = require('crypto');
 
 // Clearance level hierarchy (standardized to CA Portal naming)
 const CLEARANCE_LEVELS = {
+  'UNCLASSIFIED': 0,
   'INTERNAL': 1,
   'CONFIDENTIAL': 2,
   'RESTRICTED': 3,
-  'TOP-SECRET': 4
+  'SECRET': 4,
+  'TOP-SECRET': 4  // legacy alias
 };
 
 const VALID_CLEARANCE_VALUES = Object.keys(CLEARANCE_LEVELS);
@@ -101,7 +104,7 @@ function parseClearanceSections(htmlString) {
     sections.unshift({
       sectionId: 'sec-000',
       clearance: 'UNCLASSIFIED',
-      clearanceLevel: 1,
+      clearanceLevel: 0,
       tagName: 'div',
       isInline: false,
       title: 'Public Content',
@@ -224,7 +227,8 @@ function determineOverallClassification(sections) {
   }
 
   // Find the LOWEST clearance level (least restrictive)
-  // This determines who can access the document (with redactions for higher sections)
+  // This determines the minimum clearance needed to access the document at all
+  // Higher sections are redacted for users below that section's level
   let lowestLevel = 4; // Start with TOP_SECRET
 
   for (const section of sections) {

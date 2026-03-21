@@ -7,7 +7,8 @@
  * METHOD 1: PARAGRAPH STYLES (Recommended - User-Friendly)
  * =========================================================
  * Users apply predefined paragraph styles from Word's style dropdown:
- * - "Internal" or "Public" → INTERNAL
+ * - "Unclassified" or "Public" → UNCLASSIFIED
+ * - "Internal" → INTERNAL
  * - "Confidential" → CONFIDENTIAL
  * - "Restricted" → RESTRICTED
  * - "TopSecret" or "Top-Secret" → TOP-SECRET
@@ -41,15 +42,16 @@ const WORD_NS = {
 // Style name to clearance level mapping (case-insensitive)
 // Users apply these styles from Word's style dropdown
 const STYLE_CLEARANCE_MAP = {
+  // Unclassified styles (level 0) - no VC required
+  'unclassified': 'UNCLASSIFIED',
+  'public': 'UNCLASSIFIED',
+  'clearance_unclassified': 'UNCLASSIFIED',
+  'clearanceunclassified': 'UNCLASSIFIED',
+
   // Internal styles (level 1)
   'internal': 'INTERNAL',
-  'public': 'INTERNAL',
   'clearance_internal': 'INTERNAL',
   'clearanceinternal': 'INTERNAL',
-  // Legacy: map old names for backward compatibility
-  'unclassified': 'INTERNAL',
-  'clearance_unclassified': 'INTERNAL',
-  'clearanceunclassified': 'INTERNAL',
 
   // Confidential styles (level 2)
   'confidential': 'CONFIDENTIAL',
@@ -61,17 +63,17 @@ const STYLE_CLEARANCE_MAP = {
   'clearance_restricted': 'RESTRICTED',
   'clearancerestricted': 'RESTRICTED',
   // Legacy: map old SECRET to RESTRICTED
-  'secret': 'RESTRICTED',
-  'clearance_secret': 'RESTRICTED',
-  'clearancesecret': 'RESTRICTED',
+  'secret': 'SECRET',
+  'clearance_secret': 'SECRET',
+  'clearancesecret': 'SECRET',
 
-  // Top Secret styles (level 4)
-  'topsecret': 'TOP-SECRET',
-  'top_secret': 'TOP-SECRET',
-  'top-secret': 'TOP-SECRET',
-  'clearance_topsecret': 'TOP-SECRET',
-  'clearance_top_secret': 'TOP-SECRET',
-  'clearancetopsecret': 'TOP-SECRET'
+  // Secret/Top Secret styles (level 4)
+  'topsecret': 'SECRET',
+  'top_secret': 'SECRET',
+  'top-secret': 'SECRET',
+  'clearance_topsecret': 'SECRET',
+  'clearance_top_secret': 'SECRET',
+  'clearancetopsecret': 'SECRET'
 };
 
 /**
@@ -191,13 +193,13 @@ async function parseDocxClearanceSections(docxBuffer) {
     }
   }
 
-  // Extract unmarked content (treated as INTERNAL)
+  // Extract unmarked content (treated as UNCLASSIFIED)
   const unclassifiedContent = await extractUnmarkedContent(doc, sections);
   if (unclassifiedContent && unclassifiedContent.textLength > 0) {
     sections.unshift({
       sectionId: 'sec-000',
-      clearance: 'INTERNAL',
-      clearanceLevel: 1,
+      clearance: 'UNCLASSIFIED',
+      clearanceLevel: 0,
       tagName: 'div',
       isInline: false,
       title: 'Public Content',
@@ -751,7 +753,8 @@ function determineOverallClassification(sections) {
   }
 
   // Find the LOWEST clearance level (least restrictive)
-  // This determines who can access the document (with redactions for higher sections)
+  // This determines the minimum clearance needed to access the document at all
+  // Higher sections are redacted for users below that section's level
   let lowestLevel = 4; // Start with TOP-SECRET
   for (const section of sections) {
     if (section.clearanceLevel < lowestLevel) {
@@ -772,6 +775,7 @@ function calculateClearanceStats(sections) {
     'INTERNAL': 0,
     'CONFIDENTIAL': 0,
     'RESTRICTED': 0,
+    'SECRET': 0,
     'TOP-SECRET': 0
   };
 

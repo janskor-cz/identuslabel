@@ -393,10 +393,10 @@
                                         Access to restricted materials and high-security environments
                                     </div>
                                 </div>
-                                <div class="clearance-level-card" data-level="top-secret">
+                                <div class="clearance-level-card" data-level="secret">
                                     <div class="clearance-level-title">
                                         <i class="fas fa-user-secret me-2"></i>
-                                        Top Secret
+                                        Secret
                                     </div>
                                     <div class="clearance-level-desc">
                                         Highest level clearance for classified and sensitive operations
@@ -497,6 +497,14 @@
                         </button>
                     </form>
                 </div>
+
+                <!-- Back to Dashboard -->
+                <div class="text-center mt-3">
+                    <a id="backToDashboardBtn" href="/ca/dashboard" class="btn btn-secondary">
+                        <i class="fas fa-arrow-left me-2"></i>
+                        Back to Dashboard
+                    </a>
+                </div>
             </div>
         </div>
     </div>
@@ -592,6 +600,12 @@
                 // Also store the sessionId directly for easy access
                 authData.sessionId = bridgeResult.sessionId;
                 sessionStorage.setItem('ca_auth', JSON.stringify(authData));
+
+                // Update back button with session ID
+                const backBtn = document.getElementById('backToDashboardBtn');
+                if (backBtn && authData.sessionId) {
+                    backBtn.href = BASE_PATH + '/dashboard?session=' + encodeURIComponent(authData.sessionId);
+                }
 
                 // Now display the security clearance form
                 displaySecurityClearanceForm();

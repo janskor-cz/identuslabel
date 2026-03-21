@@ -13,13 +13,13 @@
  * - INTERNAL (1): Basic organizational access
  * - CONFIDENTIAL (2): Sensitive business information
  * - RESTRICTED (3): Highly sensitive strategic information
- * - TOP_SECRET (4): Classified information (highest)
+ * - SECRET (4): Classified information (highest)
  */
 export enum SecurityLevel {
   INTERNAL = 1,
   CONFIDENTIAL = 2,
   RESTRICTED = 3,
-  TOP_SECRET = 4
+  SECRET = 4
 }
 
 /**
@@ -29,19 +29,19 @@ export const SECURITY_LEVEL_NAMES: Record<SecurityLevel, string> = {
   [SecurityLevel.INTERNAL]: 'INTERNAL',
   [SecurityLevel.CONFIDENTIAL]: 'CONFIDENTIAL',
   [SecurityLevel.RESTRICTED]: 'RESTRICTED',
-  [SecurityLevel.TOP_SECRET]: 'TOP-SECRET'
+  [SecurityLevel.SECRET]: 'SECRET'
 } as const;
 
 /**
  * Parse a security level string into the SecurityLevel enum
  * Handles various formats (hyphenated, underscored, lowercase, uppercase)
  *
- * @param level - Security level string (e.g., "restricted", "TOP-SECRET", "top_secret", "internal")
+ * @param level - Security level string (e.g., "restricted", "SECRET", "internal")
  * @returns SecurityLevel enum value
  *
  * @example
  * parseSecurityLevel("restricted") // SecurityLevel.RESTRICTED
- * parseSecurityLevel("TOP-SECRET") // SecurityLevel.TOP_SECRET
+ * parseSecurityLevel("SECRET") // SecurityLevel.SECRET
  * parseSecurityLevel("confidential") // SecurityLevel.CONFIDENTIAL
  * parseSecurityLevel("internal") // SecurityLevel.INTERNAL
  */
@@ -50,11 +50,11 @@ export function parseSecurityLevel(level: string): SecurityLevel {
   const normalized = level.toUpperCase().replace(/-/g, '_');
 
   switch (normalized) {
-    case 'TOP_SECRET':
-    case 'TOPSECRET':
-      return SecurityLevel.TOP_SECRET;
+    case 'SECRET':
+    case 'TOP_SECRET':   // Legacy: map old TOP_SECRET to SECRET
+    case 'TOPSECRET':    // Legacy: map old TOPSECRET to SECRET
+      return SecurityLevel.SECRET;
     case 'RESTRICTED':
-    case 'SECRET':  // Legacy: map old SECRET to RESTRICTED
       return SecurityLevel.RESTRICTED;
     case 'CONFIDENTIAL':
       return SecurityLevel.CONFIDENTIAL;
@@ -70,7 +70,7 @@ export function parseSecurityLevel(level: string): SecurityLevel {
  * at a specific classification level.
  *
  * Access Rule: userClearance >= messageClearance
- * - TOP-SECRET clearance can decrypt: top-secret, restricted, confidential, internal
+ * - SECRET clearance can decrypt: secret, restricted, confidential, internal
  * - RESTRICTED clearance can decrypt: restricted, confidential, internal
  * - CONFIDENTIAL clearance can decrypt: confidential, internal
  * - INTERNAL clearance can decrypt: internal only
@@ -95,7 +95,7 @@ export function canDecrypt(userLevel: SecurityLevel, messageLevel: SecurityLevel
  */
 export function getLevelColor(level: SecurityLevel): string {
   switch (level) {
-    case SecurityLevel.TOP_SECRET:
+    case SecurityLevel.SECRET:
       return 'red';
     case SecurityLevel.RESTRICTED:
       return 'orange';
@@ -144,5 +144,5 @@ export function getAccessibleLevels(userLevel: SecurityLevel): SecurityLevel[] {
  * @returns true if valid, false otherwise
  */
 export function isValidSecurityLevel(level: number): boolean {
-  return level >= SecurityLevel.INTERNAL && level <= SecurityLevel.TOP_SECRET;
+  return level >= SecurityLevel.INTERNAL && level <= SecurityLevel.SECRET;
 }

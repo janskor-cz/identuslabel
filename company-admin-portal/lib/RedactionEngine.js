@@ -170,7 +170,7 @@ function generateRedactedDocument(decryptionResult, options = {}) {
   if (includeWatermark) {
     const watermark = document.createElement('div');
     watermark.className = 'security-watermark';
-    watermark.textContent = metadata.overallClassification || 'CLASSIFIED';
+    watermark.textContent = viewerName || metadata.overallClassification || 'CLASSIFIED';
     body.appendChild(watermark);
   }
 

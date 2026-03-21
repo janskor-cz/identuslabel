@@ -11,7 +11,7 @@
 
 import React from 'react';
 import { ShieldCheckIcon, CameraIcon } from '@heroicons/react/solid';
-import { getClearanceBadgeClasses, getCredentialType, getCredentialSubject } from '@/utils/credentialTypeDetector';
+import { getClearanceBadgeClasses, getCredentialType, getCredentialSubject, getEnterpriseAttr } from '@/utils/credentialTypeDetector';
 
 interface CredentialLayoutProps {
   credential: any;
@@ -48,60 +48,51 @@ export function IDCardLayout({ credential }: CredentialLayoutProps) {
   };
 
   return (
-    <div className="bg-gradient-to-r from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 rounded-2xl p-6">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-white">Identity Credential</h3>
-        <div className="text-xs bg-cyan-500/20 border border-cyan-500/30 px-3 py-1 rounded-full text-cyan-400">
-          ID Card
-        </div>
-      </div>
-
-      {/* Main Content */}
-      <div className="flex gap-6">
-        {/* Photo Placeholder - Empty Square Frame */}
-        <div className="flex-shrink-0">
-          <div className="w-32 h-40 border-4 border-cyan-500/30 rounded-xl flex items-center justify-center bg-slate-800/50">
-            <div className="text-center">
-              <CameraIcon className="w-12 h-12 mx-auto text-cyan-400 opacity-50" />
-              <div className="text-xs mt-2 text-slate-400">Photo</div>
-            </div>
-          </div>
+    <div className="bg-gradient-to-r from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 rounded-xl p-3">
+      <div className="flex gap-3">
+        {/* Photo Placeholder */}
+        <div className="flex-shrink-0 w-14 h-18 border-2 border-cyan-500/30 rounded-lg flex flex-col items-center justify-center bg-slate-800/50 px-2 py-3">
+          <CameraIcon className="w-6 h-6 text-cyan-400 opacity-50" />
+          <div className="text-xs mt-1 text-slate-500">Photo</div>
         </div>
 
         {/* Personal Details */}
-        <div className="flex-1 space-y-2">
-          <div>
-            <div className="text-2xl font-bold text-white">{firstName} {lastName}</div>
-          </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-cyan-400 font-semibold uppercase tracking-wide">Identity</div>
+          <div className="text-base font-bold text-white truncate">{firstName} {lastName}</div>
 
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm mt-4">
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs mt-2">
             <div>
-              <div className="text-cyan-400 text-xs uppercase">Date of Birth</div>
-              <div className="font-medium text-slate-300">{formatDate(dateOfBirth)}</div>
+              <div className="text-cyan-400 uppercase" style={{fontSize:'10px'}}>Date of Birth</div>
+              <div className="text-slate-300">{formatDate(dateOfBirth)}</div>
             </div>
-
             <div>
-              <div className="text-cyan-400 text-xs uppercase">Gender</div>
-              <div className="font-medium text-slate-300">{gender}</div>
+              <div className="text-cyan-400 uppercase" style={{fontSize:'10px'}}>Gender</div>
+              <div className="text-slate-300">{gender}</div>
             </div>
-
             <div className="col-span-2">
-              <div className="text-cyan-400 text-xs uppercase">Unique ID</div>
-              <div className="font-mono text-xs text-slate-300">{uniqueId}</div>
+              <div className="text-cyan-400 uppercase" style={{fontSize:'10px'}}>Unique ID</div>
+              <div className="font-mono text-slate-300 truncate">{uniqueId}</div>
             </div>
           </div>
 
-          <div className="border-t border-slate-700/50 pt-3 mt-4 grid grid-cols-2 gap-x-4 text-xs">
-            <div>
-              <div className="text-cyan-400">Issued</div>
-              <div className="text-slate-300">{formatDate(issuedDate)}</div>
-            </div>
-            <div>
-              <div className="text-cyan-400">Expires</div>
-              <div className="text-slate-300">{formatDate(expiryDate)}</div>
-            </div>
+          <div className="border-t border-slate-700/50 pt-1 mt-2 flex gap-4 text-xs">
+            <div><span className="text-cyan-400">Issued </span><span className="text-slate-300">{formatDate(issuedDate)}</span></div>
+            <div><span className="text-cyan-400">Exp </span><span className="text-slate-300">{formatDate(expiryDate)}</span></div>
           </div>
+
+          {uniqueId !== 'N/A' && (
+            <div className="mt-1">
+              <a
+                href={`https://identuslabel.cz/ca/login?uid=${encodeURIComponent(uniqueId)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300 underline underline-offset-2"
+              >
+                🔐 CA Portal
+              </a>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -154,83 +145,40 @@ export function CertificateLayout({ credential }: CredentialLayoutProps) {
   };
 
   return (
-    <div className="bg-gradient-to-r from-red-500/20 to-rose-500/20 border-2 border-red-500/30 rounded-2xl p-6">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-white">Security Clearance Certificate</h3>
-        <div className="text-xs bg-red-500/30 text-white px-3 py-1 rounded-full font-semibold">
-          {clearanceLevel}
-        </div>
-      </div>
-
-      {/* Main Content */}
-      <div className="flex gap-6">
-        {/* Official Seal Icon */}
-        <div className="flex-shrink-0">
-          <div className="w-24 h-24 rounded-full bg-red-500/20 flex items-center justify-center border-4 border-red-500/30">
-            <ShieldCheckIcon className="w-16 h-16 text-red-400" />
-          </div>
+    <div className="bg-gradient-to-r from-red-500/20 to-rose-500/20 border border-red-500/30 rounded-xl p-3">
+      <div className="flex gap-3">
+        {/* Seal Icon */}
+        <div className="flex-shrink-0 w-12 h-12 rounded-full bg-red-500/20 flex items-center justify-center border-2 border-red-500/30">
+          <ShieldCheckIcon className="w-7 h-7 text-red-400" />
         </div>
 
         {/* Clearance Details */}
-        <div className="flex-1 space-y-3">
-          <div>
-            <div className="text-red-400 text-xs uppercase font-medium">Clearance Level</div>
-            <div className="text-2xl font-bold text-white">{clearanceLevel}</div>
-          </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-red-400 font-semibold uppercase tracking-wide">Security Clearance</div>
+          <div className="text-base font-bold text-white">{clearanceLevel}</div>
 
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs mt-2">
             <div className="col-span-2">
-              <div className="text-red-400 text-xs uppercase">Holder Name</div>
-              <div className="font-medium text-slate-300">{holderName}</div>
+              <div className="text-red-400 uppercase" style={{fontSize:'10px'}}>Holder</div>
+              <div className="text-slate-300 truncate">{holderName}</div>
             </div>
-
             <div className="col-span-2">
-              <div className="text-red-400 text-xs uppercase">Holder ID</div>
-              <div className="font-mono text-xs text-slate-400">{holderUniqueId}</div>
+              <div className="text-red-400 uppercase" style={{fontSize:'10px'}}>Holder ID</div>
+              <div className="font-mono text-slate-400 truncate">{holderUniqueId}</div>
             </div>
           </div>
 
-          <div className="border-t border-slate-700/50 pt-3 grid grid-cols-2 gap-x-4 text-xs">
-            <div>
-              <div className="text-red-400">Issued</div>
-              <div className="text-slate-300">{formatDate(issuedDate)}</div>
-            </div>
-            <div>
-              <div className="text-red-400">Expires</div>
-              <div className="text-slate-300">{formatDate(expiryDate)}</div>
-            </div>
+          <div className="border-t border-slate-700/50 pt-1 mt-2 flex gap-4 text-xs">
+            <div><span className="text-red-400">Issued </span><span className="text-slate-300">{formatDate(issuedDate)}</span></div>
+            <div><span className="text-red-400">Exp </span><span className="text-slate-300">{formatDate(expiryDate)}</span></div>
           </div>
 
-          {/* Cryptographic Keys (Collapsible Detail) */}
           {(ed25519PublicKey || x25519PublicKey) && (
-            <details className="mt-3">
-              <summary className="cursor-pointer text-xs text-red-400 hover:underline">
-                🔑 Cryptographic Keys
-              </summary>
-              <div className="mt-2 space-y-2 text-xs bg-slate-800/50 p-3 rounded-xl">
-                {ed25519PublicKey && (
-                  <div>
-                    <div className="font-semibold text-slate-300">Ed25519 (Signing)</div>
-                    <div className="font-mono text-slate-400">{truncateKey(ed25519PublicKey, 40)}</div>
-                    {ed25519Fingerprint && (
-                      <div className="text-slate-500 text-xs mt-1">
-                        Fingerprint: {ed25519Fingerprint.substring(0, 30)}...
-                      </div>
-                    )}
-                  </div>
-                )}
-                {x25519PublicKey && (
-                  <div>
-                    <div className="font-semibold text-slate-300">X25519 (Encryption)</div>
-                    <div className="font-mono text-slate-400">{truncateKey(x25519PublicKey, 40)}</div>
-                    {x25519Fingerprint && (
-                      <div className="text-slate-500 text-xs mt-1">
-                        Fingerprint: {x25519Fingerprint.substring(0, 30)}...
-                      </div>
-                    )}
-                  </div>
-                )}
+            <details className="mt-2">
+              <summary className="cursor-pointer text-xs text-red-400 hover:underline">🔑 Crypto Keys</summary>
+              <div className="mt-1 space-y-1 text-xs bg-slate-800/50 p-2 rounded-lg">
+                {ed25519PublicKey && <div><span className="text-slate-400">Ed25519: </span><span className="font-mono text-slate-500">{truncateKey(ed25519PublicKey, 30)}</span></div>}
+                {x25519PublicKey && <div><span className="text-slate-400">X25519: </span><span className="font-mono text-slate-500">{truncateKey(x25519PublicKey, 30)}</span></div>}
               </div>
             </details>
           )}
@@ -240,11 +188,154 @@ export function CertificateLayout({ credential }: CredentialLayoutProps) {
   );
 }
 
+function EnterpriseIDLayout({ credential }: { credential: any }) {
+  const role = getEnterpriseAttr(credential, 'role');
+  const company = getEnterpriseAttr(credential, 'companyName');
+  const department = getEnterpriseAttr(credential, 'department');
+  const email = getEnterpriseAttr(credential, 'email');
+  const employeeId = getEnterpriseAttr(credential, 'employeeId');
+  const issued = credential.issuedAt ? new Date(credential.issuedAt).toLocaleDateString() : '—';
+
+  return (
+    <div className="bg-gradient-to-r from-indigo-500/20 to-blue-500/20 rounded-xl p-4 border border-indigo-500/30">
+      <div className="flex items-start gap-4">
+        <div className="flex-shrink-0 w-14 h-14 rounded-full bg-indigo-500/30 flex items-center justify-center text-2xl">🏢</div>
+        <div className="flex-1 grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+          <div className="col-span-2">
+            <div className="text-xs text-indigo-400 font-semibold uppercase tracking-wide">Role</div>
+            <div className="text-white font-bold text-base">{role || '—'}</div>
+          </div>
+          <div><div className="text-xs text-slate-400">Company</div><div className="text-slate-200">{company || '—'}</div></div>
+          <div><div className="text-xs text-slate-400">Department</div><div className="text-slate-200">{department || '—'}</div></div>
+          <div><div className="text-xs text-slate-400">Email</div><div className="text-slate-200 truncate">{email || '—'}</div></div>
+          <div><div className="text-xs text-slate-400">Employee ID</div><div className="text-slate-300 font-mono text-xs">{employeeId || '—'}</div></div>
+          <div><div className="text-xs text-slate-400">Issued</div><div className="text-slate-200">{issued}</div></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CISTrainingLayout({ credential }: { credential: any }) {
+  const employeeName = getEnterpriseAttr(credential, 'employeeName');
+  const trainingYear = getEnterpriseAttr(credential, 'trainingYear');
+  const completionDate = getEnterpriseAttr(credential, 'completionDate');
+  const certNumber = getEnterpriseAttr(credential, 'certificateNumber');
+  const employeeId = getEnterpriseAttr(credential, 'employeeId');
+
+  return (
+    <div className="bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-xl p-4 border border-green-500/30">
+      <div className="flex items-start gap-4">
+        <div className="flex-shrink-0 w-14 h-14 rounded-full bg-green-500/30 flex items-center justify-center text-2xl">🎓</div>
+        <div className="flex-1 grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+          <div className="col-span-2 flex items-center gap-3">
+            <div>
+              <div className="text-xs text-green-400 font-semibold uppercase tracking-wide">CIS/ICS Training</div>
+              <div className="text-white font-bold text-base">{employeeName || '—'}</div>
+            </div>
+            {trainingYear && (
+              <span className="px-2 py-0.5 text-xs font-bold bg-green-500/30 text-green-300 border border-green-500/40 rounded-full">{trainingYear}</span>
+            )}
+          </div>
+          <div><div className="text-xs text-slate-400">Completion Date</div><div className="text-slate-200">{completionDate || '—'}</div></div>
+          <div><div className="text-xs text-slate-400">Employee ID</div><div className="text-slate-300 font-mono text-xs">{employeeId || '—'}</div></div>
+          <div className="col-span-2"><div className="text-xs text-slate-400">Certificate No.</div><div className="text-slate-300 font-mono text-xs">{certNumber || '—'}</div></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ServiceConfigurationLayout({ credential }: CredentialLayoutProps) {
+  const subject = getCredentialSubject(credential);
+  const url = subject?.enterpriseAgentUrl || '—';
+  const walletId = subject?.enterpriseAgentWalletId || '—';
+  const agentName = subject?.enterpriseAgentName || '—';
+  const apiKey = subject?.enterpriseAgentApiKey || '';
+  const maskedKey = apiKey ? `${apiKey.slice(0, 8)}…${apiKey.slice(-4)}` : '—';
+
+  return (
+    <div className="bg-gradient-to-r from-purple-500/20 to-violet-500/20 rounded-xl p-3 border border-purple-500/30">
+      <div className="flex gap-3">
+        <div className="flex-shrink-0 w-10 h-10 rounded-full bg-purple-500/30 flex items-center justify-center text-lg">⚙️</div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-purple-400 font-semibold uppercase tracking-wide">Enterprise Config</div>
+          <div className="text-sm font-bold text-white truncate">{url}</div>
+          <div className="grid grid-cols-1 gap-y-1 text-xs mt-2">
+            <div><span className="text-purple-400">Wallet ID </span><span className="font-mono text-slate-300">{walletId.slice(0, 18)}…</span></div>
+            <div><span className="text-purple-400">Agent </span><span className="font-mono text-slate-400 truncate block">{agentName.length > 30 ? agentName.slice(0, 30) + '…' : agentName}</span></div>
+            <div><span className="text-purple-400">API Key </span><span className="font-mono text-slate-400">{maskedKey}</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CertificationAuthorityLayout({ credential }: CredentialLayoutProps) {
+  const subject = getCredentialSubject(credential);
+  const orgName = subject?.organizationName || '—';
+  const website = subject?.website || '—';
+  const regNumber = subject?.registrationNumber || '—';
+  const jurisdiction = subject?.jurisdiction || '—';
+  const established = subject?.establishedDate || subject?.issuedDate || '—';
+  const authScope = subject?.authorizationScope || '—';
+
+  return (
+    <div className="bg-gradient-to-r from-amber-500/20 to-yellow-500/20 rounded-xl p-3 border border-amber-500/30">
+      <div className="flex gap-3">
+        <div className="flex-shrink-0 w-10 h-10 rounded-full bg-amber-500/30 flex items-center justify-center text-lg">🏛️</div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-amber-400 font-semibold uppercase tracking-wide">Certification Authority</div>
+          <div className="text-sm font-bold text-white truncate">{orgName}</div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs mt-2">
+            <div><div className="text-amber-400 uppercase" style={{fontSize:'10px'}}>Website</div><div className="text-slate-300 truncate">{website}</div></div>
+            <div><div className="text-amber-400 uppercase" style={{fontSize:'10px'}}>Reg. No.</div><div className="text-slate-300">{regNumber}</div></div>
+            <div><div className="text-amber-400 uppercase" style={{fontSize:'10px'}}>Jurisdiction</div><div className="text-slate-300">{jurisdiction}</div></div>
+            <div><div className="text-amber-400 uppercase" style={{fontSize:'10px'}}>Established</div><div className="text-slate-300">{established}</div></div>
+            <div className="col-span-2"><div className="text-amber-400 uppercase" style={{fontSize:'10px'}}>Scope</div><div className="text-slate-300 truncate">{authScope}</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UnknownCredentialLayout({ credential }: CredentialLayoutProps) {
+  const subject = getCredentialSubject(credential);
+  const entries = subject ? Object.entries(subject).filter(([k]) => k !== 'id') : [];
+
+  return (
+    <div className="bg-slate-800/40 rounded-xl p-3 border border-slate-600/40">
+      <details>
+        <summary className="cursor-pointer flex items-center gap-2 text-sm text-slate-300 select-none">
+          <span className="text-base">❓</span>
+          <span className="font-medium">Unknown credential</span>
+          <span className="ml-auto text-xs text-slate-500">{entries.length} fields — click to expand</span>
+        </summary>
+        <div className="mt-3 space-y-1 text-xs border-t border-slate-700/50 pt-3">
+          {entries.length === 0 ? (
+            <div className="text-slate-500 italic">No subject fields found</div>
+          ) : entries.map(([key, val]) => (
+            <div key={key} className="flex gap-2">
+              <span className="text-slate-400 shrink-0 w-32 truncate">{key}</span>
+              <span className="font-mono text-slate-300 truncate">{String(val)}</span>
+            </div>
+          ))}
+          {credential.issuer && (
+            <div className="flex gap-2 pt-2 border-t border-slate-700/50 mt-2">
+              <span className="text-slate-400 shrink-0 w-32">issuer</span>
+              <span className="font-mono text-slate-500 truncate text-xs">{String(credential.issuer)}</span>
+            </div>
+          )}
+        </div>
+      </details>
+    </div>
+  );
+}
+
 /**
  * Get appropriate layout component based on credential type
- *
- * @param credential - Credential object
- * @returns Layout component (IDCardLayout or CertificateLayout)
  */
 export function getCredentialLayout(credential: any) {
   const type = getCredentialType(credential);
@@ -254,17 +345,15 @@ export function getCredentialLayout(credential: any) {
       return <IDCardLayout credential={credential} />;
     case 'SecurityClearance':
       return <CertificateLayout credential={credential} />;
+    case 'EmployeeRole':
+      return <EnterpriseIDLayout credential={credential} />;
+    case 'CISTrainingCertificate':
+      return <CISTrainingLayout credential={credential} />;
+    case 'ServiceConfiguration':
+      return <ServiceConfigurationLayout credential={credential} />;
+    case 'CertificationAuthorityIdentity':
+      return <CertificationAuthorityLayout credential={credential} />;
     default:
-      // Fallback for unknown types - simple display
-      return (
-        <div className="bg-slate-800/30 border-2 border-slate-700/50 rounded-2xl p-6">
-          <div className="text-slate-300">
-            <div className="font-semibold mb-2">Unknown Credential Type</div>
-            <div className="text-sm text-slate-400">
-              This credential type is not recognized for enhanced display.
-            </div>
-          </div>
-        </div>
-      );
+      return <UnknownCredentialLayout credential={credential} />;
   }
 }

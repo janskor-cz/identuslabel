@@ -18,6 +18,16 @@ function rewriteStatusUrl(url: string): string {
   if (match) {
     return `https://identuslabel.cz/issuer/credential-status/${match[1]}`;
   }
+
+  // Rewrite http://91.99.4.54:8300/cloud-agent/credential-status/xxx to https://identuslabel.cz/enterprise/credential-status/xxx
+  // Enterprise agent uses REST_SERVICE_URL as base, so status URLs include /cloud-agent prefix
+  // Caddy's handle_path /enterprise* strips /enterprise before proxying to port 8300
+  const enterprisePattern = /^http:\/\/91\.99\.4\.54:8300\/cloud-agent\/credential-status\/(.+)$/;
+  const enterpriseMatch = url.match(enterprisePattern);
+  if (enterpriseMatch) {
+    return `https://identuslabel.cz/enterprise/credential-status/${enterpriseMatch[1]}`;
+  }
+
   return url;
 }
 
@@ -96,7 +106,11 @@ export function checkBitAtIndex(
  * @returns CredentialStatus object with revoked/suspended flags
  */
 export async function verifyCredentialStatus(credential: any): Promise<CredentialStatus> {
-  const credentialStatus = credential.credentialStatus;
+  // Try direct property first, then Pluto's properties Map (JWT credentials stored in SDK)
+  let credentialStatus = credential.credentialStatus;
+  if (!credentialStatus && credential.properties && typeof credential.properties.get === 'function') {
+    credentialStatus = credential.properties.get('credentialStatus');
+  }
 
   // If no status list, credential cannot be revoked via this mechanism
   // Accept both 'BitstringStatusListEntry' (W3C v1.0) and 'StatusList2021Entry' (W3C v1.1)
@@ -157,8 +171,10 @@ export async function verifyCredentialsBatch(credentials: any[]): Promise<Map<st
   const groupedByStatusList = new Map<string, any[]>();
 
   for (const cred of credentials) {
-    if (cred.credentialStatus?.statusListCredential) {
-      const url = cred.credentialStatus.statusListCredential;
+    const credStatus = cred.credentialStatus ||
+      (cred.properties && typeof cred.properties.get === 'function' ? cred.properties.get('credentialStatus') : undefined);
+    if (credStatus?.statusListCredential) {
+      const url = credStatus.statusListCredential;
       if (!groupedByStatusList.has(url)) {
         groupedByStatusList.set(url, []);
       }
@@ -182,10 +198,12 @@ export async function verifyCredentialsBatch(credentials: any[]): Promise<Map<st
 
       for (const cred of creds) {
         try {
-          const index = parseInt(cred.credentialStatus.statusListIndex);
-          const statusSize = cred.credentialStatus.statusSize || 1;
+          const cs = cred.credentialStatus ||
+            (cred.properties && typeof cred.properties.get === 'function' ? cred.properties.get('credentialStatus') : undefined);
+          const index = parseInt(cs.statusListIndex);
+          const statusSize = cs.statusSize || 1;
           const statusValue = checkBitAtIndex(bitstring, index, statusSize);
-          const statusPurpose = cred.credentialStatus.statusPurpose;
+          const statusPurpose = cs.statusPurpose;
 
           results.set(cred.id, {
             revoked: statusPurpose === 'revocation' && statusValue === 1,

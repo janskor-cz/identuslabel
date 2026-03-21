@@ -23,7 +23,8 @@ import { isCAVerified, getPinnedCA, pinCA, verifyPinnedCA, hashCredential, isCom
 import { getCloudWalletConfig, verifyServiceConfigNotRevoked, CloudWalletConfig, isCloudWalletConfigValid, getCloudWalletErrorMessage } from '@/utils/cloudWalletConfig';
 import { saveConnectionMetadata, getConnectionMetadata } from '@/utils/connectionMetadata';
 import { EnterpriseAgentClient } from '@/utils/EnterpriseAgentClient';
-import { createLongFormPrismDID } from '@/actions';
+import { createLongFormPrismDID, refreshCredentials } from '@/actions';
+import QRCode from 'react-qr-code';
 
 const ListenerKey = SDK.ListenerKey;
 
@@ -96,6 +97,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
     const CONNECTION_EVENT = ListenerKey.CONNECTION;
     const [connections, setConnections] = React.useState<Array<any>>([]);
     const [oob, setOOB] = React.useState<string>();
+    const [isResolvingUrl, setIsResolvingUrl] = React.useState(false);
     const [alias, setAlias] = React.useState<string>();
 
     // VC Proof Enhancement State (for creating invitations)
@@ -117,6 +119,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
     // Common UI state
     const [showingInvitation, setShowingInvitation] = useState<boolean>(false);
     const [generatedInvitation, setGeneratedInvitation] = useState<string>('');
+    const [shortInvitationUrl, setShortInvitationUrl] = useState<string | null>(null);
     const [inviterIdentity, setInviterIdentity] = useState<any>(null);
     const [inviterLabel, setInviterLabel] = useState<string>('');
 
@@ -323,7 +326,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
         try {
             // 🏢 ENTERPRISE WALLET: Use Cloud Agent API instead of Edge Agent
-            if (walletContext === 'enterprise' && enterpriseConfig) {
+            // Skip when VC proof is requested — Cloud Agent API doesn't support custom attachments;
+            // fall through to local peer DID path which embeds vc-proof-0 properly.
+            if (walletContext === 'enterprise' && enterpriseConfig && !includeVCProof) {
                 console.log('🏢 [ENTERPRISE] Creating invitation via Cloud Agent');
 
                 const client = new EnterpriseAgentClient({
@@ -346,6 +351,14 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
                     if (invitationUrl) {
                         setGeneratedInvitation(invitationUrl);
+                        // Shorten the URL for QR display
+                        fetch('/wallet/api/shorten', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ url: invitationUrl })
+                        }).then(r => r.json()).then(data => {
+                            if (data.shortUrl) setShortInvitationUrl(data.shortUrl);
+                        }).catch(() => setShortInvitationUrl(null));
                         console.log('✅ [ENTERPRISE] Invitation created successfully');
                         console.log(`   Connection ID: ${response.data.connectionId}`);
                         return;
@@ -541,6 +554,14 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
             setGeneratedInvitation(invitationUrl);
             setShowingInvitation(true);
+            // Shorten the URL for QR display
+            fetch('/wallet/api/shorten', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: invitationUrl })
+            }).then(r => r.json()).then(data => {
+                if (data.shortUrl) setShortInvitationUrl(data.shortUrl);
+            }).catch(() => setShortInvitationUrl(null));
         } catch (error) {
             console.error('Error creating invitation:', error);
             throw error;
@@ -556,15 +577,37 @@ export const OOB: React.FC<OOBProps> = (props) => {
         console.log('✅ [OOB] QR code scanned successfully:', result.messageType);
 
         if (result.messageType === 'oob-invitation' || result.messageType === 'ca-identity-verification' || result.messageType === 'peer-did') {
-            // Extract invitation URL or DID from scan result
             const invitationData = result.rawData;
-
-            console.log('📋 [OOB] Populating invitation input from QR scan');
             setOOB(invitationData);
             setShowScanner(false);
 
-            // The existing automatic invitation parsing will trigger via useEffect
-            console.log('✅ [OOB] Invitation populated, auto-parsing will trigger');
+            const resolveAndParse = async () => {
+                let fullUrl = invitationData;
+                try {
+                    const u = new URL(invitationData);
+                    if (/\/wallet\/i\/[a-z0-9]+$/i.test(u.pathname) && !u.searchParams.has('_oob')) {
+                        console.log('🔗 [OOB] Short URL detected in scan, resolving...');
+                        setIsResolvingUrl(true);
+                        const token = u.pathname.split('/').pop();
+                        const r = await fetch(`/wallet/api/shorten?token=${encodeURIComponent(token!)}`);
+                        if (r.ok) {
+                            const { url } = await r.json();
+                            fullUrl = url;
+                            setOOB(fullUrl);
+                            console.log('✅ [OOB] Short URL resolved:', fullUrl);
+                        } else {
+                            console.error('❌ [OOB] Failed to resolve short URL');
+                        }
+                    }
+                } catch {
+                    // Not a valid URL or resolution failed — proceed with original data
+                } finally {
+                    setIsResolvingUrl(false);
+                }
+                triggerInvitationParsing(fullUrl);
+            };
+
+            resolveAndParse();
         } else {
             console.error(`❌ [OOB] Invalid QR code type. Expected invitation, got: ${result.messageType}`);
             setShowScanner(false);
@@ -576,28 +619,53 @@ export const OOB: React.FC<OOBProps> = (props) => {
         console.error('❌ [OOB] QR scan error:', error);
     };
 
-    // ✅ PHASE 1: Automatic invitation parsing when OOB changes
-    // This triggers VC proof verification AUTOMATICALLY when user pastes invitation
-    // ✅ PHASE 3: Added Bob-side invitation state tracking
-    // ✅ BUG FIX 2: Added isParsing guard to prevent React race condition
-    useEffect(() => {
-        const parseAndShowPreview = async () => {
-            if (oob && oob.trim() !== '') {
-                console.log('🔄 [AUTO-PARSE] Invitation pasted, triggering automatic parsing...');
+    // Handle Continue button: resolve short URLs, then trigger parsing
+    const handleContinue = async () => {
+        const input = oob?.trim();
+        if (!input) return;
+        setIsResolvingUrl(true);
+        try {
+            let fullUrl = input;
+            // Detect short URL: path matches /wallet/i/<token> with no _oob param
+            try {
+                const u = new URL(input);
+                if (/^\/wallet\/i\/[a-z0-9]+$/i.test(u.pathname) && !u.searchParams.has('_oob')) {
+                    const token = u.pathname.split('/').pop();
+                    const r = await fetch(`/wallet/api/shorten?token=${encodeURIComponent(token!)}`);
+                    if (!r.ok) {
+                        alert('Could not resolve this short URL. It may have expired. Please use the full invitation URL.');
+                        return;
+                    }
+                    const { url } = await r.json();
+                    fullUrl = url;
+                    setOOB(fullUrl); // Show resolved URL in the textarea
+                }
+            } catch {
+                // Not a parseable URL — treat as raw DID or other format, pass through
+            }
+            await triggerInvitationParsing(fullUrl);
+        } finally {
+            setIsResolvingUrl(false);
+        }
+    };
 
-                // ✅ BUG FIX 2: Set parsing flag before starting parse
-                setIsParsing(true);
+    // Trigger full invitation parsing for a given URL (or current oob if omitted).
+    // Called explicitly by Continue button and QR scan — not automatically on paste.
+    const triggerInvitationParsing = async (urlOverride?: string) => {
+        const targetUrl = urlOverride || oob;
+        if (!targetUrl || targetUrl.trim() === '') return;
 
-                try {
-                    // Parse VC proof and extract invitation data
-                    await parseInvitationWithVCProof();
+        console.log('🔄 [PARSE] Triggering invitation parsing...');
+        setIsParsing(true);
 
-                    // Extract basic invitation data for preview
-                    try {
-                        const urlObj = new URL(oob);
-                        const oobParam = urlObj.searchParams.get('_oob');
+        try {
+            await parseInvitationWithVCProof(targetUrl);
 
-                        if (oobParam && !oobParam.startsWith('did:peer:')) {
+            try {
+                const urlObj = new URL(targetUrl);
+                const oobParam = urlObj.searchParams.get('_oob');
+
+                if (oobParam && !oobParam.startsWith('did:peer:')) {
                             const parseResult = safeBase64ParseJSON(oobParam, 'invitation preview');
                             if (parseResult.isValid) {
                                 const invitation = parseResult.data;
@@ -724,32 +792,30 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                 console.log('ℹ️ [INVITATION STATE] Invitation parsed but record NOT created (user must accept first)');
 
                                 // ✅ Show preview modal automatically after parsing
-                                console.log('✅ [AUTO-PARSE] Opening preview modal...');
+                                console.log('✅ [PARSE] Opening preview modal...');
                                 setShowPreviewModal(true);
                             }
                         }
                     } catch (error) {
                         console.error('Error extracting invitation data:', error);
                     }
-                } finally {
-                    // ✅ BUG FIX 2: Clear parsing flag after completion (success or failure)
-                    setIsParsing(false);
-                }
-            } else if (!isParsing) {
-                // ✅ BUG FIX 2: Only clear state if NOT currently parsing
-                // This prevents clearing correctly-set identity during React render batching
-                console.log('🧹 [AUTO-PARSE] Clearing invitation state (not parsing)');
+        } finally {
+            setIsParsing(false);
+        }
+    };
+
+    // Clear invitation state when the input field is cleared
+    useEffect(() => {
+        if (!oob || oob.trim() === '') {
+            if (!isParsing) {
+                console.log('🧹 [OOB] Clearing invitation state');
                 setInviterIdentity(null);
                 setHasVCRequest(false);
                 setInviterLabel('');
                 setShowPreviewModal(false);
                 setParsedInvitationData(null);
-            } else {
-                console.log('⏸️ [AUTO-PARSE] Skipping state clear - parsing in progress');
             }
-        };
-
-        parseAndShowPreview();
+        }
     }, [oob, isParsing]);
 
     // ✅ PHASE 4 FIX: Open preview modal only when inviterIdentity is ready
@@ -1086,6 +1152,28 @@ export const OOB: React.FC<OOBProps> = (props) => {
                         console.log('✅ [METADATA] Saved cloud wallet metadata for accepted connection (peer-DID path)');
                     }
 
+                    // ✅ PEER VC PERSISTENCE: Store peer RealPersonIdentity VC to Pluto (peer-DID path)
+                    if (inviterIdentity?.vcProof) {
+                        try {
+                            const vcString = typeof inviterIdentity.vcProof === 'string'
+                                ? inviterIdentity.vcProof
+                                : JSON.stringify(inviterIdentity.vcProof);
+                            const credData = Uint8Array.from(Buffer.from(vcString));
+                            const parsedCredential = await agent.pollux.parseCredential(credData, {
+                                type: SDK.Domain.CredentialType.JWT
+                            });
+                            const existingCreds = await agent.pluto.getAllCredentials();
+                            const alreadyExists = existingCreds.some((c) => c.id === parsedCredential.id);
+                            if (!alreadyExists) {
+                                await agent.pluto.storeCredential(parsedCredential);
+                                app.dispatch(refreshCredentials());
+                            }
+                        } catch (e) {
+                            console.error('❌ [PEER VC] Failed to store peer VC (peer-DID path):', e);
+                            // Non-fatal — connection continues
+                        }
+                    }
+
                     // ✅ PHASE 3: Mark connection as established
                     if (invitationId) {
                         try {
@@ -1207,6 +1295,47 @@ export const OOB: React.FC<OOBProps> = (props) => {
                             } else if (isCAInvitation && caAlreadyPinned) {
                                 console.log('✅ [CA INIT] CA identity re-verified successfully');
                                 alert(`✅ Reconnected to known Certification Authority:\n\n${caConfig?.organizationName}\n\nCA identity verified against saved pin.`);
+                            }
+
+                            // ✅ COMPANY VC PERSISTENCE: Store CompanyIdentity VC to Pluto
+                            if (isCompanyInvitation && companyConfig?.credentialJWT) {
+                                try {
+                                    const credData = Uint8Array.from(Buffer.from(companyConfig.credentialJWT));
+                                    const parsedCredential = await agent.pollux.parseCredential(credData, {
+                                        type: SDK.Domain.CredentialType.JWT
+                                    });
+                                    const existingCreds = await agent.pluto.getAllCredentials();
+                                    const alreadyExists = existingCreds.some((c) => c.id === parsedCredential.id);
+                                    if (!alreadyExists) {
+                                        await agent.pluto.storeCredential(parsedCredential);
+                                        app.dispatch(refreshCredentials());
+                                    }
+                                } catch (e) {
+                                    console.error('❌ [COMPANY VC] Failed to store CompanyIdentity VC:', e);
+                                    // Non-fatal — connection continues
+                                }
+                            }
+
+                            // ✅ PEER VC PERSISTENCE: Store peer RealPersonIdentity VC to Pluto (cloud-agent path)
+                            if (inviterIdentity?.vcProof) {
+                                try {
+                                    const vcString = typeof inviterIdentity.vcProof === 'string'
+                                        ? inviterIdentity.vcProof
+                                        : JSON.stringify(inviterIdentity.vcProof);
+                                    const credData = Uint8Array.from(Buffer.from(vcString));
+                                    const parsedCredential = await agent.pollux.parseCredential(credData, {
+                                        type: SDK.Domain.CredentialType.JWT
+                                    });
+                                    const existingCreds = await agent.pluto.getAllCredentials();
+                                    const alreadyExists = existingCreds.some((c) => c.id === parsedCredential.id);
+                                    if (!alreadyExists) {
+                                        await agent.pluto.storeCredential(parsedCredential);
+                                        app.dispatch(refreshCredentials());
+                                    }
+                                } catch (e) {
+                                    console.error('❌ [PEER VC] Failed to store peer VC (cloud-agent path):', e);
+                                    // Non-fatal — connection continues
+                                }
                             }
 
                             // ✅ COMPANY IDENTITY VERIFICATION: Pin company on first successful connection (TOFU)
@@ -1574,8 +1703,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
 
     // Parse invitation URL to extract and validate VC proof and VC requests
-    const parseInvitationWithVCProof = async () => {
-        if (!oob) return;
+    const parseInvitationWithVCProof = async (urlOverride?: string) => {
+        const targetUrl = urlOverride || oob;
+        if (!targetUrl) return;
 
         // ✅ BUG FIX 1: Track if identity has been set by RFC attachment processing
         // This prevents the legacy fallback's else block from overwriting correctly-parsed identity
@@ -1583,7 +1713,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
         try {
             // First try to parse the invitation to check for attachments
-            const urlObj = new URL(oob);
+            const urlObj = new URL(targetUrl);
             const oobParam = urlObj.searchParams.get('_oob');
 
             if (oobParam) {
@@ -1866,12 +1996,19 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     </label>
                                     <textarea
                                         className="w-full p-4 text-sm text-white bg-slate-800/50 rounded-xl border border-slate-700/50 focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 placeholder-slate-500 transition-colors resize-none"
-                                        placeholder="Paste invitation URL or DID..."
-                                        rows={4}
+                                        placeholder="Paste invitation URL or short link (e.g. https://identuslabel.cz/wallet/i/abc123)..."
+                                        rows={3}
                                         value={oob ?? ""}
                                         onChange={handleOnChange}
                                         disabled={showScanner}
                                     />
+                                    <button
+                                        onClick={handleContinue}
+                                        disabled={!oob?.trim() || isResolvingUrl || isParsing}
+                                        className="mt-3 w-full py-3 px-4 text-sm font-semibold rounded-xl transition-all bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        {isResolvingUrl ? '🔗 Resolving...' : isParsing ? '⏳ Parsing...' : '→ Continue'}
+                                    </button>
                                 </div>
 
                                 {/* Simple VC Request Display */}
@@ -2055,14 +2192,34 @@ export const OOB: React.FC<OOBProps> = (props) => {
                         {/* Generated Invitation Display */}
                         {generatedInvitation && (
                             <div className="bg-slate-800/30 rounded-2xl border border-slate-700/50 backdrop-blur-sm p-6">
-                                <h3 className="text-lg font-semibold text-white mb-4">
-                                    📨 Your Invitation
-                                </h3>
-                                <div className="bg-slate-800/50 rounded-xl p-4 mb-4 border border-slate-700/50">
-                                    <p className="text-sm text-slate-300 break-all">
-                                        {generatedInvitation}
-                                    </p>
-                                </div>
+                                <h3 className="text-lg font-semibold text-white mb-4">📨 Your Invitation</h3>
+
+                                {/* QR Code */}
+                                {shortInvitationUrl && (
+                                    <div className="flex flex-col items-center mb-5">
+                                        <div className="bg-white p-3 rounded-xl">
+                                            <QRCode value={shortInvitationUrl} size={200} />
+                                        </div>
+                                        <p className="mt-2 text-xs text-slate-400 font-mono">{shortInvitationUrl}</p>
+                                        <button
+                                            onClick={() => navigator.clipboard.writeText(shortInvitationUrl)}
+                                            className="mt-1 text-xs text-slate-500 hover:text-cyan-400 transition-colors"
+                                        >
+                                            📋 Copy short URL
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Full URL (collapsed, for power users) */}
+                                <details className="mb-4">
+                                    <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-300 transition-colors">
+                                        Show full invitation URL
+                                    </summary>
+                                    <div className="bg-slate-800/50 rounded-xl p-3 mt-2 border border-slate-700/50">
+                                        <p className="text-xs text-slate-300 break-all">{generatedInvitation}</p>
+                                    </div>
+                                </details>
+
                                 <div className="flex space-x-3">
                                     <button
                                         onClick={handleCopyInvitation}
@@ -2077,6 +2234,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     <button
                                         onClick={() => {
                                             setGeneratedInvitation('');
+                                            setShortInvitationUrl(null);
                                             setSelectedCredential(null);
                                             setIncludeVCProof(false);
                                         }}

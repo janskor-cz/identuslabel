@@ -9,8 +9,8 @@
  * Purpose: Support grouped credential display with type-specific layouts
  */
 
-export type CredentialType = 'RealPersonIdentity' | 'SecurityClearance' | 'ServiceConfiguration' | 'EmployeeRole' | 'CISTrainingCertificate' | 'DocumentCopy' | 'CertificationAuthorityIdentity' | 'Unknown';
-export type ClearanceLevel = 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED' | 'TOP-SECRET';
+export type CredentialType = 'RealPersonIdentity' | 'SecurityClearance' | 'ServiceConfiguration' | 'EmployeeRole' | 'CISTrainingCertificate' | 'DocumentCopy' | 'CertificationAuthorityIdentity' | 'CompanyIdentity' | 'Unknown';
+export type ClearanceLevel = 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED' | 'SECRET';
 export type ClearanceColor = 'green' | 'blue' | 'orange' | 'red' | 'gray';
 
 /**
@@ -129,6 +129,7 @@ export function getCredentialType(credential: any): CredentialType {
     if (propsType === 'CISTrainingCertificate') return 'CISTrainingCertificate';
     if (propsType === 'DocumentCopy') return 'DocumentCopy';
     if (propsType === 'CertificationAuthorityIdentity') return 'CertificationAuthorityIdentity';
+    if (propsType === 'CompanyIdentity') return 'CompanyIdentity';
   }
 
   // Legacy checks for backward compatibility
@@ -141,6 +142,7 @@ export function getCredentialType(credential: any): CredentialType {
   if (subjectType === 'CISTrainingCertificate') return 'CISTrainingCertificate';
   if (subjectType === 'DocumentCopy') return 'DocumentCopy';
   if (subjectType === 'CertificationAuthorityIdentity') return 'CertificationAuthorityIdentity';
+  if (subjectType === 'CompanyIdentity') return 'CompanyIdentity';
 
   // Check claims[0].credentialType (alternative location)
   const claimsType = credential.claims?.[0]?.credentialType;
@@ -151,6 +153,7 @@ export function getCredentialType(credential: any): CredentialType {
   if (claimsType === 'CISTrainingCertificate') return 'CISTrainingCertificate';
   if (claimsType === 'DocumentCopy') return 'DocumentCopy';
   if (claimsType === 'CertificationAuthorityIdentity') return 'CertificationAuthorityIdentity';
+  if (claimsType === 'CompanyIdentity') return 'CompanyIdentity';
 
   // Check vc.credentialSubject.credentialType (JWT format)
   const vcType = credential.vc?.credentialSubject?.credentialType;
@@ -161,6 +164,7 @@ export function getCredentialType(credential: any): CredentialType {
   if (vcType === 'CISTrainingCertificate') return 'CISTrainingCertificate';
   if (vcType === 'DocumentCopy') return 'DocumentCopy';
   if (vcType === 'CertificationAuthorityIdentity') return 'CertificationAuthorityIdentity';
+  if (vcType === 'CompanyIdentity') return 'CompanyIdentity';
 
   // Check vc.type array for ServiceConfiguration (W3C VC format)
   const vcTypeArray = credential.vc?.type || credential.type;
@@ -200,6 +204,11 @@ export function getCredentialType(credential: any): CredentialType {
     return 'CertificationAuthorityIdentity';
   }
 
+  // Detect CompanyIdentity by field signature (companyName + registrationNumber)
+  if (subject?.companyName && subject?.registrationNumber) {
+    return 'CompanyIdentity';
+  }
+
   console.warn('[credentialTypeDetector] Could not determine credential type:', credential);
   return 'Unknown';
 }
@@ -211,7 +220,7 @@ export function getCredentialType(credential: any): CredentialType {
  * - INTERNAL: Green (bg-green-500, text-green-800, border-green-600)
  * - CONFIDENTIAL: Blue (bg-blue-500, text-blue-800, border-blue-600)
  * - RESTRICTED: Orange (bg-orange-500, text-orange-800, border-orange-600)
- * - TOP-SECRET: Red (bg-red-500, text-red-800, border-red-600)
+ * - SECRET: Red (bg-red-500, text-red-800, border-red-600)
  *
  * @param level - Clearance level string (case-insensitive)
  * @returns Tailwind color name
@@ -228,8 +237,7 @@ export function getClearanceLevelColor(level: string | undefined): ClearanceColo
       return 'blue';
     case 'RESTRICTED':
       return 'orange';
-    case 'TOP-SECRET':
-    case 'TOP SECRET':
+    case 'SECRET':
     case 'TOPSECRET':
       return 'red';
     default:
@@ -356,6 +364,15 @@ export function getCredentialHolderName(credential: any): string {
     return subject.holderName;
   }
 
+  // ServiceConfiguration: show enterprise agent name or URL
+  if (subject.enterpriseAgentName) return subject.enterpriseAgentName;
+  if (subject.enterpriseAgentUrl) {
+    try {
+      const u = new URL(subject.enterpriseAgentUrl);
+      return u.hostname + u.pathname;
+    } catch { return subject.enterpriseAgentUrl; }
+  }
+
   // Fallback
   return 'Unknown';
 }
@@ -459,4 +476,48 @@ export function getDocumentCopyInfo(credential: any): DocumentCopyInfo | null {
  */
 export function filterDocumentCopyCredentials(credentials: any[]): any[] {
   return credentials.filter(cred => getCredentialType(cred) === 'DocumentCopy');
+}
+
+// Extracts a named attribute value from enterprise credential (JWT claims or AnonCreds attributes)
+export function getEnterpriseAttr(cred: any, name: string): string {
+  // Adapted shape: credentialSubject has the flat fields
+  if (cred.credentialSubject?.[name]) return cred.credentialSubject[name];
+  // JWT format: claims is a plain object
+  if (cred.claims && typeof cred.claims === 'object' && !Array.isArray(cred.claims)) {
+    if (cred.claims[name]) return cred.claims[name];
+  }
+  // AnonCreds format: credentialAttributes is an array of {name, value}
+  const attrs: Array<{name: string, value: string}> = cred.credentialAttributes || [];
+  return attrs.find(a => a.name === name)?.value || '';
+}
+
+// Detects type of an enterprise credential (raw REST API shape — JWT or AnonCreds)
+export function getEnterpriseCredentialType(cred: any): 'EmployeeRole' | 'CISTrainingCertificate' | 'Unknown' {
+  // JWT format: claims is a plain object
+  const claims = (cred.claims && typeof cred.claims === 'object' && !Array.isArray(cred.claims))
+    ? cred.claims : null;
+
+  // Primary: explicit credentialType field
+  const typeFromClaims = claims?.credentialType || '';
+  if (typeFromClaims === 'EmployeeRole') return 'EmployeeRole';
+  if (typeFromClaims === 'CISTrainingCertificate') return 'CISTrainingCertificate';
+
+  // AnonCreds format: credentialAttributes array
+  const attrs: Array<{name: string, value: string}> = cred.credentialAttributes || [];
+  const typeAttr = attrs.find(a => a.name === 'credentialType')?.value || '';
+  if (typeAttr === 'EmployeeRole') return 'EmployeeRole';
+  if (typeAttr === 'CISTrainingCertificate') return 'CISTrainingCertificate';
+
+  // Fallback field-signature detection (JWT)
+  if (claims) {
+    if (claims.employeeId && claims.email && claims.role) return 'EmployeeRole';
+    if (claims.certificateNumber && claims.trainingYear) return 'CISTrainingCertificate';
+  }
+
+  // Fallback field-signature detection (AnonCreds)
+  const names = new Set(attrs.map(a => a.name));
+  if (names.has('employeeId') && names.has('email') && names.has('role')) return 'EmployeeRole';
+  if (names.has('certificateNumber') && names.has('trainingYear')) return 'CISTrainingCertificate';
+
+  return 'Unknown';
 }

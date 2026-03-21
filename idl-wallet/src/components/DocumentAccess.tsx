@@ -27,6 +27,7 @@ import {
   EncryptedDocumentResponse
 } from '@/utils/EphemeralDIDCrypto';
 import { LockClosedIcon, DocumentIcon, ShieldCheckIcon, ExclamationIcon } from '@heroicons/react/solid';
+import { getCredentialType } from '@/utils/credentialTypeDetector';
 
 /**
  * Document metadata from server
@@ -61,6 +62,7 @@ export interface AccessResult {
  */
 type AccessState =
   | 'idle'
+  | 'awaiting_consent'
   | 'generating_keys'
   | 'requesting_access'
   | 'decrypting'
@@ -90,8 +92,73 @@ interface DocumentAccessProps {
   /** Callback when access is complete */
   onAccessComplete?: (success: boolean, copyId?: string) => void;
 
+  /**
+   * Called after successful VC-gate access with the decrypted document data.
+   * Use this to save the document to "My Documents".
+   */
+  onDocumentAccessed?: (data: {
+    plaintext: Uint8Array;
+    ephemeralDID: string;
+    title: string;
+    classification: string;
+    filename: string;
+    mimeType: string;
+  }) => void;
+
   /** Callback to close the modal/component */
   onClose?: () => void;
+
+  /**
+   * Raw credential objects from the wallet store.
+   * When provided, the component uses the VC-based access gate
+   * (POST /api/access-gate/present) instead of the session-based
+   * endpoint. The raw JWT string is extracted from each credential.
+   */
+  credentials?: any[];
+}
+
+/**
+ * Try to extract the raw JWT string from an Identus SDK credential object.
+ *
+ * The SDK stores credentials as JWTCredential objects. We probe multiple
+ * known properties/methods to find the JWT string.
+ */
+function extractCredentialJWT(cred: any): string | null {
+  if (!cred) return null;
+
+  // Helper: a string with exactly 3 dot-separated segments is likely a JWT
+  const isJWT = (s: any): s is string =>
+    typeof s === 'string' && s.split('.').length === 3;
+
+  if (isJWT(cred.id)) return cred.id;
+  if (isJWT(cred.jwt)) return cred.jwt;
+  if (isJWT(cred.string)) return cred.string;
+  if (isJWT(cred.rawJWT)) return cred.rawJWT;
+  if (isJWT(cred.token)) return cred.token;
+
+  // Object with .base64 property (Identus multitenancy agent format)
+  if (cred.base64 && typeof cred.base64 === 'string') {
+    try {
+      const decoded = atob(cred.base64);
+      if (isJWT(decoded)) return decoded;
+    } catch (_) { /* ignore */ }
+  }
+
+  // Base64-encoded JWT string (Identus agent stores credential as base64(JWT))
+  if (typeof cred === 'string') {
+    try {
+      const decoded = atob(cred);
+      if (isJWT(decoded)) return decoded;
+    } catch (_) { /* ignore */ }
+  }
+
+  // Try toString()
+  try {
+    const str = cred.toString?.();
+    if (isJWT(str)) return str;
+  } catch (_) { /* ignore */ }
+
+  return null;
 }
 
 /**
@@ -106,7 +173,7 @@ const getClassificationBadge = (level: number) => {
     case 3:
       return { color: 'bg-orange-100 text-orange-800 border-orange-300', label: 'SECRET' };
     case 4:
-      return { color: 'bg-red-100 text-red-800 border-red-300', label: 'TOP SECRET' };
+      return { color: 'bg-red-100 text-red-800 border-red-300', label: 'SECRET' };
     default:
       return { color: 'bg-gray-100 text-gray-800 border-gray-300', label: 'UNKNOWN' };
   }
@@ -141,6 +208,21 @@ const getProgressStep = (state: AccessState) => {
  *
  * Main component for secure ephemeral document access
  */
+/** Decode a JWT string into a synthetic credential object, then delegate to getCredentialType. */
+function getJWTCredentialType(jwt: string): string {
+  try {
+    const b64 = jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const payload = JSON.parse(atob(padded));
+    // Wrap payload so getCredentialType can read vc.credentialSubject as-is
+    const syntheticCred = { vc: payload.vc, credentialSubject: payload.vc?.credentialSubject };
+    const t = getCredentialType(syntheticCred);
+    return t === 'Unknown' ? 'Credential' : t;
+  } catch {
+    return 'Credential';
+  }
+}
+
 export function DocumentAccess({
   document,
   requestorDID,
@@ -149,7 +231,9 @@ export function DocumentAccess({
   ed25519PrivateKey,
   apiBaseUrl = 'https://identuslabel.cz/company-admin/api',
   onAccessComplete,
-  onClose
+  onDocumentAccessed,
+  onClose,
+  credentials
 }: DocumentAccessProps) {
   // State
   const [accessState, setAccessState] = useState<AccessState>('idle');
@@ -157,6 +241,8 @@ export function DocumentAccess({
   const [copyId, setCopyId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [denialReason, setDenialReason] = useState<string | null>(null);
+  // Each item: the raw JWT, decoded type label, and whether user has selected it
+  const [consentCredentials, setConsentCredentials] = useState<Array<{jwt: string; type: string; selected: boolean}>>([]);
 
   // Ephemeral keypair (stored temporarily during access flow)
   const [ephemeralKeyPair, setEphemeralKeyPair] = useState<EphemeralKeyPair | null>(null);
@@ -166,7 +252,16 @@ export function DocumentAccess({
   const progress = getProgressStep(accessState);
 
   /**
-   * Request document access
+   * Request document access.
+   *
+   * When `credentials` are provided the component uses the VC-based access gate:
+   *   1. GET /api/access-gate/challenge   → receive challenge + presentationDefinition
+   *   2. Build VP from held credential JWTs
+   *   3. POST /api/access-gate/present    → receive encrypted document
+   *   4. Decrypt with ephemeral X25519 key, destroy key (PFS unchanged)
+   *
+   * Falls back to the legacy session-based endpoint when no credentials are
+   * available or when no JWT can be extracted from the credential objects.
    */
   const requestAccess = useCallback(async () => {
     console.log('[DocumentAccess] Starting access request for document:', document.id);
@@ -175,35 +270,129 @@ export function DocumentAccess({
     setErrorMessage(null);
     setDenialReason(null);
 
+    // Generate ephemeral X25519 keypair (PFS — always needed regardless of auth path)
+    const { ephemeralKeyPair, requestPayload } = buildAccessRequest(
+      document.id,
+      requestorDID,
+      issuerDID,
+      clearanceLevel,
+      ed25519PrivateKey
+    );
+    setEphemeralKeyPair(ephemeralKeyPair);
+
+    // Ephemeral public key as base64 (matches server's Buffer.from(..., 'base64'))
+    const ephemeralPublicKeyB64 = ephemeralKeyPair.publicKey; // base64url from generateEphemeralKeyPair
+
     try {
-      // Step 1: Build access request (generates ephemeral keypair + signs)
-      console.log('[DocumentAccess] Building access request...');
-      const { ephemeralKeyPair, requestPayload } = buildAccessRequest(
-        document.id,
-        requestorDID,
-        issuerDID,
-        clearanceLevel,
-        ed25519PrivateKey
-      );
+      // -----------------------------------------------------------------------
+      // VC-BASED ACCESS GATE (preferred — inline VC verification)
+      // -----------------------------------------------------------------------
+      // Use only the credentials the user selected in the consent step (if any),
+      // otherwise fall back to extracting all available JWTs.
+      const credentialJWTs: string[] = consentCredentials.length > 0
+        ? consentCredentials.filter(c => c.selected).map(c => c.jwt)
+        : (() => {
+            const jwts: string[] = [];
+            for (const cred of (credentials || [])) {
+              const jwt = extractCredentialJWT(cred);
+              if (jwt) jwts.push(jwt);
+            }
+            return jwts;
+          })();
 
-      setEphemeralKeyPair(ephemeralKeyPair);
+      if (credentialJWTs.length > 0) {
+        console.log('[DocumentAccess] Using VC-based access gate with', credentialJWTs.length, 'credential(s)');
+        setAccessState('requesting_access');
 
-      // Step 2: Send access request to server
+        // Step A: Get challenge from server
+        const challengeResponse = await fetch(
+          `${apiBaseUrl}/access-gate/challenge?documentDID=${encodeURIComponent(document.id)}`
+        );
+        if (!challengeResponse.ok) {
+          const err = await challengeResponse.json().catch(() => ({}));
+          throw new Error(err.message || `Challenge request failed: ${challengeResponse.status}`);
+        }
+        const { challenge } = await challengeResponse.json();
+        console.log('[DocumentAccess] Challenge received:', challenge?.substring(0, 12), '...');
+
+        // Step B: Build VP (flat structure the server expects)
+        const vp = {
+          '@context': ['https://www.w3.org/2018/credentials/v1'],
+          type: ['VerifiablePresentation'],
+          verifiableCredential: credentialJWTs,
+          proof: {
+            type: 'Ed25519Signature2018',
+            challenge,
+            proofPurpose: 'authentication'
+          }
+        };
+
+        // Step C: POST VP to present endpoint
+        const presentResponse = await fetch(`${apiBaseUrl}/access-gate/present`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            documentDID: document.id,
+            vp,
+            challenge,
+            ephemeralPublicKey: ephemeralPublicKeyB64
+          })
+        });
+
+        const presentResult = await presentResponse.json();
+
+        if (!presentResult.success && !presentResult.granted) {
+          console.log('[DocumentAccess] VC access gate denied:', presentResult.error);
+          setAccessState('denied');
+          setDenialReason(presentResult.message || 'Access denied by server');
+          onAccessComplete?.(false);
+          return;
+        }
+
+        // Step D: Decrypt and destroy ephemeral key (PFS — unchanged)
+        setAccessState('decrypting');
+        const encDoc = presentResult.encryptedDocument || presentResult;
+        const decryptionResult = decryptAndDestroy(encDoc, ephemeralKeyPair);
+
+        setDecryptedContent(decryptionResult.plaintext);
+        setCopyId(decryptionResult.copyId);
+        setAccessState('success');
+
+        console.log('[DocumentAccess] VC-based access granted:', {
+          copyId: decryptionResult.copyId,
+          keyDestroyed: decryptionResult.keyDestroyed,
+          contentLength: decryptionResult.plaintext.length
+        });
+
+        onDocumentAccessed?.({
+          plaintext: decryptionResult.plaintext,
+          ephemeralDID: presentResult.ephemeralDID || decryptionResult.copyId,
+          title: document.title,
+          classification: presentResult.classificationLevel || document.classificationLabel,
+          filename: presentResult.filename || document.filename,
+          mimeType: presentResult.mimeType || 'text/html',
+        });
+
+        onAccessComplete?.(true, decryptionResult.copyId);
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // LEGACY SESSION-BASED FALLBACK
+      // (no credentials available — trust session clearance as before)
+      // -----------------------------------------------------------------------
+      console.log('[DocumentAccess] No credential JWTs available — falling back to session-based access');
       setAccessState('requesting_access');
-      console.log('[DocumentAccess] Sending access request to server...');
 
-      const response = await fetch(`${apiBaseUrl}/ephemeral-documents/${document.id}/access`, {
+      const response = await fetch(`${apiBaseUrl}/ephemeral-documents/access`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestPayload)
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...requestPayload, documentDID: document.id })
       });
 
       const result: AccessResult = await response.json();
 
       if (!result.granted) {
-        // Access denied
         console.log('[DocumentAccess] Access denied:', result.reason);
         setAccessState('denied');
         setDenialReason(result.reason || 'Access denied by server');
@@ -215,18 +404,14 @@ export function DocumentAccess({
         throw new Error('Server response missing encrypted document');
       }
 
-      // Step 3: Decrypt document and DESTROY ephemeral key
       setAccessState('decrypting');
-      console.log('[DocumentAccess] Decrypting document with PFS...');
-
       const decryptionResult = decryptAndDestroy(result.encryptedDocument, ephemeralKeyPair);
 
-      // Step 4: Success!
       setDecryptedContent(decryptionResult.plaintext);
       setCopyId(decryptionResult.copyId);
       setAccessState('success');
 
-      console.log('[DocumentAccess] Document accessed successfully:', {
+      console.log('[DocumentAccess] Session-based access granted:', {
         copyId: decryptionResult.copyId,
         keyDestroyed: decryptionResult.keyDestroyed,
         contentLength: decryptionResult.plaintext.length
@@ -240,7 +425,7 @@ export function DocumentAccess({
       setErrorMessage(error.message || 'Failed to access document');
       onAccessComplete?.(false);
 
-      // Ensure ephemeral key is destroyed even on error
+      // Ensure ephemeral key is destroyed even on error (PFS)
       if (ephemeralKeyPair && !ephemeralKeyPair.destroyed) {
         console.log('[DocumentAccess] Destroying ephemeral key after error...');
         for (let i = 0; i < ephemeralKeyPair.secretKey.length; i++) {
@@ -249,7 +434,42 @@ export function DocumentAccess({
         ephemeralKeyPair.destroyed = true;
       }
     }
-  }, [document, requestorDID, issuerDID, clearanceLevel, ed25519PrivateKey, apiBaseUrl, onAccessComplete]);
+  }, [document, requestorDID, issuerDID, clearanceLevel, ed25519PrivateKey, apiBaseUrl, onAccessComplete, onDocumentAccessed, credentials, consentCredentials]);
+
+  /**
+   * Handle "Request Access" button click.
+   * If VC credentials are available, show consent screen first.
+   * Otherwise, go straight to the legacy flow.
+   */
+  const handleRequestClick = useCallback(() => {
+    const jwtList: string[] = [];
+    if (credentials && credentials.length > 0) {
+      for (const cred of credentials) {
+        const jwt = extractCredentialJWT(cred);
+        if (jwt) jwtList.push(jwt);
+      }
+    }
+    if (jwtList.length > 0) {
+      // Build items pairing the extracted JWT with the type read directly from
+      // the SDK credential object (properties Map) — same path used by the rest of the app
+      const jwtToType = new Map<string, string>();
+      for (const cred of (credentials || [])) {
+        const jwt = extractCredentialJWT(cred);
+        if (jwt) {
+          // Try SDK object path first (local wallet credentials)
+          const sdkType = getCredentialType(cred);
+          // If that failed, decode the JWT directly (enterprise agent credentials are base64 JWT strings)
+          const t = sdkType !== 'Unknown' ? sdkType : getJWTCredentialType(jwt);
+          jwtToType.set(jwt, t === 'Unknown' ? 'Credential' : t);
+        }
+      }
+      const items = jwtList.map(jwt => ({ jwt, type: jwtToType.get(jwt) || 'Credential', selected: true }));
+      setConsentCredentials(items);
+      setAccessState('awaiting_consent');
+    } else {
+      requestAccess();
+    }
+  }, [credentials, requestAccess]);
 
   /**
    * Reset state for new access attempt
@@ -261,6 +481,7 @@ export function DocumentAccess({
     setErrorMessage(null);
     setDenialReason(null);
     setEphemeralKeyPair(null);
+    setConsentCredentials([]);
   }, []);
 
   /**
@@ -302,9 +523,22 @@ export function DocumentAccess({
       );
     }
 
-    // Try to display as text
+    // Try to display as HTML or text
     try {
       const text = new TextDecoder().decode(decryptedContent);
+      const trimmed = text.trimStart();
+      if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html') || trimmed.startsWith('<div')) {
+        const blob = new Blob([decryptedContent], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        return (
+          <iframe
+            src={url}
+            className="w-full h-[32rem] border-2 border-gray-300 rounded-lg"
+            title={document.title}
+            sandbox="allow-same-origin"
+          />
+        );
+      }
       return (
         <pre className="w-full h-96 p-4 bg-gray-50 border-2 border-gray-300 rounded-lg overflow-auto text-sm font-mono">
           {text}
@@ -357,8 +591,62 @@ export function DocumentAccess({
         </div>
       </div>
 
+      {/* Consent Step */}
+      {accessState === 'awaiting_consent' && (
+        <div className="px-6 py-6">
+          <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center gap-2 mb-3">
+              <ShieldCheckIcon className="w-5 h-5 text-blue-600" />
+              <span className="text-blue-800 font-semibold">Select credentials to present</span>
+            </div>
+            <p className="text-sm text-blue-700 mb-3">
+              Choose which credentials to include in the Verifiable Presentation:
+            </p>
+            <ul className="space-y-2">
+              {consentCredentials.map((item, i) => (
+                <li key={i} className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    id={`cred-${i}`}
+                    checked={item.selected}
+                    onChange={() =>
+                      setConsentCredentials(prev =>
+                        prev.map((c, idx) => idx === i ? { ...c, selected: !c.selected } : c)
+                      )
+                    }
+                    className="w-4 h-4 text-blue-600 rounded"
+                  />
+                  <label htmlFor={`cred-${i}`} className="text-sm text-blue-800 cursor-pointer select-none">
+                    {item.type}
+                  </label>
+                </li>
+              ))}
+            </ul>
+            {consentCredentials.every(c => !c.selected) && (
+              <p className="mt-3 text-xs text-red-600">Select at least one credential to proceed.</p>
+            )}
+          </div>
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={resetAccess}
+              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={requestAccess}
+              disabled={consentCredentials.every(c => !c.selected)}
+              className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              <ShieldCheckIcon className="w-5 h-5" />
+              Confirm & Present
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Progress Indicator */}
-      {accessState !== 'idle' && accessState !== 'success' && accessState !== 'denied' && accessState !== 'error' && (
+      {accessState !== 'idle' && accessState !== 'awaiting_consent' && accessState !== 'success' && accessState !== 'denied' && accessState !== 'error' && (
         <div className="px-6 py-4 bg-blue-50 border-b border-blue-200">
           <div className="flex items-center gap-3">
             <svg className="animate-spin h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -472,7 +760,7 @@ export function DocumentAccess({
               </button>
             )}
             <button
-              onClick={requestAccess}
+              onClick={handleRequestClick}
               className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"
             >
               <LockClosedIcon className="w-5 h-5" />

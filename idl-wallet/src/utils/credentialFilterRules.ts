@@ -17,6 +17,7 @@ import { CredentialType, getCredentialType } from './credentialTypeDetector';
 export const SYSTEM_CREDENTIAL_BLOCKLIST: CredentialType[] = [
   'CertificationAuthorityIdentity',  // CA identity - internal use only
   'ServiceConfiguration',            // Enterprise config - contains API keys
+  'CompanyIdentity',                 // Company identity - internal use only
 ];
 
 /**

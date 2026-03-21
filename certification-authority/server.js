@@ -2699,19 +2699,28 @@ app.get('/api/credentials/revocable', async (req, res) => {
   try {
     console.log('📋 [REVOCATION] Fetching revocable credentials...');
 
-    const response = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': API_KEY,
+    // Paginate through all records (cloud agent default limit is 100)
+    let allContents = [];
+    let offset = 0;
+    const pageSize = 100;
+    while (true) {
+      const response = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records?limit=${pageSize}&offset=${offset}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': API_KEY,
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Cloud Agent responded with ${response.status}: ${await response.text()}`);
       }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Cloud Agent responded with ${response.status}: ${await response.text()}`);
+      const page = await response.json();
+      const contents = page.contents || [];
+      allContents = allContents.concat(contents);
+      if (contents.length < pageSize) break;
+      offset += pageSize;
     }
-
-    const data = await response.json();
+    const data = { contents: allContents };
 
     // Filter for credentials that have credentialStatus in the JWT (revocable credentials)
     // Also filter for CredentialSent or CredentialRevoked states
@@ -4818,7 +4827,7 @@ app.get('/api/dashboard/encrypted-content', async (req, res) => {
 
     // CRITICAL: Exclude PUBLIC sections (requiredLevel = 0)
     // PUBLIC content should NEVER be encrypted - only sent via /api/dashboard/content
-    // Only encrypt sections with requiredLevel > 0 (INTERNAL, CONFIDENTIAL, RESTRICTED, TOP-SECRET)
+    // Only encrypt sections with requiredLevel > 0 (INTERNAL, CONFIDENTIAL, RESTRICTED, SECRET)
     const sections = allSections.filter(section => {
       const requiredLevel = section.requiredLevel || 0;
       return requiredLevel > 0;
@@ -4931,11 +4940,11 @@ app.post('/api/test/create-session-with-clearance', (req, res) => {
   const { clearanceLevel } = req.body;
 
   // Validate clearance level
-  const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
+  const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'];
   if (!clearanceLevel || !validLevels.includes(clearanceLevel.toUpperCase())) {
     return res.status(400).json({
       success: false,
-      error: 'Invalid clearance level. Must be one of: INTERNAL, CONFIDENTIAL, RESTRICTED, TOP-SECRET'
+      error: 'Invalid clearance level. Must be one of: INTERNAL, CONFIDENTIAL, RESTRICTED, SECRET'
     });
   }
 
@@ -4978,11 +4987,11 @@ app.post('/api/test/create-session-with-encryption', (req, res) => {
   const { clearanceLevel } = req.body;
 
   // Validate clearance level
-  const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
+  const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'];
   if (!clearanceLevel || !validLevels.includes(clearanceLevel.toUpperCase())) {
     return res.status(400).json({
       success: false,
-      error: 'Invalid clearance level. Must be one of: INTERNAL, CONFIDENTIAL, RESTRICTED, TOP-SECRET'
+      error: 'Invalid clearance level. Must be one of: INTERNAL, CONFIDENTIAL, RESTRICTED, SECRET'
     });
   }
 
@@ -5075,11 +5084,19 @@ app.post('/api/session/bridge', async (req, res) => {
 
     console.log(`🌉 Creating server session for user: ${userData.uniqueId}`);
 
+    // Also ensure user connection mapping exists
+    let connectionInfo = null;
+    if (global.userConnectionMappings && global.userConnectionMappings.has(userData.uniqueId)) {
+      connectionInfo = global.userConnectionMappings.get(userData.uniqueId);
+      console.log(`🔗 Found existing connection mapping: ${connectionInfo.connectionId}`);
+    }
+
     // Create or update server-side session
     const session = {
       sessionId: finalSessionId,
       authenticated: true,
       userData: userData,
+      connectionId: connectionInfo?.connectionId || null,
       createdAt: createdAt || new Date().toISOString(),
       authenticatedAt: authenticatedAt || new Date().toISOString(),
       bridgedAt: new Date().toISOString()
@@ -5089,14 +5106,7 @@ app.post('/api/session/bridge', async (req, res) => {
     global.userSessions.set(finalSessionId, session);
 
     console.log(`✅ Session bridge successful for session: ${finalSessionId.substring(0, 8)}...`);
-    console.log(`✅ Session stored for user: ${userData.firstName} ${userData.lastName} (${userData.uniqueId})`);
-
-    // Also ensure user connection mapping exists
-    let connectionInfo = null;
-    if (global.userConnectionMappings && global.userConnectionMappings.has(userData.uniqueId)) {
-      connectionInfo = global.userConnectionMappings.get(userData.uniqueId);
-      console.log(`🔗 Found existing connection mapping: ${connectionInfo.connectionId}`);
-    }
+    console.log(`✅ Session stored for user: ${userData.firstName} ${userData.lastName} (${userData.uniqueId}), connectionId: ${session.connectionId || 'none'}`);
 
     // Check if userData contains holder's PRISM DID (from credentialSubject.id)
     const holderPrismDID = userData.id || null;
@@ -5668,7 +5678,7 @@ app.post('/api/credentials/issue-security-clearance', async (req, res) => {
     }
 
     // Validate clearance level
-    const validLevels = ['internal', 'confidential', 'restricted', 'top-secret'];
+    const validLevels = ['internal', 'confidential', 'restricted', 'secret'];
     if (!validLevels.includes(clearanceLevel)) {
       return res.status(400).json({
         success: false,
@@ -5814,7 +5824,7 @@ app.post('/api/credentials/issue-security-clearance', async (req, res) => {
       'internal': 1,
       'confidential': 2,
       'restricted': 3,
-      'top-secret': 5
+      'secret': 5
     };
 
     const issuedDate = new Date();
@@ -5847,7 +5857,7 @@ app.post('/api/credentials/issue-security-clearance', async (req, res) => {
         expiryDate: expiryDate.toISOString().split('T')[0],
         clearanceId: clearanceId,
         issuingAuthority: 'Certification Authority',
-        requiresMultiFactorAuth: clearanceLevel === 'top-secret' || clearanceLevel === 'restricted',
+        requiresMultiFactorAuth: clearanceLevel === 'secret' || clearanceLevel === 'restricted',
         allowsDigitalSigning: !!validatedEd25519Key,  // Only if Ed25519 provided
         allowsEncryption: true
       };
@@ -5880,7 +5890,7 @@ app.post('/api/credentials/issue-security-clearance', async (req, res) => {
         holderUniqueId: session.userData.uniqueId,
         holderName: `${session.userData.firstName} ${session.userData.lastName}`,
         issuingAuthority: 'Certification Authority',
-        requiresMultiFactorAuth: clearanceLevel === 'top-secret' || clearanceLevel === 'restricted',
+        requiresMultiFactorAuth: clearanceLevel === 'secret' || clearanceLevel === 'restricted',
         allowsDigitalSigning: true,
         allowsEncryption: true
       };
@@ -5910,7 +5920,7 @@ app.post('/api/credentials/issue-security-clearance', async (req, res) => {
     // Enrich claims with W3C-compliant metadata
     const validityPeriods = {
       'confidential': 63072000,    // 2 years
-      'top-secret': 31536000,      // 1 year
+      'secret': 31536000,          // 1 year
       'restricted': 15768000,      // 6 months
       'internal': 31536000         // 1 year
     };
@@ -6096,7 +6106,7 @@ app.post('/api/didcomm/request-security-clearance', async (req, res) => {
     }
 
     // Validate clearance level
-    const validLevels = ['internal', 'confidential', 'restricted', 'top-secret'];
+    const validLevels = ['internal', 'confidential', 'restricted', 'secret'];
     if (!validLevels.includes(clearanceLevel.toLowerCase())) {
       return res.status(400).json({
         success: false,
@@ -6360,7 +6370,7 @@ app.post('/api/didcomm/request-security-clearance', async (req, res) => {
         expiryDate: expiryDate.toISOString().split('T')[0],
         clearanceId: clearanceId,
         issuingAuthority: 'Certification Authority',
-        requiresMultiFactorAuth: clearanceLevel === 'top-secret' || clearanceLevel === 'restricted',
+        requiresMultiFactorAuth: clearanceLevel === 'secret' || clearanceLevel === 'restricted',
         allowsDigitalSigning: true,
         allowsEncryption: true
       };
@@ -7150,17 +7160,26 @@ app.post('/api/send-didcomm-message', async (req, res) => {
 // API endpoint to get pending credential requests (waiting for admin approval)
 app.get('/api/credentials/pending', async (req, res) => {
   try {
-    const response = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records`, {
-      headers: {
+    // Fetch all pages to avoid missing records beyond the default limit
+    let allRecords = [];
+    let offset = 0;
+    const pageSize = 100;
+    while (true) {
+      const response = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records?limit=${pageSize}&offset=${offset}`, {
+        headers: {
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Cloud Agent error: ${response.status}`);
       }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Cloud Agent error: ${response.status}`);
+      const data = await response.json();
+      const page = data.contents || [];
+      allRecords = allRecords.concat(page);
+      if (page.length < pageSize) break;
+      offset += pageSize;
     }
-    
-    const data = await response.json();
-    
+    const data = { contents: allRecords };
+
     // Filter for credentials that are waiting for admin approval (only RequestReceived state)
     // and exclude any that have been rejected by admin
     const pendingRequests = data.contents?.filter(record => {
@@ -7399,9 +7418,17 @@ app.get('/api/proxy-statuslist', async (req, res) => {
 
     console.log(`📋 [PROXY] Fetching StatusList from Cloud Agent: ${statusListPath}`);
 
-    // Fetch from Cloud Agent (internal HTTP is fine since server-to-server)
-    const cloudAgentUrl = `${CLOUD_AGENT_URL}${statusListPath}`;
-    const response = await fetch(cloudAgentUrl);
+    // The statusListPath is a full pathname like /cloud-agent/credential-status/...
+    // CLOUD_AGENT_URL already ends with /cloud-agent, so strip that prefix to avoid doubling.
+    const agentPrefix = new URL(CLOUD_AGENT_URL).pathname; // e.g. /cloud-agent
+    const relativePath = statusListPath.startsWith(agentPrefix)
+      ? statusListPath.slice(agentPrefix.length)
+      : statusListPath;
+    const cloudAgentUrl = `${CLOUD_AGENT_URL}${relativePath}`;
+    console.log(`📋 [PROXY] Resolved URL: ${cloudAgentUrl}`);
+    const response = await fetch(cloudAgentUrl, {
+      headers: { 'apikey': API_KEY }
+    });
 
     if (!response.ok) {
       throw new Error(`Cloud Agent returned ${response.status}`);

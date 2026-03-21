@@ -37,7 +37,7 @@ export interface StoredDocument {
   ephemeralDID: string;                // Primary key
   originalDocumentDID: string;         // Source document DID
   title: string;                       // Document title
-  overallClassification: string;       // UNCLASSIFIED | CONFIDENTIAL | SECRET | TOP_SECRET
+  overallClassification: string;       // UNCLASSIFIED | CONFIDENTIAL | SECRET
   encryptedContent: ArrayBuffer;       // Encrypted document bytes (empty if using serviceEndpoint)
   encryptionInfo: {                    // Decryption metadata
     serverPublicKey: string;           // Server's X25519 public key (base64)

@@ -469,7 +469,7 @@
       showDecryptionStatus('Opening wallet...', 'info');
 
       // Open new wallet window (smaller size for decryption only)
-      const walletUrl = 'https://identuslabel.cz/alice';
+      const walletUrl = 'https://identuslabel.cz/wallet';
       walletWindow = window.open(walletUrl, 'identus-wallet-decrypt', 'width=450,height=650,menubar=no,toolbar=no,location=no');
 
       if (!walletWindow) {
@@ -1093,7 +1093,7 @@
         'INTERNAL': '#2196F3',
         'CONFIDENTIAL': '#FF9800',
         'RESTRICTED': '#9C27B0',
-        'TOP-SECRET': '#F44336'
+        'SECRET': '#F44336'
       };
       return colors[level] || '#9E9E9E';
     }

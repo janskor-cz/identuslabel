@@ -57,7 +57,7 @@ const getClassificationBadge = (level: string) => {
     case 'SECRET':
       return { color: 'bg-red-500/20 text-red-400 border-red-500/30', label: 'SECRET' };
     case 'TOP_SECRET':
-      return { color: 'bg-red-700/20 text-red-300 border-red-700/30', label: 'TOP SECRET' };
+      return { color: 'bg-red-700/20 text-red-300 border-red-700/30', label: 'SECRET' };
     default:
       return { color: 'bg-slate-500/20 text-slate-400 border-slate-500/30', label: level || 'UNKNOWN' };
   }

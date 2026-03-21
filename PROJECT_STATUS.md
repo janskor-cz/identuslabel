@@ -28,24 +28,121 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ QR Scanner Fix — IDL Wallet Short URL & Mobile Camera (Mar 21, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - QR-scanned DIDComm OOB short URLs now resolve and connect correctly on desktop and mobile
+
+Three bugs prevented the IDL wallet QR scanner from accepting scanned DIDComm OOB invitations encoded as short URLs (`/wallet/i/<token>`):
+
+- **Short URL parsing** (`qrMessageParser.ts`): `parseURLMessage()` threw on short URLs because they lack an `_oob` query param. Added short URL regex detection before the throw; returns `oob-invitation` type.
+- **Short URL resolution** (`OOB.tsx`): `handleScan` passed the short URL directly to `triggerInvitationParsing` without resolving it. Now calls `/wallet/api/shorten?token=<token>` to resolve to the full `?_oob=...` URL before parsing.
+- **QR scanner v2.x migration** (`Scanner.tsx`): Used removed `onDecode` prop (now `onScan` in `@yudiel/react-qr-scanner` v2.x), expected `string` argument (now `IDetectedBarcode[]`), defaulted `formats` to `"any"` (unreliable on mobile), and set `aspectRatio: 1` (broke mobile camera). Fixed all four issues.
+
+**Files Modified**:
+- `idl-wallet/src/utils/qrMessageParser.ts` — short URL regex + early return
+- `idl-wallet/src/components/OOB.tsx` — async resolve via `/wallet/api/shorten`
+- `idl-wallet/src/components/Scanner.tsx` — `onScan`, `rawValue` extraction, `formats={['qr_code']}`, removed `aspectRatio`
+
+### ✅ VC-Based Document Access Gate (Mar 21, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - SSI-native document access replacing session-based flow
+
+- Wallet presents EmployeeRole + SecurityClearance VCs to `/api/access-gate/present`; server validates VP signature, releasability, clearance level, and credential revocation status
+- Document re-encrypted for requestor's ephemeral X25519 key, providing perfect forward secrecy (new key per request)
+- Replaces previous session-based document access with a fully verifiable, credential-gated flow
+
+### ✅ Document Access Audit Logs (Mar 21, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Full audit trail for every access-gate decision
+
+- Every grant and denial persisted to `data/access-gate-log.jsonl` with viewer, document, clearance level, result, and reason
+- Company admins see audit trail in dashboard, scoped per company by `ownerCompanyDID`
+- Three denial reasons tracked: `RELEASABILITY_DENIED`, `CLEARANCE_DENIED`, `CREDENTIAL_REVOKED`
+
+### ✅ Standardized Security Clearance Levels — SECRET Replaces TOP-SECRET (Mar 21, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Unified 5-level clearance hierarchy across all services
+
+- Standard levels: UNCLASSIFIED(0), INTERNAL(1), CONFIDENTIAL(2), RESTRICTED(3), SECRET(4)
+- Legacy `TOP-SECRET` / `TOP_SECRET` / `TOPSECRET` now maps to `SECRET` for backward compatibility
+- Applied across company-admin-portal, certification-authority, and idl-wallet
+
+### ✅ URL Shortener + VC-Based Document Access from Wallet (Mar 21, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Compact QR codes and credential-gated document retrieval in IDL Wallet
+
+- In-memory URL shortener generates compact QR codes via `/wallet/i/<token>`, replacing long DIDComm OOB URLs
+- Wallet `DocumentAccess` component requests documents using held VCs (EmployeeRole + SecurityClearance), builds VP inline, decrypts with ephemeral X25519 key (PFS)
+- Falls back to session-based access if no qualifying VCs are available
+
+### ✅ Collapsible Sidebar + Dashboard Redesign — IDL Wallet (Mar 21, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Improved navigation and landing experience
+
+- Sidebar supports collapsed (icons-only) and expanded modes with persistent toggle
+- Dashboard replaced with navigation cards linking to all wallet pages
+- User greeting sourced from `RealPersonIdentity` VC when available
+
+### ✅ Access Log Collector for Enterprise Admin (Mar 15, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Document access audit trail for company administrators
+
+Company admins can now see a full audit trail of who accessed which documents and when, including denied attempts with reasons.
+
+**Key Features**:
+- Persists every grant and denial from the VC-based access gate to `data/access-gate-log.jsonl`
+- Logs are scoped per company: each admin only sees access events for **their own documents** (filtered by `document.ownerCompanyDID`)
+- Three denial reasons tracked: `RELEASABILITY_DENIED`, `CLEARANCE_DENIED`, `CREDENTIAL_REVOKED`
+- New admin UI section "Document Access Logs" with auto-load on login and manual Refresh button
+- Denied rows highlighted in red (`#fff5f5`)
+
+**Log Entry Schema**:
+```json
+{
+  "timestamp": "ISO-8601",
+  "viewerName": "email of the accessing employee",
+  "documentDID": "did:prism:classified:doc-...",
+  "documentTitle": "string or null",
+  "clearanceLevel": "INTERNAL | CONFIDENTIAL | RESTRICTED | SECRET | null",
+  "companyDID": "ownerCompanyDID — the document owner, not the viewer",
+  "accessGranted": true | false,
+  "denialReason": "RELEASABILITY_DENIED | CLEARANCE_DENIED | CREDENTIAL_REVOKED | null",
+  "copyId": "UUID on grant, null on denial",
+  "clientIp": "string"
+}
+```
+
+**New API Endpoint**:
+- `GET /api/admin/access-logs?limit=200&offset=0` — returns paginated, company-filtered log (requires company auth)
+
+**Files Modified**:
+- `company-admin-portal/server.js` — `ACCESS_GATE_LOG_PATH` constant, 4 `fs.appendFile` calls in `/api/access-gate/present`, new `GET /api/admin/access-logs` route
+- `company-admin-portal/lib/DocumentRegistry.js` — `ownerCompanyDID` field added to `registerDocument()` and `registerClassifiedDocument()`
+- `company-admin-portal/public/index.html` — "Document Access Logs" section added
+- `company-admin-portal/public/app.js` — `loadAccessLogs()` method, called from `showDashboard()`
+- `company-admin-portal/public/styles.css` — `.denied-row` CSS rule
+
+**Log File Location**: `/root/company-admin-portal/data/access-gate-log.jsonl`
+
 ### ✅ Security Clearance Level Standardization (Jan 7, 2026)
 
 **STATUS**: ✅ **PRODUCTION READY** - Unified security clearance naming across all systems
+> **Superseded**: The Mar 21, 2026 update replaced TOP-SECRET with SECRET and added level 0 (UNCLASSIFIED). See above.
 
 Standardized security clearance level naming convention across CA Portal, Enterprise Server, and all wallet implementations.
 
-**Standard Levels**:
+**Standard Levels** *(updated Mar 21, 2026)*:
 | Level | Name | Numeric | Description |
 |-------|------|---------|-------------|
+| 0 | UNCLASSIFIED | 0 | Public / no clearance required |
 | 1 | INTERNAL | 1 | Basic organizational access |
 | 2 | CONFIDENTIAL | 2 | Sensitive business information |
 | 3 | RESTRICTED | 3 | Highly sensitive strategic information |
-| 4 | TOP-SECRET | 4 | Classified information (highest) |
+| 4 | SECRET | 4 | Classified information (highest) |
 
 **Previous Naming (Legacy)**:
-- `UNCLASSIFIED` → now `INTERNAL`
-- `SECRET` → now `RESTRICTED`
-- `TOP_SECRET` → now `TOP-SECRET` (hyphenated)
+- `UNCLASSIFIED` → now level 0 (standalone level, no longer aliased to INTERNAL)
+- `TOP-SECRET` / `TOP_SECRET` / `TOPSECRET` → now `SECRET`
 
 **Backward Compatibility**: All systems include legacy mappings to support existing documents and credentials created with old naming.
 
@@ -91,14 +188,14 @@ Standardized security clearance level naming convention across CA Portal, Enterp
 **Legacy Support Pattern**:
 ```javascript
 const clearanceLevels = {
+    'UNCLASSIFIED': 0,
     'INTERNAL': 1,
-    'UNCLASSIFIED': 1,  // Legacy
     'CONFIDENTIAL': 2,
     'RESTRICTED': 3,
-    'SECRET': 3,  // Legacy
-    'TOP-SECRET': 4,
-    'TOP_SECRET': 4,  // Legacy
-    'TOPSECRET': 4    // Legacy
+    'SECRET': 4,
+    'TOP-SECRET': 4,  // Legacy → SECRET
+    'TOP_SECRET': 4,  // Legacy → SECRET
+    'TOPSECRET': 4    // Legacy → SECRET
 };
 ```
 
@@ -960,7 +1057,7 @@ ServiceConfiguration VCs enable enterprise mode with Cloud Agent integration for
 
 | Issue | Impact | Status | Workaround |
 |-------|--------|--------|------------|
-| Browser cache persistence | Updates not appearing | 🔴 High | Hard refresh (Ctrl+Shift+R) |
+| Browser cache persistence | Updates not appearing | 🔴 High | Hard refresh (Ctrl+Shift+R). **Caution**: on Brave Android, clearing all browser data wipes wallet IndexedDB — avoid "Clear all data" on mobile |
 | Cloud Agent long-form PRISM DID validation | Custom holder DID rejected in credential requests | 🟡 Medium | **Workaround active** - SDK creates internal DIDs |
 | WebAssembly memory accumulation | Periodic refresh needed | 🟡 Low | Refresh when wallet slows |
 | SDK deployment requirement | SDK changes need manual copy | 🟡 Low | Copy build to `node_modules` after SDK changes |

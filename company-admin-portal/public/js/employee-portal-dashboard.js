@@ -150,6 +150,7 @@ function displayProfile(profile) {
 // Get color based on clearance level
 function getClearanceColor(level) {
     switch (level) {
+        case 'SECRET':
         case 'TOP-SECRET':
             return '#9f7aea'; // Purple
         case 'RESTRICTED':
@@ -728,6 +729,27 @@ function displayDocuments(documents) {
                 ? `<span title="${doc.sectionSummary.visibleCount} visible, ${doc.sectionSummary.redactedCount} redacted">📑 ${doc.sectionSummary.totalSections} sections</span>`
                 : '';
             const formatBadge = isDocx ? '<span style="background:#4299e1;color:white;padding:2px 6px;border-radius:4px;font-size:10px;">DOCX</span>' : '';
+            const didRow = doc.didInfo ? `
+                <div class="document-did">
+                    <span class="did-badge">⛓ PRISM</span>
+                    <span title="${escapeHtml(doc.documentDID)}">${escapeHtml(doc.didInfo.short)}</span>
+                    <button class="did-copy-btn" onclick="copyDID('${escapeHtml(doc.documentDID)}', this)" title="Copy full DID">⧉</button>
+                    ${doc.didInfo.serviceType ? `<span>· ${escapeHtml(doc.didInfo.serviceType)}</span>` : ''}
+                    ${doc.didInfo.filename ? `<span>· ${escapeHtml(doc.didInfo.filename)}</span>` : ''}
+                </div>` : '';
+
+            const createdDate = doc.createdAt
+                ? new Date(doc.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+                : null;
+            const creatorLabel = doc.metadata?.creatorRole
+                || doc.metadata?.department
+                || (doc.metadata?.createdBy ? doc.metadata.createdBy.split('@')[0] : null);
+            const provenanceRow = (createdDate || creatorLabel) ? `
+                <div class="document-provenance">
+                    ${createdDate ? `<span>📅 ${escapeHtml(createdDate)}</span>` : ''}
+                    ${createdDate && creatorLabel ? `<span>·</span>` : ''}
+                    ${creatorLabel ? `<span>👤 ${escapeHtml(creatorLabel)}</span>` : ''}
+                </div>` : '';
 
             // For classified documents, use SSI-compliant wallet viewing
             // This creates ephemeral DID and issues DocumentCopy VC via DIDComm
@@ -747,6 +769,8 @@ function displayDocuments(documents) {
                         ${doc.metadata?.version ? `<span>🔖 ${escapeHtml(doc.metadata.version)}</span>` : ''}
                         ${sectionInfo}
                     </div>
+                    ${didRow}
+                    ${provenanceRow}
                 </div>
                 <div style="display: flex; gap: 8px;">
                     <button class="view-document-btn" onclick="${viewAction}">
@@ -1321,7 +1345,8 @@ function mapClearanceToNumeric(level) {
         'INTERNAL': 1,
         'CONFIDENTIAL': 2,
         'RESTRICTED': 3,
-        'TOP-SECRET': 4
+        'SECRET': 4,
+        'TOP-SECRET': 4  // legacy alias
     };
     return levelMap[level] || 1;
 }
@@ -1426,6 +1451,13 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function copyDID(did, btn) {
+    navigator.clipboard.writeText(did).then(() => {
+        btn.textContent = '✓';
+        setTimeout(() => { btn.textContent = '⧉'; }, 1500);
+    });
 }
 
 // File upload helper functions
@@ -2403,6 +2435,7 @@ async function analyzeHtmlSections(file) {
             'INTERNAL': 0,
             'CONFIDENTIAL': 0,
             'RESTRICTED': 0,
+            'SECRET': 0,
             'TOP-SECRET': 0
         };
 
@@ -2425,12 +2458,13 @@ async function analyzeHtmlSections(file) {
         document.getElementById('internalCount').textContent = counts['INTERNAL'];
         document.getElementById('confidentialCount').textContent = counts['CONFIDENTIAL'];
         document.getElementById('restrictedCount').textContent = counts['RESTRICTED'];
-        document.getElementById('topSecretCount').textContent = counts['TOP-SECRET'];
+        document.getElementById('topSecretCount').textContent = counts['SECRET'] + counts['TOP-SECRET'];
 
         // Determine overall classification (lowest in doc for discovery purposes)
         let overall = 'INTERNAL';
         if (counts['CONFIDENTIAL'] > 0) overall = 'CONFIDENTIAL';
         if (counts['RESTRICTED'] > 0) overall = 'RESTRICTED';
+        if (counts['SECRET'] > 0) overall = 'SECRET';
         if (counts['TOP-SECRET'] > 0) overall = 'TOP-SECRET';
 
         document.getElementById('overallClassification').textContent = overall;

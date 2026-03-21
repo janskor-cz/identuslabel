@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { useMountedApp } from '@/reducers/store';
-import { refreshConnections, initiatePresentationRequest } from '@/actions';
+import { refreshConnections, initiatePresentationRequest, refreshCredentials } from '@/actions';
 import { v4 as uuid } from 'uuid';
 import { messageRejection } from '@/utils/rejectionManager';
 import { connectionRequestQueue } from '@/utils/connectionRequestQueue';
@@ -776,6 +776,28 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
       } catch (stateError) {
         console.error('❌ [INVITATION STATE] Failed to update invitation state:', stateError);
         // Don't throw - connection should still proceed
+      }
+
+      // ✅ PEER VC PERSISTENCE: Store vc-proof-response VC to Pluto
+      if (attachedCredential) {
+        try {
+          const vcString = typeof attachedCredential === 'string'
+            ? attachedCredential
+            : JSON.stringify(attachedCredential);
+          const credData = Uint8Array.from(Buffer.from(vcString));
+          const parsedCredential = await app.agent.instance.pollux.parseCredential(credData, {
+            type: SDK.Domain.CredentialType.JWT
+          });
+          const existingCreds = await app.agent.instance.pluto.getAllCredentials();
+          const alreadyExists = existingCreds.some((c) => c.id === parsedCredential.id);
+          if (!alreadyExists) {
+            await app.agent.instance.pluto.storeCredential(parsedCredential);
+            app.dispatch(refreshCredentials());
+          }
+        } catch (e) {
+          console.error('❌ [PEER VC] Failed to store vc-proof-response VC:', e);
+          // Non-fatal — connection continues
+        }
       }
 
       // Refresh connections state
