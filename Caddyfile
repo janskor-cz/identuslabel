@@ -271,6 +271,17 @@ identuslabel.cz {
         }
     }
 
+    # Document Service (/document-service -> port 3020)
+    # Stateless VP-gated document access microservice (identus-document-service)
+    handle_path /document-service* {
+        reverse_proxy 127.0.0.1:3020 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
     # Root path - redirect to CA
     handle / {
         redir /ca permanent
