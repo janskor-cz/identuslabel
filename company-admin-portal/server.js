@@ -855,19 +855,19 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
           const invitationJson = Buffer.from(oobParam, 'base64').toString('utf-8');
           const invitationObj = JSON.parse(invitationJson);
 
-          // Embed Company Identity credential in invitation's requests_attach
+          // Embed Company Identity credential in invitation body (DIDComm OOB 2.0)
           if (!invitationObj.body) {
             invitationObj.body = {};
           }
           invitationObj.body.goal_code = 'company-employee-verification';
           invitationObj.body.goal = `Connect as ${req.company.displayName} employee`;
 
-          // Add company credential as attachment
-          invitationObj.requests_attach = [{
-            '@id': 'company-identity-credential',
-            'mime-type': 'application/json',
-            'data': {
-              'json': {
+          // OOB 2.0 uses body.attachments (not the DIDComm 1.0 requests_attach field)
+          invitationObj.body.attachments = [{
+            id: 'company-identity-credential',
+            media_type: 'application/json',
+            data: {
+              json: {
                 credential: companyCredential.jwtCredential,
                 claims: companyCredential.claims,
                 issuerDID: companyCredential.issuer,
