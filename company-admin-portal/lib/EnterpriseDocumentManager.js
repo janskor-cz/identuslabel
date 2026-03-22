@@ -210,30 +210,84 @@ class EnterpriseDocumentManager {
   /**
    * Create a document DID with Iagon service endpoint and optional extra service entries.
    *
-   * Extra services (e.g. DocumentAccessGate, DocumentPolicy) are passed via the
-   * `additionalServices` parameter and included in the DID document before
-   * blockchain publication.
+   * Automatically embeds three service endpoints that the stateless
+   * identus-document-service needs to operate without a database:
+   *
+   *   #iagon-storage     (IagonStorage)       — Iagon download URL
+   *   #metadata          (DocumentMetadata)   — clearanceLevel, releasableTo, iagonFileId, …
+   *   #access            (DocumentAccessGate) — URL of the deployed document service
+   *
+   * An optional #audit (AuditLog) entry is added if AUDIT_WEBHOOK_URL is set.
+   *
+   * Callers may still pass extra service entries via `additionalServices`.
    *
    * @param {string} department
    * @param {object} metadata
-   * @param {object} iagonInfo - { fileId, downloadUrl }
+   * @param {object} iagonInfo - { fileId, downloadUrl, encryptionInfo?, contentHash? }
    * @param {object[]} [additionalServices] - Extra DID service entries
    */
-  async createDocumentDIDWithServiceEndpoint(department, metadata, iagonInfo, additionalServices = []) {
+  async createDocumentDIDWithServiceEndpoint(department, metadata, iagonInfo, additionalServices = [], options = {}) {
     console.log(`[EnterpriseDocManager] Creating document DID with Iagon service endpoint for department: ${department}`);
     console.log(`[EnterpriseDocManager] Iagon fileId: ${iagonInfo.fileId}`);
     console.log(`[EnterpriseDocManager] Classification: ${metadata.classificationLevel || 'UNCLASSIFIED'}`);
     console.log(`[EnterpriseDocManager] Additional services: ${additionalServices.length}`);
 
     try {
-      // Build service endpoints
+      // ── Iagon storage endpoint (legacy / direct download reference) ──────
       const iagonServiceEndpoint = {
         id: 'iagon-storage',
         type: 'IagonStorage',
         serviceEndpoint: [iagonInfo.downloadUrl]
       };
 
-      const services = [iagonServiceEndpoint, ...additionalServices];
+      // ── DocumentMetadata — all state the stateless service needs ─────────
+      const documentMetadataEndpoint = {
+        id: 'metadata',
+        type: 'DocumentMetadata',
+        serviceEndpoint: {
+          iagonFileId:     iagonInfo.fileId,
+          clearanceLevel:  metadata.classificationLevel || 'INTERNAL',
+          releasableTo:    Array.isArray(metadata.releasableTo) ? metadata.releasableTo : [],
+          title:           metadata.title        || null,
+          contentHash:     iagonInfo.contentHash || null,
+          filename:        metadata.filename     || null,
+          mimeType:        metadata.mimeType     || null,
+          // encryptionInfo is stored here so the stateless service can decrypt
+          // the file after downloading from Iagon.
+          // NOTE: this is safe because Iagon download requires the service's
+          // access token — the key alone is not sufficient to retrieve the file.
+          encryptionInfo:  iagonInfo.encryptionInfo || null
+        }
+      };
+
+      // ── DocumentAccessGate — URL of the deployed stateless service ───────
+      // Per-company override takes priority over global env var
+      const documentServiceUrl = options.documentServiceUrl || process.env.DOCUMENT_SERVICE_URL || '';
+      const accessGateEndpoint = documentServiceUrl
+        ? {
+            id:              'access',
+            type:            'DocumentAccessGate',
+            serviceEndpoint: `${documentServiceUrl.replace(/\/$/, '')}/access`
+          }
+        : null;
+
+      // ── AuditLog — optional audit webhook ────────────────────────────────
+      const auditWebhookUrl = process.env.AUDIT_WEBHOOK_URL || '';
+      const auditEndpoint   = auditWebhookUrl
+        ? {
+            id:              'audit',
+            type:            'AuditLog',
+            serviceEndpoint: auditWebhookUrl
+          }
+        : null;
+
+      const services = [
+        iagonServiceEndpoint,
+        documentMetadataEndpoint,
+        ...(accessGateEndpoint ? [accessGateEndpoint] : []),
+        ...(auditEndpoint       ? [auditEndpoint]       : []),
+        ...additionalServices
+      ];
 
       console.log(`[EnterpriseDocManager] Service endpoints:`, JSON.stringify(services, null, 2));
 

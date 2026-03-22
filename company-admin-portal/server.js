@@ -3057,13 +3057,19 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
           description,
           documentType,
           classificationLevel,
+          releasableTo: releasableToIssuerDIDs,
+          filename: req.file.originalname,
           createdBy: session.email,
           createdByDID: session.prismDid
         },
         {
-          fileId: iagonStorage.fileId,
-          downloadUrl: iagonStorage.iagonUrl
-        }
+          fileId:         iagonStorage.fileId,
+          downloadUrl:    iagonStorage.iagonUrl,
+          contentHash:    iagonStorage.contentHash   || null,
+          encryptionInfo: iagonStorage.encryptionInfo || null
+        },
+        [],
+        { documentServiceUrl: req.company?.documentServiceUrl || null }
       );
       documentDID = didResult.documentDID;
       operationId = didResult.operationId;
@@ -6249,8 +6255,14 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
           classificationLevel: parsedDocument.metadata.overallClassification,
           releasableTo: releasableDIDs
         },
-        { fileId: iagonResult.fileId, downloadUrl: iagonResult.iagonUrl || iagonResult.url || '' },
-        [accessGateService, documentPolicyService]
+        {
+          fileId:         iagonResult.fileId,
+          downloadUrl:    iagonResult.iagonUrl || iagonResult.url || '',
+          contentHash:    iagonResult.contentHash    || null,
+          encryptionInfo: iagonResult.encryptionInfo || null
+        },
+        [accessGateService, documentPolicyService],
+        { documentServiceUrl: req.company?.documentServiceUrl || null }
       );
       documentDID = didResult.documentDID;
       console.log(`   [ClassifiedUpload] ✅ Real PRISM DID created: ${documentDID.substring(0, 60)}...`);
