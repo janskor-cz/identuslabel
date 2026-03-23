@@ -1,6 +1,17 @@
 import { useMountedApp } from "@/reducers/store";
+import { reduxActions } from "@/reducers/app";
 import Link from "next/link";
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
+
+const IAGON_STATUS_LABELS: Record<string, string> = {
+    idle: '',
+    checking: 'Checking backup...',
+    downloading: 'Downloading backup...',
+    restoring: 'Restoring wallet...',
+    uploading: 'Uploading backup...',
+    synced: 'Synced with Iagon',
+    error: 'Backup error',
+};
 
 export function PageHeader({ children }) {
     const app = useMountedApp();
@@ -8,27 +19,103 @@ export function PageHeader({ children }) {
 
     const agent = app.agent.instance;
 
-    // Database connection state
-    const [dbPassword, setDbPassword] = useState("elribonazo");
+    // Login form state
+    const [username, setUsername] = useState('');
+    const [dbPassword, setDbPassword] = useState('');
     const [isConnecting, setIsConnecting] = useState(false);
+    const [loginError, setLoginError] = useState('');
 
-    const handleDatabaseConnect = async () => {
+    const iagonStatus = app.iagonBackup?.status ?? 'idle';
+    const iagonLabel = IAGON_STATUS_LABELS[iagonStatus] ?? '';
+
+    // Store password in a ref so the restore effect can access it without stale closure
+    const passwordRef = useRef('');
+    const usernameRef = useRef('');
+
+    // Trigger Iagon restore once agent has started and a backup was found
+    useEffect(() => {
+        const shouldRestore =
+            app.agent.hasStarted &&
+            (iagonStatus === 'downloading' || iagonStatus === 'restoring') &&
+            passwordRef.current &&
+            usernameRef.current;
+
+        if (!shouldRestore) return;
+
+        const storedUsername = usernameRef.current;
+        const storedPassword = passwordRef.current;
+
+        app.restoreFromIagon({ username: storedUsername, password: storedPassword })
+            .catch((err) => console.error('[PageHeader] restoreFromIagon failed:', err));
+    }, [app.agent.hasStarted, iagonStatus]);
+
+    // Auto-backup after agent has started for the first time (new wallet)
+    useEffect(() => {
+        const shouldBackup =
+            app.agent.hasStarted &&
+            iagonStatus === 'idle' &&
+            passwordRef.current &&
+            usernameRef.current;
+
+        if (!shouldBackup) return;
+
+        const storedUsername = usernameRef.current;
+        const storedPassword = passwordRef.current;
+
+        app.backupToIagon({ username: storedUsername, password: storedPassword })
+            .catch((err) => console.error('[PageHeader] backupToIagon failed:', err));
+    }, [app.agent.hasStarted]);
+
+    const handleLogin = async () => {
+        if (!username.trim()) {
+            setLoginError('Please enter your username');
+            return;
+        }
         if (!dbPassword) {
-            alert('Please enter database password');
+            setLoginError('Please enter your password');
             return;
         }
 
         setIsConnecting(true);
+        setLoginError('');
         try {
-            console.log('🔐 [PageHeader] Connecting to database...');
+            console.log('🔐 [PageHeader] Logging in as:', username);
+            // Store credentials in refs so the restore/backup effects can access them
+            passwordRef.current = dbPassword;
+            usernameRef.current = username.trim();
+
+            // Check if Iagon backup exists for this user
+            app.dispatch(reduxActions.setIagonBackupStatus({ status: 'checking' }));
+            const checkRes = await fetch('/api/wallet/check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: username.trim() }),
+            });
+            const checkData = await checkRes.json();
+
+            if (checkData.exists) {
+                // Restore seed from backup before connecting DB
+                // The seed is embedded in the encrypted backup on Iagon.
+                // We first connect the DB (creates it fresh), then after agent starts,
+                // restoreFromIagon will download the backup, restore seed + JWE.
+                // The IagonBackup status guides index.tsx to trigger restore.
+                console.log('📦 [PageHeader] Backup found in Iagon, will restore after agent starts');
+                app.dispatch(reduxActions.setIagonBackupStatus({ status: 'downloading' }));
+            } else {
+                console.log('🆕 [PageHeader] No backup found, creating new wallet for:', username);
+                app.dispatch(reduxActions.setIagonBackupStatus({ status: 'idle' }));
+            }
+
             await app.connectDatabase({
-                encryptionKey: Buffer.from(dbPassword)
+                encryptionKey: Buffer.from(dbPassword),
+                username: username.trim(),
             });
             console.log('✅ [PageHeader] Database connected successfully');
             // Auto-initialization will trigger from index.tsx
         } catch (error) {
-            console.error('❌ [PageHeader] Database connection failed:', error);
-            alert(`Failed to connect database: ${error.message || error}`);
+            console.error('❌ [PageHeader] Login failed:', error);
+            setLoginError(`Login failed: ${error.message || error}`);
+            app.dispatch(reduxActions.setIagonBackupStatus({ status: 'idle' }));
         } finally {
             setIsConnecting(false);
         }
@@ -81,41 +168,72 @@ export function PageHeader({ children }) {
                     </div>
                 </div>
 
-                {/* Right Side: Database Login OR Status/Buttons */}
-                <div className="flex flex-col sm:flex-row items-center space-y-2 sm:space-y-0 sm:space-x-3">
+                {/* Right Side: Login form OR Status/Buttons */}
+                <div className="flex flex-row items-center gap-2">
+                <div className="flex flex-col items-end space-y-1">
                     {!db.connected ? (
-                        /* DATABASE LOGIN (when disconnected) */
-                        <>
-                            <input
-                                type="password"
-                                value={dbPassword}
-                                onChange={(e) => setDbPassword(e.target.value)}
-                                onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleDatabaseConnect()}
-                                placeholder="Database password"
-                                className="px-3 py-1.5 text-sm text-gray-900 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                style={{ width: '160px' }}
-                                disabled={isConnecting}
-                            />
-                            <button
-                                onClick={handleDatabaseConnect}
-                                disabled={isConnecting}
-                                className={`px-4 py-1.5 text-sm font-medium text-white rounded-md transition-colors ${
-                                    isConnecting
-                                        ? 'bg-gray-400 cursor-not-allowed'
-                                        : 'bg-blue-600 hover:bg-blue-700'
-                                }`}
-                            >
-                                {isConnecting ? '🔄 Connecting...' : '🔒 Connect'}
-                            </button>
-                        </>
+                        /* LOGIN FORM (username + password) */
+                        <div className="flex flex-col items-end gap-1">
+                            <div className="flex flex-col sm:flex-row gap-1.5">
+                                <input
+                                    type="text"
+                                    value={username}
+                                    onChange={(e) => setUsername(e.target.value)}
+                                    onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleLogin()}
+                                    placeholder="Username"
+                                    autoComplete="username"
+                                    className="px-3 py-1.5 text-sm text-gray-900 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    style={{ width: '130px' }}
+                                    disabled={isConnecting}
+                                />
+                                <input
+                                    type="password"
+                                    value={dbPassword}
+                                    onChange={(e) => setDbPassword(e.target.value)}
+                                    onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleLogin()}
+                                    placeholder="Password"
+                                    autoComplete="current-password"
+                                    className="px-3 py-1.5 text-sm text-gray-900 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    style={{ width: '130px' }}
+                                    disabled={isConnecting}
+                                />
+                                <button
+                                    onClick={handleLogin}
+                                    disabled={isConnecting}
+                                    className={`px-4 py-1.5 text-sm font-medium text-white rounded-md transition-colors ${
+                                        isConnecting
+                                            ? 'bg-gray-400 cursor-not-allowed'
+                                            : 'bg-blue-600 hover:bg-blue-700'
+                                    }`}
+                                >
+                                    {isConnecting ? 'Connecting...' : 'Login'}
+                                </button>
+                            </div>
+                            {loginError && (
+                                <p className="text-xs text-red-400">{loginError}</p>
+                            )}
+                            {iagonLabel && (
+                                <p className="text-xs text-blue-300">{iagonLabel}</p>
+                            )}
+                        </div>
                     ) : (
                         /* WALLET STATUS (when connected) */
                         <>
                             {/* Status Display */}
-                            <div className="text-center sm:text-left">
-                                <p className="text-sm sm:text-base font-medium">
+                            <div className="text-right">
+                                {app.username && (
+                                    <p className="text-xs text-gray-400">
+                                        {app.username}
+                                    </p>
+                                )}
+                                <p className="text-sm font-medium">
                                     <b>Status:</b> {app.agent.instance?.state ?? "initializing..."}
                                 </p>
+                                {iagonLabel && (
+                                    <p className={`text-xs ${iagonStatus === 'error' ? 'text-red-400' : iagonStatus === 'synced' ? 'text-green-400' : 'text-blue-300'}`}>
+                                        {iagonLabel}
+                                    </p>
+                                )}
                                 {app.agent.instance?.state === "running" && realPersonUniqueId && (
                                     <button
                                         onClick={() => {
@@ -126,8 +244,7 @@ export function PageHeader({ children }) {
                                                     setTimeout(() => setIsClicked(false), 300);
                                                 });
                                         }}
-                                        className={`text-xs sm:text-sm text-blue-500 transition-transform duration-300 ${isClicked ? "scale-110" : ""
-                                            }`}
+                                        className={`text-xs text-blue-500 transition-transform duration-300 ${isClicked ? "scale-110" : ""}`}
                                         title={`Unique ID: ${realPersonUniqueId}`}
                                     >
                                         Copy Unique ID
@@ -136,6 +253,7 @@ export function PageHeader({ children }) {
                             </div>
                         </>
                     )}
+                </div>
 
                     {/* Menu Button (Visible on small screens) */}
                     <button
@@ -157,6 +275,7 @@ export function PageHeader({ children }) {
                             />
                         </svg>
                     </button>
+                </div>
                 </div>
             </div>
 

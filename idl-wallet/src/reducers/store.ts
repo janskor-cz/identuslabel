@@ -69,7 +69,13 @@ export const store = configureStore({
                     'enterpriseAgent/applyConfiguration/rejected',
                     'enterpriseAgent/setConfiguration',
                     'persist/PERSIST',
-                    'persist/REHYDRATE'
+                    'persist/REHYDRATE',
+                    'app/backupToIagon/pending',
+                    'app/backupToIagon/fulfilled',
+                    'app/backupToIagon/rejected',
+                    'app/restoreFromIagon/pending',
+                    'app/restoreFromIagon/fulfilled',
+                    'app/restoreFromIagon/rejected',
                 ],
                 // Ignore these field paths in all actions
                 ignoredActionsPaths: [
