@@ -144,8 +144,19 @@ identuslabel.cz {
         }
     }
 
+    # Multitenancy Cloud Agent DIDComm (/multitenancy/didcomm -> port 8290)
+    # Neutral DIDComm endpoint shared by all tenants (Techcorp, ACME, EvilCorp)
+    handle_path /multitenancy/didcomm* {
+        reverse_proxy 127.0.0.1:8290 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
     # TechCorp Cloud Agent DIDComm (/techcorp/didcomm -> port 8290)
-    # Proxy to TechCorp multitenancy Cloud Agent DIDComm endpoint
+    # Legacy route — kept for backward compatibility with existing connections
     handle_path /techcorp/didcomm* {
         reverse_proxy 127.0.0.1:8290 {
             header_up Host {host}
@@ -268,6 +279,17 @@ identuslabel.cz {
             # WebSocket support for live updates
             header_up Connection {>Connection}
             header_up Upgrade {>Upgrade}
+        }
+    }
+
+    # Document Service (/document-service -> port 3020)
+    # Stateless VP-gated document access microservice (identus-document-service)
+    handle_path /document-service* {
+        reverse_proxy 127.0.0.1:3020 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
         }
     }
 

@@ -28,7 +28,9 @@ const COMPANIES = {
       { id: 'company-website', type: 'LinkedDomains', endpoint: 'https://techcorp.example.com' }
     ],
     color: '#2563eb', // Blue
-    logo: '🏢'
+    logo: '🏢',
+    // null = use built-in company-admin-portal access gate
+    documentServiceUrl: null
   },
 
   acme: {
@@ -51,7 +53,9 @@ const COMPANIES = {
       { id: 'company-website', type: 'LinkedDomains', endpoint: 'https://acme.example.com' }
     ],
     color: '#059669', // Green
-    logo: '🔨'
+    logo: '🔨',
+    // ACME uses the standalone stateless document service
+    documentServiceUrl: 'https://identuslabel.cz/document-service'
   },
 
   evilcorp: {
@@ -74,7 +78,8 @@ const COMPANIES = {
       { id: 'company-website', type: 'LinkedDomains', endpoint: 'https://evilcorp.example.com' }
     ],
     color: '#dc2626', // Red
-    logo: '🏴'
+    logo: '🏴',
+    documentServiceUrl: null
   }
 };
 

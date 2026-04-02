@@ -65,7 +65,7 @@ services:
 
       # Service URLs
       REST_SERVICE_URL: http://91.99.4.54:8200/cloud-agent
-      DIDCOMM_SERVICE_URL: https://identuslabel.cz/techcorp/didcomm
+      DIDCOMM_SERVICE_URL: https://identuslabel.cz/multitenancy/didcomm
 
       # Database Configuration - CUSTOM USER (NOT postgres)
       POLLUX_DB_HOST: multitenancy-test-db

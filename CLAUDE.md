@@ -25,6 +25,9 @@ cd /root/certification-authority && PORT=3005 node server.js > /tmp/ca.log 2>&1 
 # Company Admin Portal (port 3010)
 cd /root/company-admin-portal && PORT=3010 node server.js > /tmp/company-admin.log 2>&1 &
 
+# Document Service (port 3020) - stateless VP-gated access for ACME
+cd /root/identus-document-service && PORT=3020 node server.js > /tmp/document-service.log 2>&1 &
+
 # Alice Wallet (port 3001) - PRIMARY DEVELOPMENT WALLET
 cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
 fuser -k 3001/tcp && rm -rf .next && yarn dev > /tmp/alice.log 2>&1 &
@@ -50,6 +53,7 @@ curl https://identuslabel.cz/enterprise/_system/health   # Enterprise Agent (830
 curl http://91.99.4.54:8200/_system/health               # Multitenancy Agent (8200)
 curl https://identuslabel.cz/ca/api/health               # CA Server (3005)
 curl https://identuslabel.cz/company-admin/api/health    # Company Admin (3010)
+curl https://identuslabel.cz/document-service/health     # Document Service (3020)
 ```
 
 ### Testing
@@ -68,9 +72,10 @@ node test-employee-wallet-creation.js
 
 ### Viewing Logs
 ```bash
-tail -f /tmp/alice.log         # Alice Wallet
-tail -f /tmp/ca.log            # Certification Authority
-tail -f /tmp/company-admin.log # Company Admin Portal
+tail -f /tmp/alice.log              # Alice Wallet
+tail -f /tmp/ca.log                 # Certification Authority
+tail -f /tmp/company-admin.log      # Company Admin Portal
+tail -f /tmp/document-service.log   # Document Service
 docker logs identus-mediator-identus-mediator-1 --tail 100  # Mediator
 ```
 
@@ -197,6 +202,7 @@ const serviceConfig = getServiceConfigurationFromCredentials(credentials);
 | Alice Wallet | https://identuslabel.cz/alice | 3001 |
 | CA Portal | https://identuslabel.cz/ca | 3005 |
 | Company Admin | https://identuslabel.cz/company-admin | 3010 |
+| Document Service | https://identuslabel.cz/document-service | 3020 |
 | Cloud Agent | https://identuslabel.cz/cloud-agent | 8000 |
 | Enterprise Agent | https://identuslabel.cz/enterprise | 8300 |
 | Multitenancy Agent | http://91.99.4.54:8200 | 8200 |

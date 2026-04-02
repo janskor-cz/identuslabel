@@ -855,19 +855,19 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
           const invitationJson = Buffer.from(oobParam, 'base64').toString('utf-8');
           const invitationObj = JSON.parse(invitationJson);
 
-          // Embed Company Identity credential in invitation's requests_attach
+          // Embed Company Identity credential in invitation body (DIDComm OOB 2.0)
           if (!invitationObj.body) {
             invitationObj.body = {};
           }
           invitationObj.body.goal_code = 'company-employee-verification';
           invitationObj.body.goal = `Connect as ${req.company.displayName} employee`;
 
-          // Add company credential as attachment
-          invitationObj.requests_attach = [{
-            '@id': 'company-identity-credential',
-            'mime-type': 'application/json',
-            'data': {
-              'json': {
+          // OOB 2.0 uses body.attachments (not the DIDComm 1.0 requests_attach field)
+          invitationObj.body.attachments = [{
+            id: 'company-identity-credential',
+            media_type: 'application/json',
+            data: {
+              json: {
                 credential: companyCredential.jwtCredential,
                 claims: companyCredential.claims,
                 issuerDID: companyCredential.issuer,
@@ -3057,13 +3057,19 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
           description,
           documentType,
           classificationLevel,
+          releasableTo: releasableToIssuerDIDs,
+          filename: req.file.originalname,
           createdBy: session.email,
           createdByDID: session.prismDid
         },
         {
-          fileId: iagonStorage.fileId,
-          downloadUrl: iagonStorage.iagonUrl
-        }
+          fileId:         iagonStorage.fileId,
+          downloadUrl:    iagonStorage.iagonUrl,
+          contentHash:    iagonStorage.contentHash   || null,
+          encryptionInfo: iagonStorage.encryptionInfo || null
+        },
+        [],
+        { documentServiceUrl: req.company?.documentServiceUrl || null }
       );
       documentDID = didResult.documentDID;
       operationId = didResult.operationId;
@@ -6249,8 +6255,14 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
           classificationLevel: parsedDocument.metadata.overallClassification,
           releasableTo: releasableDIDs
         },
-        { fileId: iagonResult.fileId, downloadUrl: iagonResult.iagonUrl || iagonResult.url || '' },
-        [accessGateService, documentPolicyService]
+        {
+          fileId:         iagonResult.fileId,
+          downloadUrl:    iagonResult.iagonUrl || iagonResult.url || '',
+          contentHash:    iagonResult.contentHash    || null,
+          encryptionInfo: iagonResult.encryptionInfo || null
+        },
+        [accessGateService, documentPolicyService],
+        { documentServiceUrl: req.company?.documentServiceUrl || null }
       );
       documentDID = didResult.documentDID;
       console.log(`   [ClassifiedUpload] ✅ Real PRISM DID created: ${documentDID.substring(0, 60)}...`);
