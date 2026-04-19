@@ -1,19 +1,30 @@
 /**
  * DIDDocumentResolver.js
  *
- * Resolves a PRISM DID via the Enterprise Cloud Agent REST API and extracts
- * the document service endpoint metadata embedded at DID creation time.
+ * Two responsibilities:
  *
- * Expected DID document services:
- *   #metadata  (DocumentMetadata)   — iagonFileId, clearanceLevel (releasableTo + iagonEncManifestId deprecated)
- *   #access    (DocumentAccessGate) — URL of this service's /access endpoint
- *   #audit     (AuditLog)           — webhook URL for audit events
+ * 1. resolveDocumentDID(did) — resolves a DOCUMENT DID and extracts the
+ *    DocumentMetadata service endpoint (iagonFileId, clearanceLevel, etc.).
+ *    Used by the access pipeline to find the file and its access policy.
+ *
+ * 2. resolveIssuerDID(did) — resolves ANY PRISM DID and returns its
+ *    verification methods (public keys). Used by VPVerificationService to
+ *    verify JWT-VC signatures cryptographically.
+ *    Results are cached for 60 s to avoid hammering the Cloud Agent on every
+ *    access request.
+ *
+ * DID resolution is public — no API key required for /dids/{did}.
  */
 
 'use strict';
 
 const fetch  = require('node-fetch');
 const config = require('../config');
+
+// ── Issuer DID cache ─────────────────────────────────────────────────────────
+// Maps DID string → { verificationMethod: [...], assertionMethod: [...], cachedAt: ms }
+const _issuerCache = new Map();
+const ISSUER_CACHE_TTL_MS = 60_000; // 60 seconds
 
 /**
  * Resolve a document DID and return structured metadata.
@@ -120,4 +131,48 @@ function _unwrapEndpoint(ep) {
   return null;
 }
 
-module.exports = { resolveDocumentDID };
+/**
+ * Resolve any PRISM DID and return its verification methods.
+ *
+ * Uses the public /dids/{did} endpoint (no API key needed).
+ * Results cached for ISSUER_CACHE_TTL_MS to reduce Cloud Agent load.
+ *
+ * @param {string} issuerDID
+ * @returns {Promise<{
+ *   verificationMethod: Array<{id:string, type:string, publicKeyJwk?:object}>,
+ *   assertionMethod: string[]
+ * }>}
+ */
+async function resolveIssuerDID(issuerDID) {
+  const now = Date.now();
+  const cached = _issuerCache.get(issuerDID);
+  if (cached && now - cached.cachedAt < ISSUER_CACHE_TTL_MS) {
+    return cached;
+  }
+
+  const url = `${config.ENTERPRISE_CLOUD_AGENT_URL}/dids/${encodeURIComponent(issuerDID)}`;
+  const response = await fetch(url, {
+    method:  'GET',
+    headers: { 'Content-Type': 'application/json' },
+    timeout: config.REQUEST_TIMEOUT_MS
+  });
+
+  if (!response.ok) {
+    throw new Error(`Issuer DID resolution failed (${response.status}) for: ${issuerDID}`);
+  }
+
+  const data   = await response.json();
+  // Identus wraps the DID document under didDocument in the W3C DID resolution format
+  const didDoc = data.didDocument || data.did || data;
+
+  const result = {
+    verificationMethod: didDoc.verificationMethod || [],
+    assertionMethod:    didDoc.assertionMethod    || [],
+    cachedAt: now
+  };
+
+  _issuerCache.set(issuerDID, result);
+  return result;
+}
+
+module.exports = { resolveDocumentDID, resolveIssuerDID };

@@ -371,7 +371,7 @@ async function _handleAccess(req, res) {
       return res.status(404).json({ error: 'DOCUMENT_NOT_FOUND', message: 'Could not resolve document DID' });
     }
 
-    const vpResult = verifyVPAndExtractClaims(vp, docMeta.releasableTo);
+    const vpResult = await verifyVPAndExtractClaims(vp, docMeta.releasableTo);
 
     if (!vpResult.success) {
       console.warn('[/access] VP verification failed:', vpResult.error);

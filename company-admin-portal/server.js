@@ -2844,7 +2844,6 @@ app.post('/api/employee-portal/documents/create', requireEmployeeSession, async 
       title,
       classificationLevel,
       releasableTo: releasableToIssuerDIDs,
-      contentEncryptionKey: 'mock-abe-encrypted-key',
       ownerCompanyDID: session.issuerDID || null,
       metadata: {
         title,
@@ -6852,9 +6851,11 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
     const documentCopyData = {
       originalDocumentDID: documentDID,
       ephemeralDID: ephemeralMetadata.ephemeralDID,
+      ephemeralServiceEndpoint: null, // Document delivered via DIDComm — no separate fetch endpoint
       title: documentRecord.title,
-      overallClassification: documentRecord.overallClassification,
+      classification: documentRecord.overallClassification || documentRecord.classificationLevel,
       clearanceLevelGranted: userClearance,
+      redactedSections: redactedSectionIds,
       sectionSummary: {
         totalSections: (decryptionResult.decryptedSections.length + decryptionResult.redactedSections.length),
         visibleCount: decryptionResult.decryptedSections.length,
@@ -6894,8 +6895,7 @@ app.post('/api/classified-documents/download', requireEmployeeSession, async (re
           encryptedContent: Buffer.from(encryptedDocument),
           encryptionInfo,
           documentCopyData,
-          apiKey: departmentApiKey,
-          skipVC: true // Skip VC issuance for now (requires proper schema setup)
+          apiKey: departmentApiKey
         });
 
         console.log(`   [ClassifiedDownload] ✅ Document sent via DIDComm`);
