@@ -93,15 +93,17 @@ class DocumentRegistry {
             title,
             classificationLevel,
             releasableTo,
-            contentEncryptionKey,
             metadata = {},
             metadataVCRecordId = null,
-            iagonStorage = null,
             ownerCompanyDID = null
         } = documentMetadata;
 
-        // Validate required fields
-        if (!documentDID || !title || !classificationLevel || !releasableTo || !contentEncryptionKey) {
+        // contentEncryptionKey is intentionally excluded — raw keys must not be stored (Task 3)
+        // iagonStorage is extracted separately so we can sanitize it below
+        let iagonStorage = documentMetadata.iagonStorage || null;
+
+        // Validate required fields (contentEncryptionKey is no longer required)
+        if (!documentDID || !title || !classificationLevel || !releasableTo) {
             throw new Error('Missing required document metadata fields');
         }
 
@@ -109,6 +111,13 @@ class DocumentRegistry {
         const validLevels = ['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET', 'TOP-SECRET'];
         if (!validLevels.includes(classificationLevel)) {
             throw new Error(`Invalid classification level: ${classificationLevel}`);
+        }
+
+        // Task 3: Strip raw key material from iagonStorage before storing
+        if (iagonStorage?.encryptionInfo?.key) {
+            const sanitized = { ...iagonStorage, encryptionInfo: { ...iagonStorage.encryptionInfo } };
+            delete sanitized.encryptionInfo.key;
+            iagonStorage = sanitized;
         }
 
         // Generate Bloom filter for releasableTo companies
@@ -121,15 +130,15 @@ class DocumentRegistry {
         );
 
         // Create document record
+        // Note: contentEncryptionKey is intentionally NOT stored (Task 3 — raw keys stay out of registry)
         const documentRecord = {
             documentDID,
             bloomFilter, // 1024-bit Bloom filter for fast issuerDID lookups
             encryptedMetadata, // Map of companyDID -> encrypted metadata
             releasableTo, // Array of authorized company DIDs
             classificationLevel, // Stored in plaintext for access control (can be encrypted later)
-            contentEncryptionKey, // ABE-encrypted content key
             metadataVCRecordId, // (SSI) Cloud Agent record ID for crash recovery
-            iagonStorage, // Iagon decentralized storage metadata (nodeId, filename, url, encryptionInfo)
+            iagonStorage, // Iagon decentralized storage metadata (nodeId, filename, encryptionManifestId — no raw key)
             ownerCompanyDID, // Company that uploaded/owns this document
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
@@ -894,19 +903,20 @@ class DocumentRegistry {
      * @param {string} opts.clearanceLevel
      * @returns {Promise<Object>} newVersion record
      */
-    async addDocumentVersion(documentDID, { newDocxFileId, contentHash, editorDID, clearanceLevel }) {
+    async addDocumentVersion(documentDID, { newDocxFileId, encryptionInfo, contentHash, editorDID, clearanceLevel }) {
         const record = this.documents.get(documentDID);
         if (!record) throw new Error(`Document not found: ${documentDID}`);
 
         const versions = this.documentVersions.get(documentDID) || [];
         const newVersion = {
-            versionId:    `v${versions.length + 1}`,
-            fileId:       newDocxFileId,
+            versionId:      `v${versions.length + 1}`,
+            fileId:         newDocxFileId,
+            encryptionInfo: encryptionInfo || null,
             contentHash,
             editorDID,
             clearanceLevel,
-            createdAt:    new Date().toISOString(),
-            isCurrent:    true
+            createdAt:      new Date().toISOString(),
+            isCurrent:      true
         };
 
         // Mark previous versions as superseded
@@ -914,8 +924,9 @@ class DocumentRegistry {
         versions.push(newVersion);
         this.documentVersions.set(documentDID, versions);
 
-        // Update live document record's active fileId pointer
+        // Update live document record's active fileId pointer + decryption key
         record.iagonStorage.originalDocxFileId = newDocxFileId;
+        if (encryptionInfo) record.iagonStorage.originalDocxEncryptionInfo = encryptionInfo;
         record.updatedAt = new Date().toISOString();
 
         await this.persistence.saveRegistry(this.documents, this.documentVersions);

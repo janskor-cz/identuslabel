@@ -20,6 +20,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { StoredDocument } from '@/utils/documentStorage';
 import nacl from 'tweetnacl';
+import * as docxPreview from 'docx-preview';
 import {
   XIcon,
   DocumentIcon,
@@ -28,7 +29,8 @@ import {
   ExclamationIcon,
   LockClosedIcon,
   EyeIcon,
-  CloudDownloadIcon
+  CloudDownloadIcon,
+  RefreshIcon
 } from '@heroicons/react/solid';
 import { getSecurityClearanceKeys } from '@/utils/securityKeyStorage';
 
@@ -72,6 +74,14 @@ const formatTimeRemaining = (expiresAt: string): string => {
 interface ClassifiedDocumentViewerProps {
   document: StoredDocument;
   onClose: () => void;
+  // Edit/update props (optional — only shown for DOCX when provided)
+  editState?: 'idle' | 'requesting' | 'editing' | 'uploading' | 'done' | 'error';
+  editError?: string | null;
+  selectedFile?: File | null;
+  onEdit?: (originalDocumentDID: string) => void;
+  onFileSelect?: (file: File | null) => void;
+  onSubmitEdit?: () => void;
+  onCancelEdit?: () => void;
 }
 
 /**
@@ -79,7 +89,14 @@ interface ClassifiedDocumentViewerProps {
  */
 export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> = ({
   document,
-  onClose
+  onClose,
+  editState,
+  editError,
+  selectedFile,
+  onEdit,
+  onFileSelect,
+  onSubmitEdit,
+  onCancelEdit,
 }) => {
   const [decryptedContent, setDecryptedContent] = useState<string | null>(null);
   const [decryptedBytes, setDecryptedBytes] = useState<Uint8Array | null>(null);
@@ -87,7 +104,10 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
   const [error, setError] = useState<string | null>(null);
   const [timeRemaining, setTimeRemaining] = useState(formatTimeRemaining(document.expiresAt));
   const contentRef = useRef<HTMLDivElement>(null);
+  const docxContainerRef = useRef<HTMLDivElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+
+  const isDocx = document.sourceInfo?.format?.toLowerCase() === 'docx';
 
   // Get MIME type based on document format
   const getMimeType = (format: string | undefined): string => {
@@ -224,9 +244,15 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
         // Store raw bytes for download
         setDecryptedBytes(decrypted);
 
-        // Convert to string for display (HTML content)
-        const htmlContent = new TextDecoder('utf-8').decode(decrypted);
-        setDecryptedContent(htmlContent);
+        const format = document.sourceInfo?.format?.toLowerCase();
+        if (format === 'docx') {
+          // DOCX: do not decode to string — rendered separately via docx-preview
+          setDecryptedContent('__docx__');
+        } else {
+          // HTML/plaintext: decode to string for display
+          const htmlContent = new TextDecoder('utf-8').decode(decrypted);
+          setDecryptedContent(htmlContent);
+        }
 
       } catch (err: any) {
         console.error('[ClassifiedDocumentViewer] Decryption error:', err);
@@ -238,6 +264,30 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
 
     decryptDocument();
   }, [document]);
+
+  // Render DOCX using docx-preview when bytes are available
+  useEffect(() => {
+    if (!isDocx || !decryptedBytes || !docxContainerRef.current) return;
+    const container = docxContainerRef.current;
+    container.innerHTML = '';
+    docxPreview.renderAsync(
+      decryptedBytes.buffer as ArrayBuffer,
+      container,
+      undefined,
+      {
+        className: 'docx-preview-wrapper',
+        inWrapper: true,
+        ignoreWidth: false,
+        ignoreHeight: false,
+        ignoreFonts: false,
+        breakPages: true,
+        useBase64URL: true,
+      }
+    ).catch((err: any) => {
+      console.error('[ClassifiedDocumentViewer] docx-preview render error:', err);
+      container.innerHTML = `<p style="color:red;padding:2rem">Failed to render DOCX: ${err.message}</p>`;
+    });
+  }, [isDocx, decryptedBytes]);
 
   // Block keyboard shortcuts
   useEffect(() => {
@@ -359,16 +409,16 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
       onContextMenu={handleContextMenu}
     >
       {/* Header */}
-      <div className={`${badge.color} text-white px-6 py-4 flex items-center justify-between`}>
-        <div className="flex items-center gap-4">
-          <DocumentIcon className="w-8 h-8" />
-          <div>
+      <div className={`${badge.color} text-white px-6 py-4 flex items-center justify-between gap-4`}>
+        <div className="flex items-center gap-4 min-w-0 overflow-hidden">
+          <DocumentIcon className="w-8 h-8 flex-shrink-0" />
+          <div className="min-w-0">
             <div className="font-bold text-xl">{badge.label}</div>
-            <div className="text-sm opacity-80">{document.title}</div>
+            <div className="text-sm opacity-80 truncate">{document.title}</div>
           </div>
         </div>
 
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-6 flex-shrink-0">
           {/* TTL Display */}
           <div className="flex items-center gap-2 bg-black bg-opacity-30 px-3 py-1 rounded">
             <ClockIcon className="w-5 h-5" />
@@ -401,6 +451,21 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
             </button>
           )}
 
+          {/* Update Button (DOCX only) */}
+          {isDocx && onEdit && (
+            <button
+              onClick={() => onEdit(document.originalDocumentDID)}
+              disabled={editState !== 'idle' && editState !== undefined}
+              className="flex items-center gap-2 px-3 py-1.5 bg-amber-500 bg-opacity-80 hover:bg-opacity-100 rounded-lg transition-colors disabled:opacity-50"
+              title="Upload updated version of this document"
+            >
+              <RefreshIcon className="w-5 h-5" />
+              <span className="text-sm font-medium">
+                {editState === 'requesting' ? 'Requesting…' : editState === 'uploading' ? 'Uploading…' : 'Update'}
+              </span>
+            </button>
+          )}
+
           {/* Close Button */}
           <button
             onClick={onClose}
@@ -411,6 +476,53 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
           </button>
         </div>
       </div>
+
+      {/* Update / Edit UI */}
+      {isDocx && onEdit && editState && editState !== 'idle' && (
+        <div className="bg-amber-900/80 border-b border-amber-600/50 px-6 py-3">
+          {editState === 'editing' && (
+            <div className="flex items-center gap-4 flex-wrap">
+              <span className="text-sm text-amber-200">Edit the downloaded DOCX, then upload the updated file:</span>
+              <input
+                type="file"
+                accept=".docx"
+                onChange={e => onFileSelect?.(e.target.files?.[0] ?? null)}
+                className="text-sm text-slate-300 file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:text-sm file:bg-amber-500/30 file:text-amber-200 hover:file:bg-amber-500/50"
+              />
+              <button
+                onClick={onSubmitEdit}
+                disabled={!selectedFile}
+                className="px-4 py-1.5 bg-amber-500 text-white rounded-lg text-sm hover:bg-amber-400 disabled:opacity-50"
+              >
+                Submit Update
+              </button>
+              <button
+                onClick={onCancelEdit}
+                className="px-4 py-1.5 bg-slate-600 text-slate-200 rounded-lg text-sm hover:bg-slate-500"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+          {editState === 'uploading' && (
+            <span className="text-sm text-amber-200">Uploading and processing updated document…</span>
+          )}
+          {editState === 'done' && (
+            <div className="flex items-center gap-3">
+              <ShieldCheckIcon className="w-5 h-5 text-green-400" />
+              <span className="text-sm text-green-300">Document updated successfully.</span>
+              <button onClick={onCancelEdit} className="text-xs text-slate-400 hover:text-white ml-2">Dismiss</button>
+            </div>
+          )}
+          {editState === 'error' && (
+            <div className="flex items-center gap-3">
+              <ExclamationIcon className="w-5 h-5 text-red-400" />
+              <span className="text-sm text-red-300">{editError || 'Update failed'}</span>
+              <button onClick={onCancelEdit} className="text-xs text-slate-400 hover:text-white ml-2">Dismiss</button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Content Area */}
       <div className="flex-1 overflow-auto bg-gray-100 relative">
@@ -459,105 +571,49 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
               </div>
             </div>
 
-            {/* Document Styles */}
-            <style>{`
-              /* Base document typography */
-              .classified-doc-content {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                font-size: 16px;
-                line-height: 1.6;
-                color: #1a1a1a;
-              }
-              .classified-doc-content h1 { font-size: 2em; font-weight: bold; margin: 0.67em 0; }
-              .classified-doc-content h2 { font-size: 1.5em; font-weight: bold; margin: 0.83em 0; }
-              .classified-doc-content h3 { font-size: 1.17em; font-weight: bold; margin: 1em 0; }
-              .classified-doc-content p { margin: 1em 0; }
-              .classified-doc-content section { margin: 1.5em 0; padding: 1em; border-left: 4px solid #e0e0e0; }
-              .classified-doc-content table { border-collapse: collapse; width: 100%; margin: 1em 0; }
-              .classified-doc-content th, .classified-doc-content td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-              .classified-doc-content th { background: #f5f5f5; }
+            {isDocx ? (
+              /* DOCX rendered by docx-preview into a container div */
+              <div
+                ref={docxContainerRef}
+                className="max-w-5xl mx-auto my-4 bg-white shadow-xl select-none"
+                style={{ userSelect: 'none', WebkitUserSelect: 'none', msUserSelect: 'none' }}
+              />
+            ) : (
+              <>
+                {/* Document Styles (HTML only) */}
+                <style>{`
+                  .classified-doc-content {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    font-size: 16px; line-height: 1.6; color: #1a1a1a;
+                  }
+                  .classified-doc-content h1 { font-size: 2em; font-weight: bold; margin: 0.67em 0; }
+                  .classified-doc-content h2 { font-size: 1.5em; font-weight: bold; margin: 0.83em 0; }
+                  .classified-doc-content h3 { font-size: 1.17em; font-weight: bold; margin: 1em 0; }
+                  .classified-doc-content p { margin: 1em 0; }
+                  .classified-doc-content section { margin: 1.5em 0; padding: 1em; border-left: 4px solid #e0e0e0; }
+                  .classified-doc-content table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+                  .classified-doc-content th, .classified-doc-content td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                  .classified-doc-content th { background: #f5f5f5; }
+                  .classified-doc-content [data-clearance] { position: relative; display: block; padding-top: 24px; margin: 1em 0; }
+                  .classified-doc-content [data-clearance]::before { content: attr(data-clearance); position: absolute; top: 0; right: 0; font-size: 11px; padding: 3px 10px; border-radius: 4px; font-weight: bold; text-transform: uppercase; }
+                  .classified-doc-content [data-clearance="UNCLASSIFIED"]::before { background: #4CAF50; color: white; }
+                  .classified-doc-content [data-clearance="CONFIDENTIAL"]::before { background: #2196F3; color: white; }
+                  .classified-doc-content [data-clearance="SECRET"]::before { background: #f44336; color: white; }
+                  .classified-doc-content .redacted-block { background: #000; color: #fff; padding: 30px; margin: 15px 0; border: 3px solid #f00; border-radius: 4px; text-align: center; min-height: 80px; display: flex; align-items: center; justify-content: center; }
+                  .classified-doc-content .redaction-label { font-size: 24px; font-weight: bold; letter-spacing: 4px; }
+                  .classified-doc-content .clearance-required { font-size: 12px; opacity: 0.8; margin-top: 8px; }
+                  .classified-doc-content .redacted-inline { background: #000; color: #f44; padding: 2px 8px; border-radius: 3px; font-family: monospace; font-size: 0.9em; }
+                `}</style>
 
-              /* Clearance label badges */
-              .classified-doc-content [data-clearance] {
-                position: relative;
-                display: block;
-                padding-top: 24px;
-                margin: 1em 0;
-              }
-              .classified-doc-content [data-clearance]::before {
-                content: attr(data-clearance);
-                position: absolute;
-                top: 0;
-                right: 0;
-                font-size: 11px;
-                padding: 3px 10px;
-                border-radius: 4px;
-                font-weight: bold;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-              }
-              .classified-doc-content [data-clearance="UNCLASSIFIED"]::before {
-                background: #4CAF50;
-                color: white;
-              }
-              .classified-doc-content [data-clearance="CONFIDENTIAL"]::before {
-                background: #2196F3;
-                color: white;
-              }
-              .classified-doc-content [data-clearance="SECRET"]::before {
-                background: #FF9800;
-                color: white;
-              }
-              .classified-doc-content [data-clearance="SECRET"]::before {
-                background: #f44336;
-                color: white;
-              }
-
-              /* Redacted sections */
-              .classified-doc-content .redacted-block {
-                background: #000000;
-                color: #ffffff;
-                padding: 30px;
-                margin: 15px 0;
-                border: 3px solid #ff0000;
-                border-radius: 4px;
-                text-align: center;
-                min-height: 80px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-              }
-              .classified-doc-content .redaction-label {
-                font-size: 24px;
-                font-weight: bold;
-                letter-spacing: 4px;
-              }
-              .classified-doc-content .clearance-required {
-                font-size: 12px;
-                opacity: 0.8;
-                margin-top: 8px;
-              }
-              .classified-doc-content .redacted-inline {
-                background: #000000;
-                color: #ff4444;
-                padding: 2px 8px;
-                border-radius: 3px;
-                font-family: monospace;
-                font-size: 0.9em;
-              }
-            `}</style>
-
-            {/* HTML Content */}
-            <div
-              ref={contentRef}
-              className="classified-doc-content max-w-4xl mx-auto p-8 bg-white shadow-xl my-4 select-none"
-              dangerouslySetInnerHTML={{ __html: decryptedContent }}
-              style={{
-                userSelect: 'none',
-                WebkitUserSelect: 'none',
-                msUserSelect: 'none'
-              }}
-            />
+                {/* HTML Content */}
+                <div
+                  ref={contentRef}
+                  className="classified-doc-content max-w-4xl mx-auto p-8 bg-white shadow-xl my-4 select-none"
+                  dangerouslySetInnerHTML={{ __html: decryptedContent }}
+                  style={{ userSelect: 'none', WebkitUserSelect: 'none', msUserSelect: 'none' }}
+                />
+              </>
+            )}
           </div>
         )}
       </div>

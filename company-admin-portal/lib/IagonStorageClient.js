@@ -103,10 +103,11 @@ class IagonStorageClient {
 
     return {
       content: encrypted,
+      rawKey: key,          // Buffer (32 bytes) — caller must zero after use
       encryptionInfo: {
         algorithm: 'AES-256-GCM',
         keyId: keyId,
-        key: key.toString('base64'),  // Store for later decryption
+        key: key.toString('base64'),  // Store for later decryption (legacy — will be removed in Task 4)
         iv: iv.toString('base64'),
         authTag: authTag.toString('base64')
       }
@@ -159,7 +160,7 @@ class IagonStorageClient {
     const contentHash = this.calculateContentHash(fileContent);
 
     // Encrypt content if needed
-    const { content: encryptedContent, encryptionInfo } = this.encryptContent(
+    const { content: encryptedContent, encryptionInfo, rawKey } = this.encryptContent(
       fileContent,
       classificationLevel
     );
@@ -183,10 +184,11 @@ class IagonStorageClient {
           encryptionInfo: {
             algorithm: encryptionInfo.algorithm,
             keyId: encryptionInfo.keyId,
-            key: encryptionInfo.key,
+            // NO 'key' field — raw DEK returned separately as rawDEK below
             iv: encryptionInfo.iv,
             authTag: encryptionInfo.authTag
           },
+          rawDEK: rawKey || null,  // Buffer (32 bytes) — CALLER MUST zero with rawDEK.fill(0) after wrapping; null for UNCLASSIFIED
           iagonUrl: this.getFileUrl(result.fileId, filename),
           uploadedAt: new Date().toISOString(),
           fileSize: encryptedContent.length,
@@ -205,6 +207,34 @@ class IagonStorageClient {
     }
 
     throw new Error(`Upload failed after ${this.maxRetries} attempts: ${lastError.message}`);
+  }
+
+  /**
+   * Upload a wrapped key manifest (JSON) to Iagon as plain bytes.
+   * The manifest is already CMK-protected; no additional encryption is applied here.
+   *
+   * @param {Object} wrappedManifest - Object produced by ClassificationKeyManager.wrapDEK()
+   * @param {string} labelFilename   - Label used to build the Iagon filename
+   * @returns {{ manifestFileId: string }}
+   */
+  async uploadKeyManifest(wrappedManifest, labelFilename) {
+    const json = Buffer.from(JSON.stringify(wrappedManifest));
+    // Upload as plain JSON (no encryption — manifest is already CMK-protected)
+    const result = await this._uploadToIagon(json, `keymanifest-${labelFilename}.json`);
+    return { manifestFileId: result.fileId };
+  }
+
+  /**
+   * Download a wrapped key manifest previously uploaded by uploadKeyManifest().
+   * Parses the raw bytes as JSON and returns the manifest object.
+   *
+   * @param {string} manifestFileId - Iagon file ID of the manifest
+   * @returns {Object} Parsed manifest (e.g. { wrappedKey, iv, authTag, classificationLevel })
+   */
+  async downloadKeyManifest(manifestFileId) {
+    // Download without decryption (pass null encryptionInfo)
+    const buf = await this.downloadFile(manifestFileId, null);
+    return JSON.parse(buf.toString());
   }
 
   /**

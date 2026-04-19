@@ -116,7 +116,7 @@ function buildEnterpriseCredentialAdapter(rawCred: any) {
         rawCred.credentialAttributes.forEach((a: any) => { attrMap[a.name] = a.value; });
     }
     const enterpriseType = getEnterpriseCredentialType(rawCred);
-    const holderName = attrMap.employeeName || attrMap.email || attrMap.employeeId || 'Enterprise User';
+    const holderName = attrMap.holderName || attrMap.employeeName || attrMap.email || attrMap.employeeId || 'Enterprise User';
 
     // Derive companyName from email domain if not explicitly set
     if (!attrMap.companyName && attrMap.email) {
@@ -126,8 +126,15 @@ function buildEnterpriseCredentialAdapter(rawCred: any) {
         attrMap.companyName = base.charAt(0).toUpperCase() + base.slice(1);
     }
 
+    // Map SecurityClearance field names to the ones CertificateLayout expects
+    if (enterpriseType === 'SecurityClearance') {
+        if (attrMap.grantedAt && !attrMap.issuedDate)     attrMap.issuedDate     = attrMap.grantedAt;
+        if (attrMap.validUntil && !attrMap.expiryDate)    attrMap.expiryDate     = attrMap.validUntil;
+        if (attrMap.holderDID && !attrMap.holderUniqueId) attrMap.holderUniqueId = attrMap.holderDID;
+    }
+
     // Derive issuedAt from cloud agent createdAt if not set
-    const issuedAt = rawCred.issuedAt || rawCred.createdAt || attrMap.hireDate || attrMap.effectiveDate || '';
+    const issuedAt = rawCred.issuedAt || rawCred.createdAt || attrMap.grantedAt || attrMap.hireDate || attrMap.effectiveDate || '';
 
     return {
         ...rawCred,

@@ -22,6 +22,7 @@
     "@yudiel/react-qr-scanner": "^2.4.1",
     "buffer": "^6.0.3",
     "crypto": "^1.0.1",
+    "docx-preview": "^0.3.7",
     "fs": "^0.0.1-security",
     "jose": "^5.2.0",
     "jotai": "^2.6.1",

@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import { IDLLogo } from '../IDLLogo';
 import { NavItem } from '../NavItem';
-import { useMountedApp } from '@/reducers/store';
+import { useMountedApp, useAppSelector } from '@/reducers/store';
+import { selectIsEnterpriseConfigured } from '@/reducers/enterpriseAgent';
 
 interface MainLayoutProps {
   children: React.ReactNode;
@@ -34,6 +35,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     return () => window.removeEventListener('wallet-log-path', handler);
   }, []);
 
+  const isEnterpriseConfigured = useAppSelector(selectIsEnterpriseConfigured);
   const isDbConnected = app.db?.connected;
   const agentStatus: keyof typeof STATUS_CONFIG =
     app.agent?.hasStarted ? 'connected' : app.agent?.isStarting ? 'syncing' : 'disconnected';
@@ -53,12 +55,12 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   };
 
   const navItems = [
-    { id: '/',              icon: '🏠', label: 'Dashboard' },
-    { id: '/credentials',   icon: '🎫', label: 'Credentials' },
-    { id: '/documents',     icon: '📁', label: 'Documents' },
-    { id: '/connections',   icon: '🔗', label: 'Connections' },
-    { id: '/did-management',icon: '🔑', label: 'DID Management' },
-    { id: '/messages',      icon: '💬', label: 'Messages' },
+    { id: '/',               icon: '🏠', label: 'Dashboard' },
+    { id: '/credentials',    icon: '🎫', label: 'Credentials' },
+    ...(isEnterpriseConfigured ? [{ id: '/documents', icon: '📁', label: 'Documents' }] : []),
+    { id: '/connections',    icon: '🔗', label: 'Connections' },
+    { id: '/did-management', icon: '🔑', label: 'DID Management' },
+    { id: '/messages',       icon: '💬', label: 'Messages' },
   ];
 
   const bottomNavItems = [

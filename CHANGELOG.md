@@ -4,6 +4,31 @@ This file contains historical updates and fixes that have been archived from the
 
 ---
 
+## April 2026
+
+### Document Viewer Fix + Update Button — IDL Wallet (April 12, 2026)
+
+**Status**: ✅ Production Ready
+
+**Problem**: Clicking a document icon in the IDL wallet file explorer triggered a direct browser download instead of opening the `ClassifiedDocumentViewer` modal. The viewer (which renders DOCX in-browser via `docx-preview`, enforces security controls, and counts views) was implemented but never connected to the `DocumentDIDAccess` completion flow. Additionally, the Update button (for submitting a new version of a DOCX) was only accessible in the "My Documents" card view, not from within the viewer itself.
+
+**Fix 1 — Open viewer instead of downloading**
+
+`DocumentDIDAccess.tsx` ended the VP flow by triggering a browser download for DOCX or rendering HTML inline in the panel. Changed `onDocumentSaved` prop signature from `() => void` to `(ephemeralDID: string) => void`. After `storeDocument` succeeds the callback now receives the stored document's ephemeralDID. In `documents.tsx`, `onDocumentSaved` dispatches `openDocument(ephemeralDID)`, which sets `classifiedDocuments.isViewing = true` and causes `ClassifiedDocumentViewer` to mount.
+
+**Fix 2 — Update button in viewer**
+
+Extended `ClassifiedDocumentViewerProps` with optional edit props: `editState`, `editError`, `selectedFile`, `onEdit`, `onFileSelect`, `onSubmitEdit`, `onCancelEdit`. The viewer header now shows an amber **Update** button for DOCX documents when `onEdit` is provided. Below the header, an edit panel appears during `editing` / `uploading` / `done` / `error` states — showing a file picker, Submit, and Cancel. `documents.tsx` wires the existing `handleEdit` / `handleSubmitEdit` / `handleCancelEdit` handlers and state into the viewer props.
+
+**Build note**: IDL wallet runs as `next start` (production build) at port 3002. Source changes require `yarn build` + server restart — a hard refresh alone is not sufficient.
+
+**Files Modified**:
+- `idl-wallet/src/components/DocumentDIDAccess.tsx` — removed DOCX auto-download and inline HTML renderer; `onDocumentSaved(ephemeralDID)` called after store
+- `idl-wallet/src/pages/documents.tsx` — `onDocumentSaved` dispatches `openDocument`; viewer receives edit props
+- `idl-wallet/src/components/ClassifiedDocumentViewer.tsx` — new `RefreshIcon` import; extended props; Update button in header; edit panel below header
+
+---
+
 ## March 2026
 
 ### QR Scanner Fix — Short URL Resolution & @yudiel/react-qr-scanner v2.x API (March 21, 2026)

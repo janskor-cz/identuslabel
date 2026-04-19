@@ -76,8 +76,19 @@ const ConnectionEventHandler = require('./lib/ConnectionEventHandler');
 const SchemaManager = require('./lib/SchemaManager');
 const EmployeePortalDatabase = require('./lib/EmployeePortalDatabase');
 const DocumentRegistry = require('./lib/DocumentRegistry');
+const FolderRegistry = require('./lib/FolderRegistry');
 const EnterpriseDocumentManager = require('./lib/EnterpriseDocumentManager');
 const ReEncryptionService = require('./lib/ReEncryptionService');
+
+// Task 1: Initialise Classification Master Key (CMK) store — server will not
+// start if any CMK env var is missing or has wrong length.
+const cmk = require('./lib/ClassificationKeyManager');
+try {
+  cmk.load();
+} catch (err) {
+  console.error('[CMK] Failed to load CMK store:', err.message);
+  process.exit(1);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3010;
@@ -3025,14 +3036,47 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
     let iagonStorage = null;
     if (iagonClient.isConfigured()) {
       try {
-        iagonStorage = await iagonClient.uploadFile(
+        const iagonResult = await iagonClient.uploadFile(
           req.file.buffer,
           req.file.originalname,
           { classificationLevel }
         );
-        console.log(`[DocumentUpload] ✅ File uploaded to Iagon: ${iagonStorage.filename}`);
-        console.log(`[DocumentUpload]    File ID: ${iagonStorage.fileId}`);
-        console.log(`[DocumentUpload]    Download URL: ${iagonStorage.iagonUrl}`);
+        console.log(`[DocumentUpload] ✅ File uploaded to Iagon: ${iagonResult.filename}`);
+        console.log(`[DocumentUpload]    File ID: ${iagonResult.fileId}`);
+        console.log(`[DocumentUpload]    Download URL: ${iagonResult.iagonUrl}`);
+
+        // Task 2: Wrap DEK with CMK before persisting
+        let encryptionManifestId = null;
+        if (iagonResult.rawDEK) {
+          try {
+            const wrappedManifest = cmk.wrapDEK(iagonResult.rawDEK, classificationLevel);
+            iagonResult.rawDEK.fill(0); // zero raw key from memory (PFS)
+
+            // Upload wrapped manifest to Iagon
+            const { manifestFileId } = await iagonClient.uploadKeyManifest(
+              wrappedManifest,
+              `doc-${Date.now()}`
+            );
+            encryptionManifestId = manifestFileId;
+            console.log(`[DocumentUpload] ✅ Key manifest uploaded to Iagon: ${encryptionManifestId}`);
+          } catch (manifestErr) {
+            console.error('[DocumentUpload] Failed to upload key manifest to Iagon:', manifestErr.message);
+            // Continue — will fall back to legacy path during access
+          }
+        }
+
+        iagonStorage = {
+          fileId: iagonResult.fileId,
+          nodeId: iagonResult.nodeId,
+          iagonUrl: iagonResult.iagonUrl,
+          filename: iagonResult.filename,
+          contentHash: iagonResult.contentHash,
+          encryptionManifestId: encryptionManifestId,
+          encryptionInfo: iagonResult.encryptionInfo, // iv, authTag, algorithm — NO key
+          uploadedAt: iagonResult.uploadedAt,
+          fileSize: iagonResult.fileSize,
+          originalSize: iagonResult.originalSize
+        };
       } catch (iagonError) {
         console.error('[DocumentUpload] ⚠️ Iagon upload failed:', iagonError.message);
         // Continue without Iagon storage - DID will be created without service endpoint
@@ -3118,7 +3162,8 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
           documentDescription: description,
           releasableTo: releasableToArray.join(', '),
           createdBy: session.email,
-          createdByDID: session.prismDid
+          createdByDID: session.prismDid,
+          encryptionManifestId: iagonStorage?.encryptionManifestId
         });
 
         metadataVCRecordId = vcResult.recordId;
@@ -3142,7 +3187,7 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
       title,
       classificationLevel,
       releasableTo: releasableToIssuerDIDs,
-      contentEncryptionKey: iagonStorage?.encryptionInfo?.key || 'no-encryption',
+      contentEncryptionKey: iagonStorage?.encryptionManifestId || 'no-encryption', // Task 2: manifest ID replaces raw key
       ownerCompanyDID: session.issuerDID || null,
       metadata: {
         title,
@@ -3465,12 +3510,17 @@ app.get('/api/documents/discover', async (req, res) => {
 
     console.log(`[DocumentRegistry] Found ${documents.length} documents for ${issuerDID}`);
 
+    // Attach folder membership map so the frontend can group documents by folder
+    const allDIDs = documents.map(d => d.documentDID);
+    const folderMembership = FolderRegistry.getMembershipMapForCompany(issuerDID, allDIDs);
+
     res.json({
       success: true,
       documents,
       count: documents.length,
       issuerDID,
-      clearanceLevel: clearanceLevel || 'UNCLASSIFIED'
+      clearanceLevel: clearanceLevel || 'UNCLASSIFIED',
+      folderMembership
     });
 
   } catch (error) {
@@ -3942,6 +3992,122 @@ app.get('/api/admin/access-logs', requireCompany, async (req, res) => {
 });
 
 // ============================================================================
+// Folder Registry API
+// ============================================================================
+
+/**
+ * GET /api/folders?ownerCompanyDID=...
+ * List all folders for a company, with document counts.
+ */
+app.get('/api/folders', async (req, res) => {
+  try {
+    const { ownerCompanyDID } = req.query;
+    if (!ownerCompanyDID) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'ownerCompanyDID is required' });
+    }
+    const folders = FolderRegistry.getFoldersForCompany(ownerCompanyDID);
+    res.json({ success: true, folders });
+  } catch (err) {
+    console.error('[FolderRegistry] GET /api/folders error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/folders
+ * Create a new folder.
+ * Body: { name, parentFolderId?, ownerCompanyDID }
+ */
+app.post('/api/folders', async (req, res) => {
+  try {
+    const { name, parentFolderId, ownerCompanyDID } = req.body;
+    if (!name || !ownerCompanyDID) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'name and ownerCompanyDID are required' });
+    }
+    const folder = await FolderRegistry.createFolder({ name, parentFolderId: parentFolderId || null, ownerCompanyDID });
+    res.json({ success: true, folder });
+  } catch (err) {
+    console.error('[FolderRegistry] POST /api/folders error:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/folders/:folderId?ownerCompanyDID=...
+ * Delete a folder (children re-parented, documents moved to root).
+ */
+app.delete('/api/folders/:folderId', async (req, res) => {
+  try {
+    const { folderId } = req.params;
+    const { ownerCompanyDID } = req.query;
+    if (!ownerCompanyDID) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'ownerCompanyDID is required' });
+    }
+    const result = await FolderRegistry.deleteFolder(folderId, ownerCompanyDID);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[FolderRegistry] DELETE /api/folders error:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * PATCH /api/folders/:folderId
+ * Rename a folder.
+ * Body: { name, ownerCompanyDID }
+ */
+app.patch('/api/folders/:folderId', async (req, res) => {
+  try {
+    const { folderId } = req.params;
+    const { name, ownerCompanyDID } = req.body;
+    if (!name || !ownerCompanyDID) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'name and ownerCompanyDID are required' });
+    }
+    const folder = await FolderRegistry.renameFolder(folderId, name.trim(), ownerCompanyDID);
+    res.json({ success: true, folder });
+  } catch (err) {
+    console.error('[FolderRegistry] PATCH /api/folders error:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * PUT /api/folders/:folderId/documents/:documentDID
+ * Move a document into a folder.
+ * Body: { ownerCompanyDID }
+ */
+app.put('/api/folders/:folderId/documents/:documentDID', async (req, res) => {
+  try {
+    const { folderId, documentDID } = req.params;
+    const { ownerCompanyDID } = req.body;
+    if (!ownerCompanyDID) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'ownerCompanyDID is required' });
+    }
+    const decodedDID = decodeURIComponent(documentDID);
+    await FolderRegistry.addDocumentToFolder(decodedDID, folderId, ownerCompanyDID);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[FolderRegistry] PUT folder document error:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/folders/root/documents/:documentDID
+ * Remove a document from any folder (move back to root/uncategorized).
+ */
+app.delete('/api/folders/root/documents/:documentDID', async (req, res) => {
+  try {
+    const decodedDID = decodeURIComponent(req.params.documentDID);
+    await FolderRegistry.removeDocumentFromFolder(decodedDID);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[FolderRegistry] DELETE folder document error:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
 // VC-Based Document Access Gate
 // ============================================================================
 
@@ -4174,12 +4340,40 @@ app.post('/api/access-gate/present', async (req, res) => {
     }
 
     const iagonClient = getIagonClient();
-    const isDocxDoc = document.metadata?.sourceFormat === 'docx' && document.iagonStorage.originalDocxFileId;
+    const isDocxDoc = document.metadata?.sourceFormat === 'docx' ||
+                      !!document.iagonStorage.originalDocxFileId;
     let redactedContent;
 
+    // Task 4: CMK-unwrap helper — supports new manifest path and legacy fallback
+    async function decryptFromIagon(storage, classLevel) {
+      if (storage.encryptionManifestId) {
+        // New path: fetch wrapped manifest from Iagon, unwrap DEK with CMK
+        const wrappedManifest = await iagonClient.downloadKeyManifest(storage.encryptionManifestId);
+        const rawDEK = cmk.unwrapDEK(wrappedManifest, classLevel);
+        const fullEncInfo = { ...storage.encryptionInfo, key: rawDEK.toString('base64') };
+        const content = await iagonClient.downloadFile(storage.fileId, fullEncInfo);
+        rawDEK.fill(0); // zero raw DEK from memory
+        return content;
+      } else {
+        // Legacy path: raw key still in encryptionInfo (or unencrypted)
+        return iagonClient.downloadFile(storage.fileId, storage.encryptionInfo || null);
+      }
+    }
+
     if (isDocxDoc) {
-      // Full-fidelity DOCX redaction
-      const originalDocx = await iagonClient.downloadFile(document.iagonStorage.originalDocxFileId);
+      // Full-fidelity DOCX redaction — use originalDocxFileId when available, fallback to fileId
+      let originalDocx;
+      if (document.iagonStorage.originalDocxFileId) {
+        // Build a synthetic storage descriptor for the DOCX file
+        const docxStorage = {
+          fileId: document.iagonStorage.originalDocxFileId,
+          encryptionManifestId: document.iagonStorage.originalDocxManifestId || null,
+          encryptionInfo: document.iagonStorage.originalDocxEncryptionInfo || null
+        };
+        originalDocx = await decryptFromIagon(docxStorage, document.classificationLevel);
+      } else {
+        originalDocx = await decryptFromIagon(document.iagonStorage, document.classificationLevel);
+      }
       redactedContent = await DocxRedactionService.applyRedactions(
         originalDocx,
         clearanceLevel || 'UNCLASSIFIED',
@@ -4187,7 +4381,7 @@ app.post('/api/access-gate/present', async (req, res) => {
       );
     } else {
       // HTML section-based redaction
-      const packageBuffer = await iagonClient.downloadFile(document.iagonStorage.fileId);
+      const packageBuffer = await decryptFromIagon(document.iagonStorage, document.classificationLevel);
       const encryptedPackage = JSON.parse(packageBuffer.toString('utf8'));
       const decryptionResult = SectionEncryptionService.decryptSectionsForUser(
         encryptedPackage,
@@ -4242,6 +4436,11 @@ app.post('/api/access-gate/present', async (req, res) => {
       copyId,
       copyHash,
       ephemeralDID: ephemeralMetadata.ephemeralDID,
+      clearanceLevel: clearanceLevel || 'UNCLASSIFIED',
+      documentMetadata: {
+        title: document.metadata?.title || document.metadata?.name || `Document ${copyId}`,
+        overallClassification: document.classificationLevel || 'UNCLASSIFIED'
+      },
       encryptedDocument: {
         ciphertext:       encrypted.ciphertext,
         nonce:            encrypted.nonce,
@@ -4294,11 +4493,11 @@ app.post('/api/document-update/request-edit', async (req, res) => {
     const { documentDID, vp, challenge, ephemeralPublicKey } = req.body;
 
     // 1. Validate inputs
-    if (!documentDID || !vp || !challenge || !ephemeralPublicKey) {
+    if (!documentDID || !vp || !challenge) {
       return res.status(400).json({
         success: false,
         error: 'BadRequest',
-        message: 'documentDID, vp, challenge, and ephemeralPublicKey are required'
+        message: 'documentDID, vp, and challenge are required'
       });
     }
 
@@ -4337,15 +4536,20 @@ app.post('/api/document-update/request-edit', async (req, res) => {
       return res.status(403).json({ success: false, error: 'ReleasabilityDenied', message: 'Your credential issuer is not authorized for this document' });
     }
 
-    // 6. Clearance check
+    // 6. Clearance check — editor must cover the highest section (no merge needed)
     const CLEARANCE_NUMERIC = { 'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2, 'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4, 'TOP_SECRET': 4 };
-    const docLevel = CLEARANCE_NUMERIC[document.classificationLevel] ?? 1;
-    const userLevel = clearanceLevel ? (CLEARANCE_NUMERIC[clearanceLevel.toUpperCase()] ?? 0) : 0;
-    if (userLevel < docLevel) {
+    const sectionLevels = (document.metadata?.sectionMetadata || [])
+      .map(s => CLEARANCE_NUMERIC[s.clearance?.toUpperCase()] ?? 0);
+    const highestSectionLevel = sectionLevels.length > 0
+      ? Math.max(...sectionLevels)
+      : (CLEARANCE_NUMERIC[document.classificationLevel] ?? 1);
+    const userLevel = CLEARANCE_NUMERIC[clearanceLevel?.toUpperCase()] ?? 0;
+    if (userLevel < highestSectionLevel) {
+      const requiredLabel = Object.keys(CLEARANCE_NUMERIC).find(k => CLEARANCE_NUMERIC[k] === highestSectionLevel) || String(highestSectionLevel);
       return res.status(403).json({
         success: false,
-        error: 'ClearanceDenied',
-        message: `Document requires ${document.classificationLevel}, your clearance is ${clearanceLevel || 'UNCLASSIFIED'}`
+        error: 'InsufficientClearance',
+        message: `Editing requires clearance covering all sections. Required: ${requiredLabel}, yours: ${clearanceLevel || 'UNCLASSIFIED'}`
       });
     }
 
@@ -4354,18 +4558,7 @@ app.post('/api/document-update/request-edit', async (req, res) => {
       return res.status(400).json({ success: false, error: 'NotDocxDocument', message: 'Document is not a DOCX file' });
     }
 
-    // 8. Download original DOCX
-    const iagonClient = getIagonClient();
-    const originalDocx = await iagonClient.downloadFile(document.iagonStorage.originalDocxFileId);
-
-    // 9. Apply redactions
-    const redactedDocx = await DocxRedactionService.applyRedactions(
-      originalDocx,
-      clearanceLevel || 'INTERNAL',
-      document.metadata?.sectionMetadata || []
-    );
-
-    // 10. Sign edit token (5-minute expiry)
+    // 8. Sign edit token (5-minute expiry)
     const editToken = jwt.sign({
       sub:            'document-edit',
       documentDID,
@@ -4375,23 +4568,11 @@ app.post('/api/document-update/request-edit', async (req, res) => {
       exp:            Math.floor(Date.now() / 1000) + 300
     }, COMPANY_SECRET, { algorithm: 'HS256' });
 
-    // 11. Encrypt redacted DOCX for wallet
-    const encrypted = ReEncryptionService.encryptForEphemeralKey(redactedDocx, ephemeralPublicKey);
-
-    const filename = document.iagonStorage?.filename || `document-${documentDID.slice(-8)}.docx`;
-
     console.log(`[DocumentUpdate] ✅ Edit token issued for ${documentDID}`);
 
     res.json({
       success: true,
       editToken,
-      encryptedEditableDocument: {
-        ciphertext:       encrypted.ciphertext,
-        nonce:            encrypted.nonce,
-        serverPublicKey:  encrypted.serverPublicKey
-      },
-      filename,
-      mimeType: DOCX_MIME,
       expiresIn: 300
     });
 
@@ -4443,17 +4624,8 @@ app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, r
     const iagonClient = getIagonClient();
     const originalDocx = await iagonClient.downloadFile(previousFileId);
 
-    // 5. Merge
-    let mergedDocx;
-    try {
-      mergedDocx = await DocxMergeService.mergeDocx(originalDocx, req.file.buffer, clearanceLevel);
-    } catch (mergeErr) {
-      return res.status(422).json({
-        success: false,
-        error: 'MergeError',
-        message: mergeErr.message
-      });
-    }
+    // 5. Use submitted file directly — editor had full clearance, no merge needed
+    const mergedDocx = req.file.buffer;
 
     // 6. Compute content hash
     const contentHash = 'sha256:' + crypto.createHash('sha256').update(mergedDocx).digest('hex');
@@ -4465,9 +4637,49 @@ app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, r
       { classificationLevel: document.classificationLevel }
     );
 
-    // 8. Update registry with immutable version chain
+    // 7b. Verify the upload round-trips correctly before committing to registry.
+    // Iagon occasionally returns a stale fileId that points to a different file,
+    // causing AES-GCM authentication failures on the next download.
+    // Task 2: build a temporary encryptionInfo with the raw DEK for verification only.
+    const verifyEncryptionInfo = newResult.encryptionInfo && newResult.rawDEK
+      ? { ...newResult.encryptionInfo, key: newResult.rawDEK.toString('base64') }
+      : newResult.encryptionInfo;
+    try {
+      await iagonClient.downloadFile(newResult.fileId, verifyEncryptionInfo);
+      console.log(`[DocumentUpdate] ✅ Upload verified (fileId=${newResult.fileId})`);
+    } catch (verifyErr) {
+      console.error(`[DocumentUpdate] ❌ Upload verification failed: ${verifyErr.message}`);
+      return res.status(502).json({
+        success: false,
+        error: 'UploadVerificationFailed',
+        message: 'Document was uploaded but could not be read back from storage — Iagon may have returned a stale file ID. Please try again.'
+      });
+    }
+
+    // Task 2: Wrap DEK with CMK before persisting
+    let updateManifestId = null;
+    if (newResult.rawDEK) {
+      try {
+        const wrappedManifest = cmk.wrapDEK(newResult.rawDEK, document.classificationLevel);
+        newResult.rawDEK.fill(0); // zero raw key from memory (PFS)
+
+        const { manifestFileId } = await iagonClient.uploadKeyManifest(
+          wrappedManifest,
+          `update-${Date.now()}`
+        );
+        updateManifestId = manifestFileId;
+        console.log(`[DocumentUpdate] ✅ Key manifest uploaded to Iagon: ${updateManifestId}`);
+      } catch (manifestErr) {
+        console.error('[DocumentUpdate] Failed to upload key manifest to Iagon:', manifestErr.message);
+        // Continue — will fall back to legacy path during access
+      }
+    }
+
+    // 8. Update registry with immutable version chain (including new encryption key)
     const newVersion = await DocumentRegistry.addDocumentVersion(documentDID, {
-      newDocxFileId: newResult.fileId,
+      newDocxFileId:       newResult.fileId,
+      encryptionManifestId: updateManifestId,              // Task 2: manifest replaces raw key
+      encryptionInfo:      newResult.encryptionInfo || null, // iv, authTag, algorithm — NO key
       contentHash,
       editorDID,
       clearanceLevel
@@ -6074,7 +6286,7 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
       });
     }
 
-    const { releasableTo, department } = req.body;
+    const { releasableTo, department, classificationLevel: userClassificationLevel } = req.body;
 
     // Determine file type
     const filename = file.originalname.toLowerCase();
@@ -6147,6 +6359,12 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
     console.log(`     TOP-SECRET: ${stats['TOP-SECRET'] || 0}`);
     console.log(`   Overall classification: ${parsedDocument.metadata.overallClassification}`);
 
+    // Use user-selected classification level for document discovery (who can see it in their list)
+    if (userClassificationLevel) {
+      console.log(`   [ClassifiedUpload] Document classification set to: ${userClassificationLevel}`);
+      parsedDocument.metadata.overallClassification = userClassificationLevel;
+    }
+
     // Enforce: user cannot upload a document with sections above their own clearance
     const CLEARANCE_NUMERIC = {
       'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2,
@@ -6204,8 +6422,29 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
 
     console.log(`   [ClassifiedUpload] Uploaded encrypted package to Iagon: ${iagonResult.fileId}`);
 
+    // Task 2: Wrap DEK with CMK before persisting
+    let encryptionManifestId = null;
+    if (iagonResult.rawDEK) {
+      try {
+        const wrappedManifest = cmk.wrapDEK(iagonResult.rawDEK, parsedDocument.metadata.overallClassification);
+        iagonResult.rawDEK.fill(0); // zero raw key from memory (PFS)
+
+        // Upload wrapped manifest to Iagon
+        const { manifestFileId } = await iagonClient.uploadKeyManifest(
+          wrappedManifest,
+          encryptedPackage.documentId
+        );
+        encryptionManifestId = manifestFileId;
+        console.log(`   [ClassifiedUpload] ✅ Key manifest uploaded to Iagon: ${encryptionManifestId}`);
+      } catch (manifestErr) {
+        console.error('[ClassifiedUpload] Failed to upload key manifest to Iagon:', manifestErr.message);
+        // Continue — will fall back to legacy path during access
+      }
+    }
+
     // For DOCX files, also upload the original file for full-fidelity redacted viewing
     let originalDocxResult = null;
+    let originalDocxManifestId = null;
     console.log(`   [ClassifiedUpload] ===== ORIGINAL DOCX UPLOAD CHECK =====`);
     console.log(`   [ClassifiedUpload] isDocx value: ${isDocx}`);
     if (isDocx) {
@@ -6221,6 +6460,23 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
         );
         console.log(`   [ClassifiedUpload] ✅ Uploaded original DOCX: ${originalDocxResult?.fileId}`);
         console.log(`   [ClassifiedUpload] Full result:`, JSON.stringify(originalDocxResult, null, 2));
+
+        // Task 2: Wrap DOCX DEK with CMK before persisting
+        if (originalDocxResult?.rawDEK) {
+          try {
+            const wrappedDocxManifest = cmk.wrapDEK(originalDocxResult.rawDEK, parsedDocument.metadata.overallClassification);
+            originalDocxResult.rawDEK.fill(0); // zero raw key from memory (PFS)
+
+            const { manifestFileId: docxManifestFileId } = await iagonClient.uploadKeyManifest(
+              wrappedDocxManifest,
+              `original-${encryptedPackage.documentId}`
+            );
+            originalDocxManifestId = docxManifestFileId;
+            console.log(`   [ClassifiedUpload] ✅ Original DOCX key manifest uploaded: ${originalDocxManifestId}`);
+          } catch (docxManifestErr) {
+            console.error('[ClassifiedUpload] Failed to upload original DOCX key manifest:', docxManifestErr.message);
+          }
+        }
       } catch (docxUploadError) {
         console.error(`   [ClassifiedUpload] ❌ Failed to upload original DOCX:`, docxUploadError.message);
         // Continue without original - will fall back to HTML rendering
@@ -6231,22 +6487,14 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
 
     // Create real PRISM DID with DocumentAccessGate + DocumentPolicy service entries
     const PUBLIC_URL = process.env.PUBLIC_URL || 'https://identuslabel.cz/company-admin';
+    const deptKey = DEPARTMENT_API_KEYS[department || session.department] || DEPARTMENT_API_KEYS['Security'];
+    const documentManager = new EnterpriseDocumentManager(ENTERPRISE_CLOUD_AGENT_URL, deptKey);
     let documentDID;
     try {
-      const deptKey = DEPARTMENT_API_KEYS[department || session.department] || DEPARTMENT_API_KEYS['Security'];
-      const documentManager = new EnterpriseDocumentManager(ENTERPRISE_CLOUD_AGENT_URL, deptKey);
       const accessGateService = {
         id: 'document-access-gate',
         type: 'DocumentAccessGate',
         serviceEndpoint: `${PUBLIC_URL}/api/access-gate/challenge`
-      };
-      const documentPolicyService = {
-        id: 'document-policy',
-        type: 'DocumentPolicy',
-        serviceEndpoint: JSON.stringify({
-          releasableTo: releasableDIDs,
-          classificationLevel: parsedDocument.metadata.overallClassification
-        })
       };
       const didResult = await documentManager.createDocumentDIDWithServiceEndpoint(
         department || session.department || 'Security',
@@ -6261,14 +6509,14 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
           contentHash:    iagonResult.contentHash    || null,
           encryptionInfo: iagonResult.encryptionInfo || null
         },
-        [accessGateService, documentPolicyService],
+        [accessGateService],
         { documentServiceUrl: req.company?.documentServiceUrl || null }
       );
       documentDID = didResult.documentDID;
       console.log(`   [ClassifiedUpload] ✅ Real PRISM DID created: ${documentDID.substring(0, 60)}...`);
     } catch (didError) {
-      console.error(`   [ClassifiedUpload] ❌ PRISM DID creation failed, using fallback: ${didError.message}`);
-      documentDID = `did:prism:classified:${encryptedPackage.documentId}`;
+      console.error(`   [ClassifiedUpload] ❌ PRISM DID creation failed: ${didError.message}`);
+      throw new Error(`Failed to create PRISM DID for classified document: ${didError.message}`);
     }
 
     // Register in DocumentRegistry
@@ -6292,8 +6540,13 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
         fileId: iagonResult.fileId,
         nodeId: iagonResult.nodeId,
         url: iagonResult.url,
-        // For DOCX: store original file ID for full-fidelity redacted viewing
-        originalDocxFileId: originalDocxResult?.fileId || null
+        filename: file.originalname,
+        encryptionManifestId: encryptionManifestId,         // Task 2: manifest replaces raw key
+        encryptionInfo: iagonResult.encryptionInfo || null, // iv, authTag, algorithm — NO key
+        // For DOCX: store original file ID + decryption info for full-fidelity redacted viewing
+        originalDocxFileId: originalDocxResult?.fileId || null,
+        originalDocxManifestId: originalDocxManifestId || null, // Task 2: DOCX key manifest
+        originalDocxEncryptionInfo: originalDocxResult?.encryptionInfo || null
       }
     };
 
@@ -7593,6 +7846,15 @@ app.listen(PORT, async () => {
     console.log(`   📊 Classification breakdown: INTERNAL=${stats.byClassification['INTERNAL'] || 0}, CONFIDENTIAL=${stats.byClassification['CONFIDENTIAL'] || 0}, RESTRICTED=${stats.byClassification['RESTRICTED'] || 0}, SECRET=${stats.byClassification['SECRET'] || 0}, TOP-SECRET=${stats.byClassification['TOP-SECRET'] || 0}`);
   } catch (error) {
     console.error(`   ❌ DocumentRegistry initialization failed:`, error.message);
+  }
+
+  // Initialize FolderRegistry
+  console.log('🔧 Initializing FolderRegistry...');
+  try {
+    await FolderRegistry.initialize();
+    console.log(`   ✅ FolderRegistry loaded (${FolderRegistry.folders.size} folders)`);
+  } catch (error) {
+    console.error(`   ❌ FolderRegistry initialization failed:`, error.message);
   }
 
   console.log('='.repeat(70));

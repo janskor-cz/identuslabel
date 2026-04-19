@@ -629,8 +629,8 @@ function getUserFriendlyMessage(error: Error): string {
 
 **Documentation**:
 - `/ERROR_BOUNDARY_IMPLEMENTATION.md` - This file
-- `/root/CLAUDE.md` - Infrastructure documentation
-- `/root/clean-identus-wallet/CLAUDE.md` - Wallet-specific documentation
+- `/opt/project_identuslabel/CLAUDE.md` - Infrastructure documentation
+- `/opt/project_identuslabel/clean-identus-wallet/CLAUDE.md` - Wallet-specific documentation
 
 ---
 

@@ -11,8 +11,8 @@ Two Redux async thunks have been implemented for handling presentation requests:
 
 ## File Locations
 
-**Alice Wallet**: `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet/src/actions/index.ts` (lines 1592-1712)
-**Bob Wallet**: `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/bob-wallet/src/actions/index.ts` (lines 1598-1718)
+**Alice Wallet**: `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet/src/actions/index.ts` (lines 1592-1712)
+**Bob Wallet**: `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/bob-wallet/src/actions/index.ts` (lines 1598-1718)
 
 ## Function Signatures
 
@@ -402,10 +402,10 @@ await dispatch(sendVerifiablePresentation({
 
 ## Related Files
 
-- **Actions**: `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/{alice,bob}-wallet/src/actions/index.ts`
-- **Reducers**: `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/{alice,bob}-wallet/src/reducers/app.ts`
-- **Types**: `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/{alice,bob}-wallet/src/reducers/app.ts` (lines 166-175)
-- **Message Handler**: `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/{alice,bob}-wallet/src/actions/index.ts` (lines 230-254 - dispatches `presentationRequestReceived`)
+- **Actions**: `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/{alice,bob}-wallet/src/actions/index.ts`
+- **Reducers**: `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/{alice,bob}-wallet/src/reducers/app.ts`
+- **Types**: `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/{alice,bob}-wallet/src/reducers/app.ts` (lines 166-175)
+- **Message Handler**: `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/{alice,bob}-wallet/src/actions/index.ts` (lines 230-254 - dispatches `presentationRequestReceived`)
 
 ## Next Steps
 

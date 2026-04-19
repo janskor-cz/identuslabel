@@ -22,6 +22,7 @@ import {
   applyConfiguration,
   removeConfiguration as removeConfigRedux
 } from '../actions/enterpriseAgentActions';
+import { deleteCredentialByVcId } from '../actions/index';
 
 interface ServiceConfigDisplayProps {
   config: WalletConfiguration;
@@ -107,6 +108,12 @@ export const ServiceConfigDisplay: React.FC<ServiceConfigDisplayProps> = ({
           setError('Failed to remove configuration');
           return;
         }
+      }
+
+      // Delete the underlying ServiceConfiguration VC from Pluto (IndexedDB) so
+      // syncCredentialsToStorage cannot re-create the configuration on next render.
+      if (config.vcId) {
+        await dispatch(deleteCredentialByVcId(config.vcId) as any).unwrap();
       }
 
       console.log('[ServiceConfigDisplay] ✅ Configuration removed successfully');

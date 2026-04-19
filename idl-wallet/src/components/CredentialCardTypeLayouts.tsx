@@ -301,6 +301,58 @@ function CertificationAuthorityLayout({ credential }: CredentialLayoutProps) {
   );
 }
 
+function DocumentMetadataLayout({ credential }: CredentialLayoutProps) {
+  const subject = getCredentialSubject(credential);
+  const clearanceLevel = subject?.classificationLevel || 'UNCLASSIFIED';
+  const badgeClasses = getClearanceBadgeClasses(clearanceLevel);
+
+  return (
+    <div className="bg-slate-800/40 rounded-xl p-3 border border-slate-600/40">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-base">📄</span>
+        <span className="text-sm font-medium text-slate-200 truncate flex-1">
+          {subject?.documentTitle || 'Document'}
+        </span>
+        <span className={`px-2 py-0.5 rounded text-xs font-bold ${badgeClasses}`}>
+          {clearanceLevel}
+        </span>
+      </div>
+      <div className="space-y-1 text-xs">
+        {subject?.documentType && (
+          <div className="flex gap-2">
+            <span className="text-slate-400 shrink-0 w-28">Type</span>
+            <span className="text-slate-300">{subject.documentType}</span>
+          </div>
+        )}
+        {subject?.createdBy && (
+          <div className="flex gap-2">
+            <span className="text-slate-400 shrink-0 w-28">Created by</span>
+            <span className="text-slate-300">{subject.createdBy}</span>
+          </div>
+        )}
+        {subject?.createdAt && (
+          <div className="flex gap-2">
+            <span className="text-slate-400 shrink-0 w-28">Date</span>
+            <span className="text-slate-300">{new Date(subject.createdAt).toLocaleDateString()}</span>
+          </div>
+        )}
+        {subject?.documentDescription && (
+          <div className="flex gap-2">
+            <span className="text-slate-400 shrink-0 w-28">Description</span>
+            <span className="text-slate-300 truncate">{subject.documentDescription}</span>
+          </div>
+        )}
+        {subject?.encryptionManifestId && (
+          <div className="flex gap-2 pt-1 border-t border-slate-700/50 mt-1">
+            <span className="text-slate-500 shrink-0 w-28">Key manifest</span>
+            <span className="font-mono text-slate-500 truncate text-xs">{subject.encryptionManifestId}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function UnknownCredentialLayout({ credential }: CredentialLayoutProps) {
   const subject = getCredentialSubject(credential);
   const entries = subject ? Object.entries(subject).filter(([k]) => k !== 'id') : [];
@@ -353,6 +405,8 @@ export function getCredentialLayout(credential: any) {
       return <ServiceConfigurationLayout credential={credential} />;
     case 'CertificationAuthorityIdentity':
       return <CertificationAuthorityLayout credential={credential} />;
+    case 'DocumentMetadata':
+      return <DocumentMetadataLayout credential={credential} />;
     default:
       return <UnknownCredentialLayout credential={credential} />;
   }

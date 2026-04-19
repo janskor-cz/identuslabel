@@ -618,6 +618,7 @@ export async function storeDocumentFromCredential(
     visibleSectionCount: number;
     expiresAt: string;
     viewsAllowed: number;
+    sourceFormat?: string;
   },
   documentCopyVC?: string
 ): Promise<void> {
@@ -645,7 +646,7 @@ export async function storeDocumentFromCredential(
     },
     sourceInfo: {
       filename: documentCopyInfo.title,
-      format: 'html'
+      format: documentCopyInfo.sourceFormat || 'html'
     },
     receivedAt: new Date().toISOString(),
     expiresAt: documentCopyInfo.expiresAt,

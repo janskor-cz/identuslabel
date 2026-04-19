@@ -32,6 +32,7 @@ const fetch = require('node-fetch');
 const DocumentRegistry = require('./DocumentRegistry');
 const StatusListService = require('./StatusListService');
 const { IagonStorageClient } = require('./IagonStorageClient');
+const cmk = require('./ClassificationKeyManager');
 
 // Nonce cache for replay attack prevention (in production, use Redis)
 const nonceCache = new Map();
@@ -129,13 +130,18 @@ class ReEncryptionService {
             // but we no longer deny access based on prior views
 
             // Step 1: Verify Ed25519 signature
+            // NOTE: document may not be in registry yet at this point (pre-Step 3 lookup),
+            // but we pass classificationLevel from the registry if the document is found later.
+            // For now we do a lightweight pre-lookup solely to pass the classification level.
+            const _preDoc = DocumentRegistry.documents.get(documentDID);
             const signatureValid = await this.verifySignature({
                 documentDID,
                 ephemeralDID,
                 timestamp,
                 nonce,
                 signature,
-                requestorDID
+                requestorDID,
+                documentClassificationLevel: _preDoc ? _preDoc.classificationLevel : 'INTERNAL'
             });
 
             if (!signatureValid) {
@@ -229,15 +235,29 @@ class ReEncryptionService {
                 };
             }
 
-            const encryptionInfo = document.iagonStorage.encryptionInfo || null;
             let content;
 
             try {
-                // Download and optionally decrypt from Iagon
-                content = await iagonClient.downloadFile(
-                    document.iagonStorage.fileId,
-                    encryptionInfo
-                );
+                // Task 4: CMK-unwrap path for new documents; legacy fallback for old documents
+                if (document.iagonStorage.encryptionManifestId) {
+                    // New path: fetch wrapped manifest from Iagon, unwrap DEK with CMK
+                    const wrappedManifest = await iagonClient.downloadKeyManifest(
+                        document.iagonStorage.encryptionManifestId
+                    );
+                    const rawDEK = cmk.unwrapDEK(wrappedManifest, document.classificationLevel);
+                    const fullEncInfo = {
+                        ...document.iagonStorage.encryptionInfo,
+                        key: rawDEK.toString('base64')
+                    };
+                    content = await iagonClient.downloadFile(document.iagonStorage.fileId, fullEncInfo);
+                    rawDEK.fill(0); // zero raw DEK from memory
+                } else {
+                    // Legacy path: raw key still in encryptionInfo (or unencrypted)
+                    content = await iagonClient.downloadFile(
+                        document.iagonStorage.fileId,
+                        document.iagonStorage.encryptionInfo || null
+                    );
+                }
             } catch (downloadError) {
                 console.error('[ReEncryptionService] Iagon download error:', downloadError);
                 accessLogEntry.denialReason = 'STORAGE_ERROR';
@@ -328,7 +348,11 @@ class ReEncryptionService {
      * not yet published to PRISM) so that new employees can still access
      * INTERNAL-level documents during onboarding.
      */
-    static async verifySignature({ documentDID, ephemeralDID, timestamp, nonce, signature, requestorDID }) {
+    static async verifySignature({ documentDID, ephemeralDID, timestamp, nonce, signature, requestorDID, documentClassificationLevel = 'INTERNAL' }) {
+        // Map classification label to numeric level for fallback gating (Task 7)
+        const LEVEL_MAP = { UNCLASSIFIED: 0, INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3, SECRET: 4, 'TOP-SECRET': 4, TOP_SECRET: 4 };
+        const levelNum = LEVEL_MAP[documentClassificationLevel?.toUpperCase()] ?? 2;
+
         try {
             const signatureBytes = Buffer.from(signature, 'base64');
 
@@ -365,7 +389,12 @@ class ReEncryptionService {
                 );
 
                 if (!resolveResponse.ok) {
-                    console.warn(`[ReEncryptionService] DID resolution failed (${resolveResponse.status}) — falling back to format-only validation`);
+                    // Task 7: deny CONFIDENTIAL+ when Cloud Agent is unreachable
+                    if (levelNum > 1) {
+                        console.warn(`[ReEncryptionService] DID resolution unavailable for ${documentClassificationLevel} document — denying access`);
+                        return false;
+                    }
+                    console.warn('[ReEncryptionService] DID resolution unavailable — INTERNAL doc, allowing format-only fallback');
                     return true; // format already validated above
                 }
 
@@ -375,7 +404,12 @@ class ReEncryptionService {
                 const verificationMethods = didDoc.verificationMethods || didDoc.authentication || [];
 
                 if (verificationMethods.length === 0) {
-                    console.warn('[ReEncryptionService] No verification methods in DID document — accepting format-only');
+                    // Task 7: deny CONFIDENTIAL+ when no keys can be verified
+                    if (levelNum > 1) {
+                        console.warn(`[ReEncryptionService] DID resolution unavailable for ${documentClassificationLevel} document — denying access`);
+                        return false;
+                    }
+                    console.warn('[ReEncryptionService] DID resolution unavailable — INTERNAL doc, allowing format-only fallback');
                     return true;
                 }
 
@@ -414,7 +448,12 @@ class ReEncryptionService {
                 return false;
 
             } catch (resolveError) {
-                console.warn('[ReEncryptionService] DID resolution error — falling back to format-only validation:', resolveError.message);
+                // Task 7: Only allow format-only fallback for INTERNAL documents
+                if (levelNum > 1) {
+                    console.warn(`[ReEncryptionService] DID resolution unavailable for ${documentClassificationLevel} document — denying access`);
+                    return false;
+                }
+                console.warn('[ReEncryptionService] DID resolution unavailable — INTERNAL doc, allowing format-only fallback');
                 return true; // format already validated above
             }
 

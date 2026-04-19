@@ -572,14 +572,14 @@ After deploying fixes, verify stability:
 ## Related Files for Investigation
 
 **Critical Files**:
-- `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet/src/pages/credentials.tsx`
-- `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet/src/actions/index.ts`
-- `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet/src/utils/credentialStatus.ts`
-- `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/src/edge-agent/connectionsManager/ConnectionsManager.ts`
+- `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet/src/pages/credentials.tsx`
+- `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet/src/actions/index.ts`
+- `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet/src/utils/credentialStatus.ts`
+- `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/src/edge-agent/connectionsManager/ConnectionsManager.ts`
 
 **SDK Files to Monitor**:
-- `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/src/pluto/Pluto.ts` (database layer)
-- `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/src/edge-agent/didcomm/Agent.ts` (message polling)
+- `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/src/pluto/Pluto.ts` (database layer)
+- `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/src/edge-agent/didcomm/Agent.ts` (message polling)
 
 ---
 

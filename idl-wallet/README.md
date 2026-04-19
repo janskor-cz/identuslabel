@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# IDL Wallet
 
-## Getting Started
+Primary SSI wallet for the Identus Label platform. Runs at `https://identuslabel.cz/wallet` (port 3002, Caddy reverse proxy).
 
-First, run the development server:
+## Running the server
+
+The wallet runs as a **production build** (`next start`), not in dev mode. After any source change:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cd /opt/project_identuslabel/idl-wallet
+yarn build
+kill $(lsof -ti :3002) 2>/dev/null; sleep 1
+nohup node_modules/.bin/next start --port 3002 --hostname 0.0.0.0 > /opt/project_identuslabel/idl-wallet.log 2>&1 &
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Hard-refreshing the browser (`Ctrl+Shift+R`) alone is not enough — a rebuild is required.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Key features
 
-This project uses [`next/font`](https://nextjs.org/docs/basic-features/font-optimization) to automatically optimize and load Inter, a custom Google Font.
+- **DID management** — Create and manage PRISM DIDs and Peer DIDs
+- **Credential storage** — Hold and present Verifiable Credentials (EmployeeRole, SecurityClearance, etc.)
+- **Classified document access** — VP-gated DOCX/HTML document retrieval with per-section clearance redaction
+- **Document viewer** — In-browser DOCX rendering via `docx-preview`, with TTL countdown, watermark, copy/print protection, and a Download button
+- **Document update** — Upload a new version of a DOCX document directly from the viewer (requires edit token from Key Authority)
+- **QR scanner** — Scan DIDComm OOB invitations (short URL `/wallet/i/<token>` and full `?_oob=...` URLs)
+- **DIDComm messaging** — Connect to agents via OOB invitations, process credential offers and presentation requests
 
-## Learn More
+## Document flow
 
-To learn more about Next.js, take a look at the following resources:
+1. User clicks a document icon in the file explorer
+2. `DocumentDIDAccess` component auto-triggers the VP access flow (EmployeeRole + SecurityClearance VCs presented to `/api/access-gate/present`)
+3. Server validates VP, applies clearance-level redaction, and returns the document NaCl-boxed for the wallet's ephemeral X25519 key
+4. Wallet decrypts, re-encrypts locally for storage, saves to IndexedDB
+5. `ClassifiedDocumentViewer` modal opens — renders DOCX in-browser or displays HTML with redacted sections
+6. **Update button** (DOCX only): requests an edit token, shows inline file picker, submits updated file to `/api/document-update/submit`
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Architecture
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
+```
+src/
+├── actions/index.ts           # Redux async thunks (processMessages, openDocument, …)
+├── components/
+│   ├── ClassifiedDocumentViewer.tsx  # Secure in-browser document viewer
+│   ├── DocumentDIDAccess.tsx         # VP-gated document access flow
+│   └── SectionRenderer.tsx          # Per-section HTML rendering with redaction
+├── pages/
+│   └── documents.tsx          # Document file explorer + My Documents list
+├── reducers/
+│   └── classifiedDocuments.ts # Redux slice for document state
+└── utils/
+    ├── documentStorage.ts     # IndexedDB persistence + decryption helpers
+    ├── KeyAuthorityClient.ts  # requestDocumentAccess, requestEditAccess
+    └── sectionDecryptor.ts    # AES-GCM section decryption
+```
 
-## Deploy on Vercel
+## Logs
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+```bash
+tail -f /opt/project_identuslabel/idl-wallet.log
+```

@@ -29,7 +29,7 @@ interface ApiResponse {
   logFilePath?: string;
 }
 
-const LOG_DIR = '/root/logs';
+const LOG_DIR = '/opt/project_identuslabel/idl-wallet/logs';
 const MAX_LOG_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_LOG_FILES = 50;
 

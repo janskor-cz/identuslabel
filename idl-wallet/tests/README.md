@@ -20,7 +20,7 @@ Tests fundamental wallet functionality:
 
 **Run**:
 ```bash
-cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
+cd /opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
 npm run test:basic
 ```
 
@@ -107,7 +107,7 @@ which chromium
 **Solution**:
 ```bash
 # Start Alice wallet
-cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
+cd /opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
 yarn dev
 
 # Verify it's running

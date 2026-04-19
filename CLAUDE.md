@@ -28,12 +28,16 @@ cd /root/company-admin-portal && PORT=3010 node server.js > /tmp/company-admin.l
 # Document Service (port 3020) - stateless VP-gated access for ACME
 cd /root/identus-document-service && PORT=3020 node server.js > /tmp/document-service.log 2>&1 &
 
-# Alice Wallet (port 3001) - PRIMARY DEVELOPMENT WALLET
-cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
-fuser -k 3001/tcp && rm -rf .next && yarn dev > /tmp/alice.log 2>&1 &
+# Alice Wallet (port 3001) - OBSOLETE, do not use
+# cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
+# fuser -k 3001/tcp && rm -rf .next && yarn dev > /tmp/alice.log 2>&1 &
 
-# IDL Wallet (port 3000)
-cd /root/idl-wallet && yarn dev
+# IDL Wallet (port 3002) - PRIMARY WALLET (Caddy routes /wallet → 3002)
+# IMPORTANT: runs as production build (next start), NOT yarn dev
+# After any source change you MUST rebuild:
+cd /opt/project_identuslabel/idl-wallet && yarn build
+kill $(lsof -ti :3002) 2>/dev/null; sleep 1
+nohup node_modules/.bin/next start --port 3002 --hostname 0.0.0.0 > /opt/project_identuslabel/idl-wallet.log 2>&1 &
 ```
 
 ### SDK Development (CRITICAL WORKFLOW)
@@ -116,7 +120,7 @@ PRISM Node (50053)    Multitenancy Agent (8200)
 
 /root/certification-authority/                     # CA server with secure portal
 
-/root/idl-wallet/                                  # Alternative wallet implementation
+/opt/project_identuslabel/idl-wallet/              # IDL Wallet — PRIMARY wallet (port 3002)
 ```
 
 ### SDK Architecture (5 Building Blocks)

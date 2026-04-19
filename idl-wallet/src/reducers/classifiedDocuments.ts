@@ -141,7 +141,8 @@ export const handleDocumentCopyCredential = createAsyncThunk(
         redactedSectionCount: docInfo.redactedSectionCount,
         visibleSectionCount: docInfo.visibleSectionCount,
         expiresAt: docInfo.expiresAt,
-        viewsAllowed: docInfo.viewsAllowed
+        viewsAllowed: docInfo.viewsAllowed,
+        sourceFormat: docInfo.sourceFormat
       }, vcJwt);
 
       // Refresh the document list

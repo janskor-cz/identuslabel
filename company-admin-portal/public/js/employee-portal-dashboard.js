@@ -656,139 +656,416 @@ function viewCredentials() {
 }
 
 // Load and display available documents
+// ── Document icon grid state ──────────────────────────────────────────────────
+let _allDocuments = [];
+let _folderMembership = {};   // { documentDID → folderId }
+let _folderList = [];         // FolderRecord[]
+let _folderPath = [];         // navigation stack: [{ folderId, name }, ...]
+let _currentIssuerDID = null;
+
 async function loadDocuments(profile) {
     if (!profile || !profile.employeeRoleVC) {
         console.log('[Documents] No EmployeeRole VC found');
         return;
     }
 
-    // Extract issuerDID from EmployeeRole VC
-    // The EmployeeRole VC should have issuerDID in credentialSubject
     const issuerDID = profile.employeeRoleVC.credentialSubject?.issuerDID;
-
     if (!issuerDID) {
         console.error('[Documents] issuerDID not found in EmployeeRole VC');
         showDocumentsError('Unable to load documents: missing company identifier');
         return;
     }
 
+    _currentIssuerDID = issuerDID;
     console.log(`[Documents] Querying documents for issuerDID: ${issuerDID}`);
 
     try {
-        // Pass session token to enable clearance-based filtering
         const sessionToken = getSessionToken();
-        const response = await fetch(`/company-admin/api/documents/discover?issuerDID=${encodeURIComponent(issuerDID)}`, {
-            headers: {
-                'x-session-id': sessionToken || ''
-            }
-        });
+        const [docsRes, foldersRes] = await Promise.all([
+            fetch(`/company-admin/api/documents/discover?issuerDID=${encodeURIComponent(issuerDID)}`, {
+                headers: { 'x-session-id': sessionToken || '' }
+            }),
+            fetch(`/company-admin/api/folders?ownerCompanyDID=${encodeURIComponent(issuerDID)}`)
+        ]);
 
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
+        if (!docsRes.ok) throw new Error(`HTTP ${docsRes.status}: ${docsRes.statusText}`);
+        const docsData = await docsRes.json();
+        if (!docsData.success) throw new Error(docsData.message || 'Failed to load documents');
 
-        const data = await response.json();
-        console.log(`[Documents] API response:`, data.success, `documents count:`, data.documents?.length);
+        _allDocuments = docsData.documents || [];
+        _folderMembership = docsData.folderMembership || {};
+        _folderPath = [];  // start at root
 
-        if (data.success) {
-            displayDocuments(data.documents || []);
+        if (foldersRes.ok) {
+            const foldersData = await foldersRes.json();
+            _folderList = foldersData.folders || [];
         } else {
-            throw new Error(data.message || 'Failed to load documents');
+            _folderList = [];
         }
+
+        console.log(`[Documents] ${_allDocuments.length} documents, ${_folderList.length} folders`);
+        renderDocGrid();
     } catch (error) {
         console.error('[Documents] Error loading documents:', error);
         showDocumentsError(`Failed to load documents: ${error.message}`);
     }
 }
 
-function displayDocuments(documents) {
+function displayDocuments() { renderDocGrid(); }  // compat shim
+
+function renderDocGrid() {
     const loadingEl = document.getElementById('documentsLoading');
-    const listEl = document.getElementById('documentsList');
-    const emptyEl = document.getElementById('documentsEmpty');
+    const emptyEl   = document.getElementById('documentsEmpty');
+    const wrapper   = document.getElementById('documentsGridWrapper');
+    const gridEl    = document.getElementById('docGrid');
+    const crumbEl   = document.getElementById('docBreadcrumb');
 
-    // Hide loading
     if (loadingEl) loadingEl.classList.add('hidden');
+    if (emptyEl)  emptyEl.classList.add('hidden');
 
-    if (documents.length === 0) {
-        if (emptyEl) emptyEl.classList.remove('hidden');
+    // Always show the wrapper (toolbar must be accessible even when empty)
+    if (wrapper)  wrapper.classList.remove('hidden');
+
+    if (_allDocuments.length === 0 && _folderList.length === 0) {
+        if (gridEl) gridEl.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#a0aec0;padding:30px 0;font-size:14px;">📭 No documents yet. Use <strong>Add Document</strong> to upload your first file.</div>';
         return;
     }
 
-    // Show documents list
-    if (listEl) {
-        listEl.classList.remove('hidden');
-        listEl.innerHTML = documents.map(doc => {
-            // Check if this is a classified document
-            // Use SSI flow for: documents with sections, "classified" in DID, or non-INTERNAL
-            const hasClassifiedSections = doc.sectionSummary?.totalSections > 0;
-            const isClassifiedDoc = hasClassifiedSections ||
-                doc.documentDID?.includes('classified') ||
-                (doc.classificationLevel && doc.classificationLevel !== 'INTERNAL');
-            const isDocx = doc.metadata?.sourceFormat === 'docx';
-            const sectionInfo = hasClassifiedSections
-                ? `<span title="${doc.sectionSummary.visibleCount} visible, ${doc.sectionSummary.redactedCount} redacted">📑 ${doc.sectionSummary.totalSections} sections</span>`
-                : '';
-            const formatBadge = isDocx ? '<span style="background:#4299e1;color:white;padding:2px 6px;border-radius:4px;font-size:10px;">DOCX</span>' : '';
-            const didRow = doc.didInfo ? `
-                <div class="document-did">
-                    <span class="did-badge">⛓ PRISM</span>
-                    <span title="${escapeHtml(doc.documentDID)}">${escapeHtml(doc.didInfo.short)}</span>
-                    <button class="did-copy-btn" onclick="copyDID('${escapeHtml(doc.documentDID)}', this)" title="Copy full DID">⧉</button>
-                    ${doc.didInfo.serviceType ? `<span>· ${escapeHtml(doc.didInfo.serviceType)}</span>` : ''}
-                    ${doc.didInfo.filename ? `<span>· ${escapeHtml(doc.didInfo.filename)}</span>` : ''}
-                </div>` : '';
-
-            const createdDate = doc.createdAt
-                ? new Date(doc.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-                : null;
-            const creatorLabel = doc.metadata?.creatorRole
-                || doc.metadata?.department
-                || (doc.metadata?.createdBy ? doc.metadata.createdBy.split('@')[0] : null);
-            const provenanceRow = (createdDate || creatorLabel) ? `
-                <div class="document-provenance">
-                    ${createdDate ? `<span>📅 ${escapeHtml(createdDate)}</span>` : ''}
-                    ${createdDate && creatorLabel ? `<span>·</span>` : ''}
-                    ${creatorLabel ? `<span>👤 ${escapeHtml(creatorLabel)}</span>` : ''}
-                </div>` : '';
-
-            // For classified documents, use SSI-compliant wallet viewing
-            // This creates ephemeral DID and issues DocumentCopy VC via DIDComm
-            const viewAction = isClassifiedDoc
-                ? `viewClassifiedDocument('${escapeHtml(doc.documentDID)}', '${escapeHtml(doc.title)}')`
-                : `viewDocument('${escapeHtml(doc.documentDID)}')`;
-
-            return `
-            <div class="document-item">
-                <div class="document-info">
-                    <div class="document-title">${escapeHtml(doc.title)} ${formatBadge}</div>
-                    <div class="document-meta">
-                        <span class="classification-badge ${doc.classificationLevel}">
-                            ${doc.classificationLevel}
-                        </span>
-                        ${doc.metadata?.category ? `<span>📁 ${escapeHtml(doc.metadata.category)}</span>` : ''}
-                        ${doc.metadata?.version ? `<span>🔖 ${escapeHtml(doc.metadata.version)}</span>` : ''}
-                        ${sectionInfo}
-                    </div>
-                    ${didRow}
-                    ${provenanceRow}
-                </div>
-                <div style="display: flex; gap: 8px;">
-                    <button class="view-document-btn" onclick="${viewAction}">
-                        ${isClassifiedDoc ? '📱 View in Wallet' : 'View'}
-                    </button>
-                </div>
-            </div>
-        `}).join('');
+    // ── Breadcrumb ────────────────────────────────────────────────────────────
+    if (crumbEl) {
+        let crumbHtml = `<span class="doc-breadcrumb-item" onclick="navToPathIndex(-1)">All Documents</span>`;
+        _folderPath.forEach((seg, i) => {
+            crumbHtml += `<span class="doc-breadcrumb-sep"> › </span>`;
+            if (i < _folderPath.length - 1) {
+                crumbHtml += `<span class="doc-breadcrumb-item" onclick="navToPathIndex(${i})">${escapeHtml(seg.name)}</span>`;
+            } else {
+                crumbHtml += `<span class="doc-breadcrumb-current">${escapeHtml(seg.name)}</span>`;
+            }
+        });
+        crumbEl.innerHTML = crumbHtml;
     }
 
-    console.log(`[Documents] Displayed ${documents.length} document(s)`);
+    // ── Current folder context ────────────────────────────────────────────────
+    const currentFolderId = _folderPath.length > 0 ? _folderPath[_folderPath.length - 1].folderId : null;
+
+    // Sub-folders visible at this level
+    const subFolders = _folderList.filter(f => f.parentFolderId === currentFolderId);
+
+    // Documents at this level (in this folder, or at root if currentFolderId is null)
+    const docsHere = _allDocuments.filter(d => {
+        const fid = _folderMembership[d.documentDID] || null;
+        return fid === currentFolderId;
+    });
+
+    // ── Render grid ───────────────────────────────────────────────────────────
+    if (!gridEl) return;
+
+    let html = '';
+
+    // Folder cards first
+    for (const folder of subFolders) {
+        const docCount = _allDocuments.filter(d => _folderMembership[d.documentDID] === folder.folderId).length;
+        const fid = escapeHtml(folder.folderId);
+        const fname = escapeHtml(folder.name);
+        html += `
+        <div class="doc-icon-card folder-card"
+             onclick="openFolder('${fid}', '${fname}')"
+             oncontextmenu="showCtxMenu(event,this)"
+             data-type="folder"
+             data-folder-id="${fid}"
+             data-folder-name="${fname}">
+            <div class="doc-icon">📁</div>
+            <div class="doc-icon-name">${fname}</div>
+            <div class="doc-icon-meta">${docCount} document${docCount !== 1 ? 's' : ''}</div>
+        </div>`;
+    }
+
+    // Document cards
+    for (const doc of docsHere) {
+        const isDocx = doc.metadata?.sourceFormat === 'docx';
+        const icon = isDocx ? '📝' : '📄';
+        const cls = doc.classificationLevel || 'UNCLASSIFIED';
+        const isClassifiedDoc = doc.sectionSummary?.totalSections > 0 ||
+            doc.documentDID?.includes('classified') ||
+            (doc.classificationLevel && doc.classificationLevel !== 'INTERNAL');
+        const viewAction = isClassifiedDoc
+            ? `viewClassifiedDocument('${escapeHtml(doc.documentDID)}', '${escapeHtml(doc.title)}')`
+            : `viewDocument('${escapeHtml(doc.documentDID)}')`;
+        const shortTitle = doc.title && doc.title.length > 22
+            ? doc.title.slice(0, 20) + '…'
+            : (doc.title || 'Untitled');
+        const safeDID   = escapeHtml(doc.documentDID);
+        const safeTitle = escapeHtml(doc.title || 'Untitled');
+
+        html += `
+        <div class="doc-icon-card"
+             onclick="${viewAction}"
+             oncontextmenu="showCtxMenu(event,this)"
+             data-type="doc"
+             data-did="${safeDID}"
+             data-title="${safeTitle}"
+             data-classified="${isClassifiedDoc ? '1' : '0'}"
+             title="${safeTitle}">
+            <span class="doc-classification ${cls}">${cls}</span>
+            <div class="doc-icon">${icon}</div>
+            <div class="doc-icon-name">${escapeHtml(shortTitle)}</div>
+            <div class="doc-icon-meta">${isDocx ? 'DOCX' : 'HTML'}${doc.didInfo ? ' · PRISM' : ''}</div>
+        </div>`;
+    }
+
+    if (html === '') {
+        html = '<div style="color:#a0aec0;font-size:13px;grid-column:1/-1;padding:20px 0;">This folder is empty.</div>';
+    }
+
+    gridEl.innerHTML = html;
+    console.log(`[Documents] Grid: ${subFolders.length} folders, ${docsHere.length} docs`);
 }
+
+function openFolder(folderId, name) {
+    _folderPath.push({ folderId, name });
+    renderDocGrid();
+}
+
+function navToPathIndex(index) {
+    if (index < 0) {
+        _folderPath = [];
+    } else {
+        _folderPath = _folderPath.slice(0, index + 1);
+    }
+    renderDocGrid();
+}
+
+async function promptCreateFolder() {
+    if (!_currentIssuerDID) return;
+    const name = prompt('Folder name:');
+    if (!name || !name.trim()) return;
+    const parentFolderId = _folderPath.length > 0 ? _folderPath[_folderPath.length - 1].folderId : null;
+    try {
+        const res = await fetch('/company-admin/api/folders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim(), ownerCompanyDID: _currentIssuerDID, parentFolderId })
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Failed to create folder');
+        _folderList.push(data.folder);
+        renderDocGrid();
+    } catch (err) {
+        alert('Could not create folder: ' + err.message);
+    }
+}
+
+window.openFolder = openFolder;
+window.navToPathIndex = navToPathIndex;
+window.promptCreateFolder = promptCreateFolder;
+
+// ── Right-click context menu ──────────────────────────────────────────────────
+
+function showCtxMenu(event, el) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const menu = document.getElementById('ctxMenu');
+    if (!menu) return;
+
+    const type = el.dataset.type;
+    let items = '';
+
+    if (type === 'folder') {
+        const fid   = el.dataset.folderId;
+        const fname = el.dataset.folderName;
+        items = `
+        <div class="ctx-item" onclick="ctxRenameFolder('${fid}','${fname}')">✏️ Rename</div>
+        <div class="ctx-item ctx-danger" onclick="ctxDeleteFolder('${fid}','${fname}')">🗑 Delete</div>`;
+    } else if (type === 'doc') {
+        const did   = el.dataset.did;
+        const title = el.dataset.title;
+        const isClassified = el.dataset.classified === '1';
+        items = `
+        <div class="ctx-item" onclick="ctxCopyDID('${did}')">⧉ Copy DID</div>
+        <div class="ctx-item" onclick="ctxMoveToFolder('${did}')">📁 Move to folder…</div>
+        <div class="ctx-sep"></div>
+        <div class="ctx-item" onclick="${isClassified ? `viewClassifiedDocument('${did}','${title}')` : `viewDocument('${did}')`}">👁 Open</div>`;
+    }
+
+    menu.innerHTML = `<style>
+        .ctx-item{padding:9px 16px;cursor:pointer;color:#2d3748;white-space:nowrap}
+        .ctx-item:hover{background:#f0f4ff}
+        .ctx-danger{color:#e53e3e}
+        .ctx-danger:hover{background:#fff5f5}
+        .ctx-sep{border-top:1px solid #e2e8f0;margin:4px 0}
+    </style>${items}`;
+
+    // Position — keep inside viewport
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let x = event.clientX, y = event.clientY;
+    menu.style.display = 'block';
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    if (x + mw > vw) x = vw - mw - 4;
+    if (y + mh > vh) y = vh - mh - 4;
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+
+    setTimeout(() => document.addEventListener('click', hideCtxMenu, { once: true }), 0);
+}
+
+function hideCtxMenu() {
+    const menu = document.getElementById('ctxMenu');
+    if (menu) menu.style.display = 'none';
+}
+
+async function ctxRenameFolder(folderId, currentName) {
+    hideCtxMenu();
+    if (!_currentIssuerDID) return;
+    const name = prompt('New folder name:', currentName);
+    if (!name || !name.trim() || name.trim() === currentName) return;
+    try {
+        const res = await fetch(`/company-admin/api/folders/${encodeURIComponent(folderId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim(), ownerCompanyDID: _currentIssuerDID })
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Rename failed');
+        const f = _folderList.find(f => f.folderId === folderId);
+        if (f) f.name = name.trim();
+        // Update path segment if renaming current folder
+        const seg = _folderPath.find(s => s.folderId === folderId);
+        if (seg) seg.name = name.trim();
+        renderDocGrid();
+    } catch (err) {
+        alert('Could not rename: ' + err.message);
+    }
+}
+
+async function ctxDeleteFolder(folderId, folderName) {
+    hideCtxMenu();
+    if (!_currentIssuerDID) return;
+    if (!confirm(`Delete folder "${folderName}"? Documents inside will be moved to root.`)) return;
+    try {
+        const res = await fetch(`/company-admin/api/folders/${encodeURIComponent(folderId)}?ownerCompanyDID=${encodeURIComponent(_currentIssuerDID)}`, {
+            method: 'DELETE'
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Delete failed');
+        _folderList = _folderList.filter(f => f.folderId !== folderId);
+        // Clear memberships for this folder
+        for (const did of Object.keys(_folderMembership)) {
+            if (_folderMembership[did] === folderId) delete _folderMembership[did];
+        }
+        // Navigate up if currently inside deleted folder
+        if (_folderPath.some(s => s.folderId === folderId)) {
+            _folderPath = [];
+        }
+        renderDocGrid();
+    } catch (err) {
+        alert('Could not delete: ' + err.message);
+    }
+}
+
+function ctxCopyDID(did) {
+    hideCtxMenu();
+    navigator.clipboard.writeText(did).then(() => {
+        showToast('DID copied to clipboard');
+    }).catch(() => {
+        prompt('Copy this DID:', did);
+    });
+}
+
+async function ctxMoveToFolder(documentDID) {
+    hideCtxMenu();
+    if (!_currentIssuerDID) return;
+
+    // Build folder options
+    const options = [{ id: '__root__', name: '📄 Root (uncategorized)' }]
+        .concat(_folderList.map(f => ({ id: f.folderId, name: '📁 ' + f.name })));
+
+    // Simple select via prompt-style modal
+    const choice = await pickFolder(options);
+    if (choice === null) return;  // cancelled
+
+    try {
+        if (choice === '__root__') {
+            // Remove from folder
+            const res = await fetch(`/company-admin/api/folders/root/documents/${encodeURIComponent(documentDID)}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ownerCompanyDID: _currentIssuerDID })
+            });
+            // If endpoint doesn't exist, just clear locally
+            delete _folderMembership[documentDID];
+        } else {
+            const res = await fetch(`/company-admin/api/folders/${encodeURIComponent(choice)}/documents/${encodeURIComponent(documentDID)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ownerCompanyDID: _currentIssuerDID })
+            });
+            const data = await res.json();
+            if (!data.success) throw new Error(data.error || 'Move failed');
+            _folderMembership[documentDID] = choice;
+        }
+        renderDocGrid();
+    } catch (err) {
+        alert('Could not move document: ' + err.message);
+    }
+}
+
+function pickFolder(options) {
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:10000;display:flex;align-items:center;justify-content:center';
+        overlay.innerHTML = `
+        <div style="background:white;border-radius:12px;padding:20px;min-width:260px;box-shadow:0 8px 30px rgba(0,0,0,0.2)">
+            <div style="font-weight:700;font-size:14px;margin-bottom:14px;color:#2d3748">Move to folder</div>
+            ${options.map(o => `
+            <div data-fid="${escapeHtml(o.id)}"
+                 style="padding:10px 14px;cursor:pointer;border-radius:8px;font-size:13px;color:#2d3748"
+                 onmouseover="this.style.background='#f0f4ff'"
+                 onmouseout="this.style.background=''"
+                 onclick="this.closest('[data-picker]').dataset.chosen='${escapeHtml(o.id)}'">
+                ${escapeHtml(o.name)}
+            </div>`).join('')}
+            <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">
+                <button onclick="this.closest('[data-picker]').dataset.chosen='__cancel__'"
+                        style="padding:7px 16px;border:1px solid #e2e8f0;border-radius:6px;background:white;cursor:pointer;font-size:13px">Cancel</button>
+            </div>
+        </div>`;
+        overlay.setAttribute('data-picker', '');
+        document.body.appendChild(overlay);
+
+        const observer = new MutationObserver(() => {
+            const chosen = overlay.dataset.chosen;
+            if (!chosen) return;
+            observer.disconnect();
+            document.body.removeChild(overlay);
+            resolve(chosen === '__cancel__' ? null : chosen);
+        });
+        observer.observe(overlay, { attributes: true, attributeFilter: ['data-chosen'] });
+    });
+}
+
+function showToast(msg) {
+    const t = document.createElement('div');
+    t.textContent = msg;
+    t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#2d3748;color:white;padding:10px 20px;border-radius:8px;font-size:13px;z-index:10001;opacity:0;transition:opacity 0.2s';
+    document.body.appendChild(t);
+    requestAnimationFrame(() => { t.style.opacity = '1'; });
+    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => document.body.removeChild(t), 300); }, 2000);
+}
+
+window.showCtxMenu = showCtxMenu;
+window.ctxRenameFolder = ctxRenameFolder;
+window.ctxDeleteFolder = ctxDeleteFolder;
+window.ctxCopyDID = ctxCopyDID;
+window.ctxMoveToFolder = ctxMoveToFolder;
 
 function showDocumentsError(message) {
     const loadingEl = document.getElementById('documentsLoading');
-    const errorEl = document.getElementById('documentsError');
+    const errorEl   = document.getElementById('documentsError');
+    const wrapper   = document.getElementById('documentsGridWrapper');
 
     if (loadingEl) loadingEl.classList.add('hidden');
+    if (wrapper)   wrapper.classList.add('hidden');
     if (errorEl) {
         errorEl.textContent = message;
         errorEl.classList.remove('hidden');
@@ -1461,12 +1738,13 @@ function copyDID(did, btn) {
 }
 
 // File upload helper functions
-function updateFileDisplay(input) {
+function updateFileDisplay(input, suffix) {
+    const s = suffix || '';
     const file = input.files[0];
-    const selectedFileInfo = document.getElementById('selectedFileInfo');
-    const fileDisplayText = document.getElementById('fileDisplayText');
-    const selectedFileName = document.getElementById('selectedFileName');
-    const selectedFileSize = document.getElementById('selectedFileSize');
+    const selectedFileInfo = document.getElementById('selectedFileInfo' + s);
+    const fileDisplayText = document.getElementById('fileDisplayText' + s);
+    const selectedFileName = document.getElementById('selectedFileName' + s);
+    const selectedFileSize = document.getElementById('selectedFileSize' + s);
 
     if (file) {
         // Validate file size (max 40MB)
@@ -1483,14 +1761,15 @@ function updateFileDisplay(input) {
         selectedFileInfo.style.display = 'block';
         fileDisplayText.textContent = 'File selected';
     } else {
-        clearFileSelection();
+        clearFileSelection(s);
     }
 }
 
-function clearFileSelection() {
-    const input = document.getElementById('documentFile');
-    const selectedFileInfo = document.getElementById('selectedFileInfo');
-    const fileDisplayText = document.getElementById('fileDisplayText');
+function clearFileSelection(suffix) {
+    const s = suffix || '';
+    const input = document.getElementById('documentFile' + s);
+    const selectedFileInfo = document.getElementById('selectedFileInfo' + s);
+    const fileDisplayText = document.getElementById('fileDisplayText' + s);
 
     if (input) input.value = '';
     if (selectedFileInfo) selectedFileInfo.style.display = 'none';
@@ -1506,8 +1785,10 @@ function formatFileSize(bytes) {
 }
 
 // Handle document creation form submission (with optional file upload)
-async function handleCreateDocument(event) {
+// isModal: true when called from the upload modal, false/undefined for legacy inline form
+async function handleCreateDocument(event, isModal) {
     event.preventDefault();
+    const suffix = isModal ? 'Modal' : '';
 
     const token = getSessionToken();
     if (!token) {
@@ -1558,13 +1839,13 @@ async function handleCreateDocument(event) {
     }
 
     // Hide any previous messages
-    const successDiv = document.getElementById('documentCreationSuccess');
-    const errorDiv = document.getElementById('documentCreationError');
+    const successDiv = document.getElementById('documentCreationSuccess' + suffix);
+    const errorDiv = document.getElementById('documentCreationError' + suffix);
     if (successDiv) successDiv.classList.add('hidden');
     if (errorDiv) errorDiv.classList.add('hidden');
 
     // Disable submit button and show loading state
-    const submitBtn = document.getElementById('createDocumentBtn');
+    const submitBtn = document.getElementById('createDocumentBtn' + suffix);
     const originalBtnText = submitBtn.textContent;
     submitBtn.disabled = true;
     submitBtn.textContent = file ? 'Uploading to Iagon...' : 'Creating Document DID...';
@@ -1625,7 +1906,7 @@ async function handleCreateDocument(event) {
             }
 
             // Show success message
-            const successMessageEl = document.getElementById('successMessage');
+            const successMessageEl = document.getElementById('successMessage' + suffix);
             if (successMessageEl) {
                 successMessageEl.textContent = successMessage;
             }
@@ -1633,6 +1914,7 @@ async function handleCreateDocument(event) {
 
             // Reset form
             form.reset();
+            clearFileSelection(suffix);
 
             // Reload documents list to show new document
             const cachedProfile = localStorage.getItem('employee_profile');
@@ -1645,6 +1927,11 @@ async function handleCreateDocument(event) {
             if (data.iagonStorage) {
                 console.log('[Documents] Iagon storage:', data.iagonStorage.url);
             }
+
+            // Auto-close modal after short delay so user can see success message
+            if (isModal) {
+                setTimeout(() => closeUploadModal(), 2000);
+            }
         } else {
             throw new Error(data.message || 'Failed to create document');
         }
@@ -1653,7 +1940,7 @@ async function handleCreateDocument(event) {
         console.error('[Documents] Error creating document:', error);
 
         // Show error message
-        const errorMessageEl = document.getElementById('errorMessage');
+        const errorMessageEl = document.getElementById('errorMessage' + suffix);
         if (errorMessageEl) {
             errorMessageEl.textContent = error.message || 'An unexpected error occurred';
         }
@@ -2383,11 +2670,14 @@ async function sendDocumentToWallet(documentData) {
 // ============================================================================
 
 let selectedClassifiedFile = null;
+let selectedClassifiedFileModal = null;
 
 /**
  * Handle classified file selection
+ * suffix: '' for legacy form, 'Modal' for the modal form
  */
-function handleClassifiedFileSelect(input) {
+function handleClassifiedFileSelect(input, suffix) {
+    const s = suffix || '';
     const file = input.files[0];
     if (!file) return;
 
@@ -2400,31 +2690,37 @@ function handleClassifiedFileSelect(input) {
         return;
     }
 
-    selectedClassifiedFile = file;
+    if (s === 'Modal') {
+        selectedClassifiedFileModal = file;
+    } else {
+        selectedClassifiedFile = file;
+    }
 
     // Show preview
-    document.getElementById('classifiedFilePreview').classList.remove('hidden');
-    document.getElementById('classifiedDropZone').style.display = 'none';
-    document.getElementById('classifiedFileName').textContent = file.name;
-    document.getElementById('classifiedFileSize').textContent = formatFileSize(file.size);
+    document.getElementById('classifiedFilePreview' + s).classList.remove('hidden');
+    document.getElementById('classifiedDropZone' + s).style.display = 'none';
+    document.getElementById('classifiedFileName' + s).textContent = file.name;
+    document.getElementById('classifiedFileSize' + s).textContent = formatFileSize(file.size);
 
     // Set icon based on type
     const icon = filename.endsWith('.docx') ? '📝' : '📄';
-    document.getElementById('classifiedFileIcon').textContent = icon;
+    document.getElementById('classifiedFileIcon' + s).textContent = icon;
 
     // If HTML, analyze sections client-side
     if (filename.endsWith('.html') || filename.endsWith('.htm')) {
-        analyzeHtmlSections(file);
+        analyzeHtmlSections(file, s);
     } else {
         // For DOCX, we'll analyze server-side
-        document.getElementById('sectionAnalysis').classList.add('hidden');
+        document.getElementById('sectionAnalysis' + s).classList.add('hidden');
     }
 }
 
 /**
  * Analyze HTML file for clearance sections (client-side preview)
+ * suffix: '' for legacy form, 'Modal' for the modal form
  */
-async function analyzeHtmlSections(file) {
+async function analyzeHtmlSections(file, suffix) {
+    const s = suffix || '';
     try {
         const content = await file.text();
         const parser = new DOMParser();
@@ -2455,10 +2751,10 @@ async function analyzeHtmlSections(file) {
         }
 
         // Update UI
-        document.getElementById('internalCount').textContent = counts['INTERNAL'];
-        document.getElementById('confidentialCount').textContent = counts['CONFIDENTIAL'];
-        document.getElementById('restrictedCount').textContent = counts['RESTRICTED'];
-        document.getElementById('topSecretCount').textContent = counts['SECRET'] + counts['TOP-SECRET'];
+        document.getElementById('internalCount' + s).textContent = counts['INTERNAL'];
+        document.getElementById('confidentialCount' + s).textContent = counts['CONFIDENTIAL'];
+        document.getElementById('restrictedCount' + s).textContent = counts['RESTRICTED'];
+        document.getElementById('topSecretCount' + s).textContent = counts['SECRET'] + counts['TOP-SECRET'];
 
         // Determine overall classification (lowest in doc for discovery purposes)
         let overall = 'INTERNAL';
@@ -2467,33 +2763,43 @@ async function analyzeHtmlSections(file) {
         if (counts['SECRET'] > 0) overall = 'SECRET';
         if (counts['TOP-SECRET'] > 0) overall = 'TOP-SECRET';
 
-        document.getElementById('overallClassification').textContent = overall;
-        document.getElementById('sectionAnalysis').classList.remove('hidden');
+        document.getElementById('overallClassification' + s).textContent = overall;
+        document.getElementById('sectionAnalysis' + s).classList.remove('hidden');
 
     } catch (error) {
         console.error('[SectionAnalysis] Error:', error);
-        document.getElementById('sectionAnalysis').classList.add('hidden');
+        document.getElementById('sectionAnalysis' + s).classList.add('hidden');
     }
 }
 
 /**
  * Clear selected classified file
+ * suffix: '' for legacy form, 'Modal' for the modal form
  */
-function clearClassifiedFile() {
-    selectedClassifiedFile = null;
-    document.getElementById('classifiedDocFile').value = '';
-    document.getElementById('classifiedFilePreview').classList.add('hidden');
-    document.getElementById('classifiedDropZone').style.display = 'block';
-    document.getElementById('sectionAnalysis').classList.add('hidden');
+function clearClassifiedFile(suffix) {
+    const s = suffix || '';
+    if (s === 'Modal') {
+        selectedClassifiedFileModal = null;
+    } else {
+        selectedClassifiedFile = null;
+    }
+    const fileInput = document.getElementById('classifiedDocFile' + s);
+    if (fileInput) fileInput.value = '';
+    document.getElementById('classifiedFilePreview' + s).classList.add('hidden');
+    document.getElementById('classifiedDropZone' + s).style.display = 'block';
+    document.getElementById('sectionAnalysis' + s).classList.add('hidden');
 }
 
 /**
  * Handle classified document upload
  */
-async function handleCreateClassifiedDocument(event) {
+// isModal: true when called from the upload modal, false/undefined for legacy inline form
+async function handleCreateClassifiedDocument(event, isModal) {
     event.preventDefault();
+    const suffix = isModal ? 'Modal' : '';
+    const fileToUpload = isModal ? selectedClassifiedFileModal : selectedClassifiedFile;
 
-    if (!selectedClassifiedFile) {
+    if (!fileToUpload) {
         alert('Please select a file to upload.');
         return;
     }
@@ -2506,7 +2812,7 @@ async function handleCreateClassifiedDocument(event) {
     }
 
     const form = event.target;
-    const btn = document.getElementById('createClassifiedDocBtn');
+    const btn = document.getElementById('createClassifiedBtn' + suffix) || document.getElementById('createClassifiedDocBtn');
     const originalText = btn.innerHTML;
 
     // Disable button and show loading
@@ -2514,20 +2820,27 @@ async function handleCreateClassifiedDocument(event) {
     btn.innerHTML = '⏳ Uploading...';
 
     // Hide messages
-    document.getElementById('classifiedDocSuccess').classList.add('hidden');
-    document.getElementById('classifiedDocError').classList.add('hidden');
+    document.getElementById('classifiedDocSuccess' + suffix).classList.add('hidden');
+    document.getElementById('classifiedDocError' + suffix).classList.add('hidden');
 
     try {
         const formData = new FormData();
-        formData.append('file', selectedClassifiedFile);
+        formData.append('file', fileToUpload);
 
-        const title = document.getElementById('classifiedDocTitle').value.trim();
+        const titleInput = document.getElementById('classifiedDocTitle' + suffix);
+        const title = titleInput ? titleInput.value.trim() : '';
         if (title) {
             formData.append('title', title);
         }
 
-        // Get releasableTo
-        const releasableCheckboxes = document.querySelectorAll('input[name="classifiedReleasableTo"]:checked');
+        // Get classification level (user-selected minimum clearance)
+        const classificationLevelInput = document.getElementById('docClassificationLevel' + suffix);
+        if (classificationLevelInput && classificationLevelInput.value) {
+            formData.append('classificationLevel', classificationLevelInput.value);
+        }
+
+        // Get releasableTo from within the form
+        const releasableCheckboxes = form.querySelectorAll('input[name="classifiedReleasableTo"]:checked');
         const releasableTo = Array.from(releasableCheckboxes).map(cb => cb.value);
         formData.append('releasableTo', JSON.stringify(releasableTo));
 
@@ -2543,20 +2856,25 @@ async function handleCreateClassifiedDocument(event) {
 
         if (result.success) {
             // Show success message
-            document.getElementById('classifiedSuccessMessage').textContent =
+            document.getElementById('classifiedSuccessMessage' + suffix).textContent =
                 `Document "${result.title}" uploaded successfully! ` +
                 `${result.sectionCount} sections encrypted. ` +
                 `Overall classification: ${result.overallClassification}`;
-            document.getElementById('classifiedDocSuccess').classList.remove('hidden');
+            document.getElementById('classifiedDocSuccess' + suffix).classList.remove('hidden');
 
             // Reset form
             form.reset();
-            clearClassifiedFile();
+            clearClassifiedFile(suffix);
 
             // Refresh document list
             const profile = await loadProfile();
             if (profile) {
                 await loadDocuments(profile);
+            }
+
+            // Auto-close modal after short delay
+            if (isModal) {
+                setTimeout(() => closeUploadModal(), 2000);
             }
 
         } else {
@@ -2565,8 +2883,8 @@ async function handleCreateClassifiedDocument(event) {
 
     } catch (error) {
         console.error('[ClassifiedUpload] Error:', error);
-        document.getElementById('classifiedErrorMessage').textContent = error.message;
-        document.getElementById('classifiedDocError').classList.remove('hidden');
+        document.getElementById('classifiedErrorMessage' + suffix).textContent = error.message;
+        document.getElementById('classifiedDocError' + suffix).classList.remove('hidden');
     } finally {
         btn.disabled = false;
         btn.innerHTML = originalText;
@@ -2580,6 +2898,35 @@ function formatFileSize(bytes) {
     if (bytes < 1024) return bytes + ' bytes';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// ============================================================================
+// Upload Modal Controls
+// ============================================================================
+
+function openUploadModal() {
+    const modal = document.getElementById('uploadDocModal');
+    if (modal) {
+        modal.classList.add('open');
+        const s = document.getElementById('classifiedDocSuccessModal');
+        const e = document.getElementById('classifiedDocErrorModal');
+        if (s) s.classList.add('hidden');
+        if (e) e.classList.add('hidden');
+    }
+}
+
+function closeUploadModal() {
+    const modal = document.getElementById('uploadDocModal');
+    if (modal) {
+        modal.classList.remove('open');
+        const form = document.getElementById('createClassifiedDocumentFormModal');
+        if (form) form.reset();
+        clearClassifiedFile('Modal');
+        const s = document.getElementById('classifiedDocSuccessModal');
+        const e = document.getElementById('classifiedDocErrorModal');
+        if (s) s.classList.add('hidden');
+        if (e) e.classList.add('hidden');
+    }
 }
 
 // Export functions for inline onclick handlers
@@ -2596,3 +2943,7 @@ window.downloadToWallet = downloadToWallet;
 window.handleClassifiedFileSelect = handleClassifiedFileSelect;
 window.clearClassifiedFile = clearClassifiedFile;
 window.handleCreateClassifiedDocument = handleCreateClassifiedDocument;
+window.openUploadModal = openUploadModal;
+window.closeUploadModal = closeUploadModal;
+window.updateFileDisplay = updateFileDisplay;
+window.clearFileSelection = clearFileSelection;

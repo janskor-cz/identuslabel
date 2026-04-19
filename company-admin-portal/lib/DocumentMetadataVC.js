@@ -40,7 +40,6 @@ class DocumentMetadataVC {
       description,
       classificationLevel,
       releasableTo,
-      contentEncryptionKey,
       metadata = {}
     } = params;
 
@@ -54,7 +53,6 @@ class DocumentMetadataVC {
       title,
       classificationLevel,
       releasableTo: releasableTo.join(','), // Join array for JWT compatibility
-      contentEncryptionKey,
       createdAt: new Date().toISOString(),
       // Include optional fields if present
       ...(description && { description }),
@@ -139,7 +137,8 @@ class DocumentMetadataVC {
       documentDescription,
       releasableTo,
       createdBy,
-      createdByDID
+      createdByDID,
+      encryptionManifestId
     } = params;
 
     console.log('[DocumentMetadataVC] Issuing VC via DIDComm to connection:', connectionId);
@@ -168,6 +167,9 @@ class DocumentMetadataVC {
     }
     if (createdByDID) {
       vcClaims.createdByDID = createdByDID;
+    }
+    if (encryptionManifestId) {
+      vcClaims.encryptionManifestId = encryptionManifestId;
     }
 
     // Create credential offer via Enterprise Cloud Agent

@@ -133,8 +133,24 @@ class DocumentRegistryPersistence {
 
       // Convert array back to Map
       const documentsMap = new Map();
+      let migrationPerformed = false;
 
       for (const doc of registryState.documents) {
+        // Task 3 migration: strip legacy raw key material from persisted documents
+        if (doc.contentEncryptionKey) {
+          delete doc.contentEncryptionKey;
+          migrationPerformed = true;
+        }
+        if (doc.iagonStorage?.encryptionInfo?.key) {
+          delete doc.iagonStorage.encryptionInfo.key;
+          migrationPerformed = true;
+        }
+        // Also strip from originalDocxEncryptionInfo if present
+        if (doc.iagonStorage?.originalDocxEncryptionInfo?.key) {
+          delete doc.iagonStorage.originalDocxEncryptionInfo.key;
+          migrationPerformed = true;
+        }
+
         // Reconstruct encryptedMetadata Map
         const encryptedMetadata = new Map();
         for (const entry of doc.encryptedMetadata) {
@@ -145,16 +161,20 @@ class DocumentRegistryPersistence {
         // Reconstruct Bloom filter Buffer
         const bloomFilter = Buffer.from(doc.bloomFilter, 'base64');
 
-        // Add to Map
+        // Add to Map (contentEncryptionKey intentionally omitted — Task 3)
         documentsMap.set(doc.documentDID, {
           documentDID: doc.documentDID,
           bloomFilter,
           encryptedMetadata,
           releasableTo: doc.releasableTo,
           classificationLevel: doc.classificationLevel,
-          contentEncryptionKey: doc.contentEncryptionKey,
           metadataVCRecordId: doc.metadataVCRecordId || null,
-          iagonStorage: doc.iagonStorage || null, // Iagon storage metadata (fileId, encryptionInfo, etc.)
+          iagonStorage: doc.iagonStorage || null, // Iagon storage metadata (fileId, encryptionManifestId — no raw key)
+          sectionMetadata: doc.sectionMetadata || null,
+          sourceInfo: doc.sourceInfo || null,
+          documentType: doc.documentType || null,
+          ownerCompanyDID: doc.ownerCompanyDID || null,
+          accessLog: doc.accessLog || null,
           createdAt: doc.createdAt,
           updatedAt: doc.updatedAt
         });
@@ -170,6 +190,18 @@ class DocumentRegistryPersistence {
 
       console.log(`[RegistryPersistence] ✅ Loaded ${documentsMap.size} documents from ${registryState.savedAt}`);
       console.log(`[RegistryPersistence] ✅ Loaded version history for ${documentVersionsMap.size} documents`);
+
+      // Task 3 migration: persist the cleaned state back to disk so raw keys are removed on-disk
+      if (migrationPerformed) {
+        console.log('[RegistryPersistence] 🔑 Task 3 migration: raw keys stripped — saving cleaned registry to disk...');
+        try {
+          await this.saveRegistry(documentsMap, documentVersionsMap);
+          console.log('[RegistryPersistence] ✅ Task 3 migration: cleaned registry persisted');
+        } catch (saveError) {
+          console.error('[RegistryPersistence] ⚠️  Task 3 migration: failed to persist cleaned registry:', saveError.message);
+          // Don't fail the load — in-memory state is already clean
+        }
+      }
 
       return { documents: documentsMap, documentVersions: documentVersionsMap };
 

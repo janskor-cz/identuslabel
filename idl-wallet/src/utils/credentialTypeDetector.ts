@@ -9,7 +9,7 @@
  * Purpose: Support grouped credential display with type-specific layouts
  */
 
-export type CredentialType = 'RealPersonIdentity' | 'SecurityClearance' | 'ServiceConfiguration' | 'EmployeeRole' | 'CISTrainingCertificate' | 'DocumentCopy' | 'CertificationAuthorityIdentity' | 'CompanyIdentity' | 'Unknown';
+export type CredentialType = 'RealPersonIdentity' | 'SecurityClearance' | 'ServiceConfiguration' | 'EmployeeRole' | 'CISTrainingCertificate' | 'DocumentCopy' | 'CertificationAuthorityIdentity' | 'CompanyIdentity' | 'DocumentMetadata' | 'Unknown';
 export type ClearanceLevel = 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED' | 'SECRET';
 export type ClearanceColor = 'green' | 'blue' | 'orange' | 'red' | 'gray';
 
@@ -33,6 +33,31 @@ export function getCredentialSubject(credential: any): any {
     propertiesType: credential.properties?.constructor?.name,
     keys: Object.keys(credential)
   });
+
+  // Method 0: Raw JWT string or base64-encoded JWT string
+  if (typeof credential === 'string') {
+    try {
+      // Resolve to raw JWT: if it already has dots it's a JWT; otherwise try base64-decoding
+      let jwtStr = credential;
+      if (credential.split('.').length !== 3) {
+        // May be base64-encoded JWT (e.g. stored as credentialData in Pluto)
+        const b64Pad = credential.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = b64Pad + '='.repeat((4 - (b64Pad.length % 4)) % 4);
+        jwtStr = atob(padded);
+      }
+      if (jwtStr.split('.').length === 3) {
+        const parts = jwtStr.split('.');
+        const padding = (4 - (parts[1].length % 4)) % 4;
+        const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/') + '='.repeat(padding);
+        const payload = JSON.parse(atob(b64));
+        const subject = payload?.vc?.credentialSubject ?? null;
+        console.log('[getCredentialSubject] Method 0 (JWT string) result:', subject ? 'FOUND' : 'null');
+        return subject;
+      }
+    } catch (e) {
+      console.log('[getCredentialSubject] Method 0 threw:', e);
+    }
+  }
 
   // Method 1: Try class getter directly (if prototype intact)
   try {
@@ -192,6 +217,11 @@ export function getCredentialType(credential: any): CredentialType {
   // Detect CISTrainingCertificate by field signature (certificateNumber + trainingYear + completionDate)
   if (subject?.certificateNumber && subject?.trainingYear && subject?.completionDate) {
     return 'CISTrainingCertificate';
+  }
+
+  // Detect DocumentMetadata by field signature (documentDID + documentTitle)
+  if (subject?.documentDID && subject?.documentTitle) {
+    return 'DocumentMetadata';
   }
 
   // Detect DocumentCopy by field signature (ephemeralDID + ephemeralServiceEndpoint)
@@ -405,6 +435,7 @@ export interface DocumentCopyInfo {
   visibleSectionCount: number;
   expiresAt: string;
   viewsAllowed: number;
+  sourceFormat: string;
   isExpired: boolean;
   timeRemaining: string;
 }
@@ -463,6 +494,7 @@ export function getDocumentCopyInfo(credential: any): DocumentCopyInfo | null {
     visibleSectionCount: subject.visibleSectionCount || 0,
     expiresAt: expiresAt || '',
     viewsAllowed: subject.viewsAllowed ?? -1,
+    sourceFormat: subject.sourceFormat || 'html',
     isExpired,
     timeRemaining
   };
@@ -492,7 +524,7 @@ export function getEnterpriseAttr(cred: any, name: string): string {
 }
 
 // Detects type of an enterprise credential (raw REST API shape — JWT or AnonCreds)
-export function getEnterpriseCredentialType(cred: any): 'EmployeeRole' | 'CISTrainingCertificate' | 'Unknown' {
+export function getEnterpriseCredentialType(cred: any): 'EmployeeRole' | 'CISTrainingCertificate' | 'SecurityClearance' | 'Unknown' {
   // JWT format: claims is a plain object
   const claims = (cred.claims && typeof cred.claims === 'object' && !Array.isArray(cred.claims))
     ? cred.claims : null;
@@ -501,23 +533,27 @@ export function getEnterpriseCredentialType(cred: any): 'EmployeeRole' | 'CISTra
   const typeFromClaims = claims?.credentialType || '';
   if (typeFromClaims === 'EmployeeRole') return 'EmployeeRole';
   if (typeFromClaims === 'CISTrainingCertificate') return 'CISTrainingCertificate';
+  if (typeFromClaims === 'SecurityClearance') return 'SecurityClearance';
 
   // AnonCreds format: credentialAttributes array
   const attrs: Array<{name: string, value: string}> = cred.credentialAttributes || [];
   const typeAttr = attrs.find(a => a.name === 'credentialType')?.value || '';
   if (typeAttr === 'EmployeeRole') return 'EmployeeRole';
   if (typeAttr === 'CISTrainingCertificate') return 'CISTrainingCertificate';
+  if (typeAttr === 'SecurityClearance') return 'SecurityClearance';
 
   // Fallback field-signature detection (JWT)
   if (claims) {
     if (claims.employeeId && claims.email && claims.role) return 'EmployeeRole';
     if (claims.certificateNumber && claims.trainingYear) return 'CISTrainingCertificate';
+    if (claims.clearanceLevel) return 'SecurityClearance';
   }
 
   // Fallback field-signature detection (AnonCreds)
   const names = new Set(attrs.map(a => a.name));
   if (names.has('employeeId') && names.has('email') && names.has('role')) return 'EmployeeRole';
   if (names.has('certificateNumber') && names.has('trainingYear')) return 'CISTrainingCertificate';
+  if (names.has('clearanceLevel')) return 'SecurityClearance';
 
   return 'Unknown';
 }

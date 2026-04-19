@@ -1,7 +1,4 @@
 import { addRxPlugin } from "rxdb";
-import { RxDBDevModePlugin } from "rxdb/plugins/dev-mode";
-
-addRxPlugin(RxDBDevModePlugin);
 
 import { AnyAction, ThunkDispatch, createAsyncThunk } from "@reduxjs/toolkit";
 import SDK from "@hyperledger/identus-edge-agent-sdk";
@@ -2081,6 +2078,43 @@ export const refreshCredentials = createAsyncThunk(
         return api.rejectWithValue(err as Error);
     }
 });
+
+/**
+ * Delete a credential from Pluto (IndexedDB) and refresh Redux credentials state.
+ *
+ * Used when the user removes a ServiceConfiguration VC so it cannot be
+ * re-discovered by syncCredentialsToStorage on the next render.
+ *
+ * @param vcId - The credential's `id` or `uuid` field
+ */
+export const deleteCredentialByVcId = createAsyncThunk(
+    'credentials/deleteByVcId',
+    async (vcId: string, api) => {
+        const state = api.getState() as { app: { db: { instance: SDK.Domain.Pluto | null }, credentials: SDK.Domain.Credential[] } };
+        const db = state.app.db.instance;
+
+        if (!db) {
+            throw new Error('Database not connected');
+        }
+
+        // Find matching VC by id or uuid
+        const vc = state.app.credentials.find(
+            (c: SDK.Domain.Credential) => (c as any).id === vcId || (c as any).uuid === vcId
+        );
+
+        if (vc) {
+            console.log('[deleteCredentialByVcId] Deleting VC from Pluto:', vcId);
+            await db.deleteCredential(vc);
+        } else {
+            console.warn('[deleteCredentialByVcId] VC not found in Redux state, vcId:', vcId);
+        }
+
+        // Reload credentials from Pluto so Redux reflects the deletion
+        api.dispatch(refreshCredentials());
+
+        return vcId;
+    }
+);
 
 /**
  * Send verifiable presentation in response to a presentation request

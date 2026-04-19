@@ -28,6 +28,21 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ Document Viewer — In-Browser DOCX Preview & Update Button (Apr 12, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Classified documents now open in-browser with full DOCX rendering and an Update button
+
+Previously clicking a document in the IDL wallet file explorer triggered an automatic browser download. The `ClassifiedDocumentViewer` modal (which renders DOCX in-browser via `docx-preview`, enforces security controls, and shows TTL) was never wired into the `DocumentDIDAccess` completion flow.
+
+- **Fix**: After the VP access flow decrypts and stores a document, `onDocumentSaved` now passes the `ephemeralDID` back to the parent; `documents.tsx` dispatches `openDocument(ephemeralDID)` to open the viewer modal
+- **New**: `ClassifiedDocumentViewer` now has an **Update** button (amber, DOCX only) — clicking it requests an edit token via `requestEditAccess`, shows an inline file picker, and submits the updated DOCX to `/api/document-update/submit`
+- **Build note**: IDL wallet runs as `next start` (production), not `yarn dev`. After any source change run `yarn build` and restart the server.
+
+**Files Modified**:
+- `idl-wallet/src/components/DocumentDIDAccess.tsx` — removed auto-download; passes ephemeralDID to `onDocumentSaved`
+- `idl-wallet/src/pages/documents.tsx` — `onDocumentSaved` dispatches `openDocument`; passes edit props to viewer
+- `idl-wallet/src/components/ClassifiedDocumentViewer.tsx` — added Update button + inline upload UI
+
 ### ✅ QR Scanner Fix — IDL Wallet Short URL & Mobile Camera (Mar 21, 2026)
 
 **STATUS**: ✅ **PRODUCTION READY** - QR-scanned DIDComm OOB short URLs now resolve and connect correctly on desktop and mobile

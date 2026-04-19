@@ -240,24 +240,16 @@ class EnterpriseDocumentManager {
         serviceEndpoint: [iagonInfo.downloadUrl]
       };
 
-      // ── DocumentMetadata — all state the stateless service needs ─────────
+      // ── DocumentMetadata — minimal pointer fields only (PRISM has ~1KB limit per service endpoint)
+      // Full metadata (encryptionInfo, releasableTo, keys) lives in DocumentRegistry, not the DID.
       const documentMetadataEndpoint = {
         id: 'metadata',
         type: 'DocumentMetadata',
-        serviceEndpoint: {
-          iagonFileId:     iagonInfo.fileId,
-          clearanceLevel:  metadata.classificationLevel || 'INTERNAL',
-          releasableTo:    Array.isArray(metadata.releasableTo) ? metadata.releasableTo : [],
-          title:           metadata.title        || null,
-          contentHash:     iagonInfo.contentHash || null,
-          filename:        metadata.filename     || null,
-          mimeType:        metadata.mimeType     || null,
-          // encryptionInfo is stored here so the stateless service can decrypt
-          // the file after downloading from Iagon.
-          // NOTE: this is safe because Iagon download requires the service's
-          // access token — the key alone is not sufficient to retrieve the file.
-          encryptionInfo:  iagonInfo.encryptionInfo || null
-        }
+        serviceEndpoint: JSON.stringify({
+          iagonFileId:    iagonInfo.fileId,
+          clearanceLevel: metadata.classificationLevel || 'INTERNAL',
+          contentHash:    iagonInfo.contentHash || null
+        })
       };
 
       // ── DocumentAccessGate — URL of the deployed stateless service ───────

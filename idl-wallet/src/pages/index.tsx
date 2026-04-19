@@ -2,9 +2,10 @@ import React, { useEffect, useState } from "react";
 import SDK from "@hyperledger/identus-edge-agent-sdk";
 import '../app/index.css';
 import { DBConnect } from "@/components/DBConnect";
-import { useMountedApp } from "@/reducers/store";
+import { useMountedApp, useAppSelector } from "@/reducers/store";
 import { useRouter } from "next/router";
 import { getCredentialSubject } from "@/utils/credentialTypeDetector";
+import { selectIsEnterpriseConfigured } from '@/reducers/enterpriseAgent';
 
 const ListenerKey = SDK.ListenerKey;
 
@@ -64,6 +65,7 @@ const NAV_CARDS = [
 const Dashboard: React.FC = () => {
   const router = useRouter();
   const app = useMountedApp();
+  const isEnterpriseConfigured = useAppSelector(selectIsEnterpriseConfigured);
   const { db, mediatorDID, initAgent, startAgent } = app;
   const agent = app.agent.instance;
   const [messages, setNewMessage] = useState<SDK.Domain.Message[]>([]);
@@ -133,7 +135,7 @@ const Dashboard: React.FC = () => {
       <DBConnect>
         {/* Navigation Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-          {NAV_CARDS.map(card => (
+          {NAV_CARDS.filter(card => card.path !== '/documents' || isEnterpriseConfigured).map(card => (
             <button
               key={card.path}
               onClick={() => router.push(card.path)}
