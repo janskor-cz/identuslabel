@@ -12,6 +12,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import '../app/index.css';
 import { Box } from "@/app/Box";
+import { useCAPortal } from '@/utils/CAPortalContext';
 import { useMountedApp, useAppSelector, useAppDispatch } from "@/reducers/store";
 import { DBConnect } from "@/components/DBConnect";
 import { DocumentDIDAccess } from "@/components/DocumentDIDAccess";
@@ -54,16 +55,125 @@ import { requestEditAccess } from "@/utils/KeyAuthorityClient";
 const getClassificationBadge = (level: string) => {
   switch (level?.toUpperCase()) {
     case 'UNCLASSIFIED':
-      return { color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30', label: 'UNCLASSIFIED' };
+    case 'INTERNAL':
+      return { color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30', label: level?.toUpperCase() || 'INTERNAL' };
     case 'CONFIDENTIAL':
       return { color: 'bg-amber-500/20 text-amber-400 border-amber-500/30', label: 'CONFIDENTIAL' };
     case 'SECRET':
-      return { color: 'bg-red-500/20 text-red-400 border-red-500/30', label: 'SECRET' };
+    case 'RESTRICTED':
+      return { color: 'bg-red-500/20 text-red-400 border-red-500/30', label: level?.toUpperCase() || 'RESTRICTED' };
     case 'TOP_SECRET':
-      return { color: 'bg-red-700/20 text-red-300 border-red-700/30', label: 'SECRET' };
+    case 'TOP-SECRET':
+      return { color: 'bg-red-700/20 text-red-300 border-red-700/30', label: 'TOP SECRET' };
     default:
       return { color: 'bg-slate-500/20 text-slate-400 border-slate-500/30', label: level || 'UNKNOWN' };
   }
+};
+
+/**
+ * Document Details Modal — fetches and displays document metadata
+ */
+const DocumentDetailsModal: React.FC<{
+  did: string;
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+}> = ({ did, data, loading, error, onClose }) => {
+  const badge = data ? getClassificationBadge(data.classificationLevel) : null;
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[10001] flex items-center justify-center"
+      onClick={onClose}
+    >
+      <div
+        className="bg-slate-900 border border-slate-700/50 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl max-h-[90vh] overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between mb-5">
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">📄</span>
+            <h2 className="text-lg font-bold text-white">Document Details</h2>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-2xl leading-none">×</button>
+        </div>
+
+        {loading && (
+          <div className="flex items-center justify-center py-8">
+            <div className="w-8 h-8 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+          </div>
+        )}
+
+        {error && (
+          <div className="p-3 bg-red-500/20 border border-red-500/30 rounded-xl text-red-300 text-sm">
+            {error}
+          </div>
+        )}
+
+        {!loading && !error && data && (
+          <div className="space-y-4">
+            {/* Name */}
+            <div>
+              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Document Name</div>
+              <div className="text-white font-medium">{data.title || data.iagonStorage?.filename || 'Untitled'}</div>
+            </div>
+
+            {/* Classification */}
+            {badge && (
+              <div>
+                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Classification</div>
+                <span className={`inline-block px-2 py-0.5 rounded border text-xs font-bold ${badge.color}`}>
+                  {badge.label}
+                </span>
+              </div>
+            )}
+
+            {/* Creation info */}
+            <div className="border-t border-slate-700/50 pt-4">
+              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Creation</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-xs text-slate-500 mb-0.5">Created by</div>
+                  <div className="text-sm text-slate-200 font-mono break-all">{data.createdBy || '—'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500 mb-0.5">Created at</div>
+                  <div className="text-sm text-slate-200">
+                    {data.createdAt ? new Date(data.createdAt).toLocaleString() : '—'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Latest version */}
+            <div className="border-t border-slate-700/50 pt-4">
+              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Latest Version</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-xs text-slate-500 mb-0.5">Version</div>
+                  <div className="text-sm text-slate-200">
+                    {data.versionNumber != null ? `v${data.versionNumber}` : '—'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500 mb-0.5">Last updated</div>
+                  <div className="text-sm text-slate-200">
+                    {data.lastUpdatedAt ? new Date(data.lastUpdatedAt).toLocaleString() : '—'}
+                  </div>
+                </div>
+                <div className="col-span-2">
+                  <div className="text-xs text-slate-500 mb-0.5">Updated by</div>
+                  <div className="text-sm text-slate-200 font-mono break-all">{data.lastUpdatedBy || '—'}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 };
 
 /**
@@ -290,10 +400,8 @@ export default function DocumentsPage() {
   const enterpriseConfig = useAppSelector(selectActiveConfiguration);
   const classifiedDocuments = useAppSelector(state => state.classifiedDocuments);
 
-  // Deep-link: ?did=<documentDID> from employee portal "View" button
-  const deepLinkDID = typeof window !== 'undefined'
-    ? (new URLSearchParams(window.location.search)).get('did') || undefined
-    : undefined;
+  // Portal bridge: document DID pushed from the in-wallet portal iframe
+  const { pendingDocumentDID, setPendingDocumentDID } = useCAPortal();
 
   // My Documents state
   const [showExpired, setShowExpired] = useState(true);
@@ -310,9 +418,20 @@ export default function DocumentsPage() {
   const [folders, setFolders] = useState<WalletFolder[]>([]);
   const [docFolderMap, setDocFolderMap] = useState<Record<string, string | null>>({});
   const [folderRefresh, setFolderRefresh] = useState(0);
-  const [showDIDPanel, setShowDIDPanel] = useState(!!deepLinkDID);
-  const [panelDID, setPanelDID] = useState(deepLinkDID || '');
-  const [panelAutoTrigger, setPanelAutoTrigger] = useState(!!deepLinkDID);
+  // Deep-link: ?did=<documentDID> — initialized server-safe (false/'') and set after hydration
+  const [showDIDPanel, setShowDIDPanel] = useState(false);
+  const [panelDID, setPanelDID] = useState('');
+  const [panelAutoTrigger, setPanelAutoTrigger] = useState(false);
+
+  // Apply ?did= deep-link after hydration to avoid SSR/client mismatch
+  useEffect(() => {
+    const did = new URLSearchParams(window.location.search).get('did');
+    if (did) {
+      setShowDIDPanel(true);
+      setPanelDID(did);
+      setPanelAutoTrigger(true);
+    }
+  }, []);
   const panelRef = React.useRef<HTMLDivElement>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
@@ -321,6 +440,12 @@ export default function DocumentsPage() {
     id: string;
     name?: string;
   } | null>(null);
+
+  // Document details modal state
+  const [detailsDID, setDetailsDID] = useState<string | null>(null);
+  const [detailsData, setDetailsData] = useState<any | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
 
   // API configuration (used by edit handlers)
   const apiBaseUrl = 'https://identuslabel.cz/company-admin/api';
@@ -568,6 +693,29 @@ export default function DocumentsPage() {
     dispatch(loadMyDocuments(showExpired));
   }, [dispatch, showExpired]);
 
+  const handleShowDetails = useCallback(async (did: string) => {
+    setDetailsDID(did);
+    setDetailsData(null);
+    setDetailsLoading(true);
+    setDetailsError(null);
+    try {
+      const resp = await fetch(
+        `https://identuslabel.cz/company-admin/api/ephemeral-documents/metadata/${encodeURIComponent(did)}`,
+        { credentials: 'include' }
+      );
+      const json = await resp.json();
+      if (json.success && json.document) {
+        setDetailsData(json.document);
+      } else {
+        setDetailsError(json.message || 'Failed to load document details');
+      }
+    } catch (err: any) {
+      setDetailsError(err.message || 'Failed to load document details');
+    } finally {
+      setDetailsLoading(false);
+    }
+  }, []);
+
   // Load folders from localStorage whenever folderRefresh increments
   useEffect(() => {
     setFolders(getFolders());
@@ -608,6 +756,16 @@ export default function DocumentsPage() {
       setTimeout(() => panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
     }
   }, [showDIDPanel, panelDID]);
+
+  // When the in-wallet portal sends a document DID, auto-open the DID access panel
+  useEffect(() => {
+    if (pendingDocumentDID) {
+      setPanelDID(pendingDocumentDID);
+      setPanelAutoTrigger(true);
+      setShowDIDPanel(true);
+      setPendingDocumentDID(null);
+    }
+  }, [pendingDocumentDID, setPendingDocumentDID]);
 
   // File explorer handlers
   // Always re-trigger VP flow so the viewer gets the latest server version.
@@ -937,6 +1095,12 @@ export default function DocumentsPage() {
                   <EyeIcon className="w-4 h-4" /> <span>Open</span>
                 </button>
                 <button
+                  onClick={() => { setContextMenu(null); handleShowDetails(contextMenu.id); }}
+                  className="w-full px-4 py-2.5 text-sm text-left text-slate-200 hover:bg-slate-700/60 flex items-center gap-3 border-t border-slate-700/50"
+                >
+                  <DocumentIcon className="w-4 h-4" /> <span>Details</span>
+                </button>
+                <button
                   onClick={() => { setContextMenu(null); handleRemoveDocFromExplorer(contextMenu.id); }}
                   className="w-full px-4 py-2.5 text-sm text-left text-red-400 hover:bg-slate-700/60 flex items-center gap-3 border-t border-slate-700/50"
                 >
@@ -946,6 +1110,17 @@ export default function DocumentsPage() {
             )}
           </div>
         </>
+      )}
+
+      {/* Document Details Modal */}
+      {detailsDID && (
+        <DocumentDetailsModal
+          did={detailsDID}
+          data={detailsData}
+          loading={detailsLoading}
+          error={detailsError}
+          onClose={() => { setDetailsDID(null); setDetailsData(null); setDetailsError(null); }}
+        />
       )}
 
       {/* Document Viewer Modal */}

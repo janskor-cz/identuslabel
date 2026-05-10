@@ -334,11 +334,14 @@
     // Configuration
     const API_BASE = window.location.origin;
 
+    // Detect if running inside the IDL wallet iframe — no popup needed
+    const isInWalletIframe = window.self !== window.top;
+
     // State
     let currentUser = null;
     let currentSections = [];
-    let walletWindow = null; // Reference to wallet window
-    let walletDetected = false;
+    let walletWindow = null; // Reference to wallet popup window (unused when in iframe)
+    let walletDetected = isInWalletIframe; // When in iframe, wallet is already the parent
     let decryptPendingRequests = new Map(); // Track pending decrypt requests
 
     // Phase 2: Client-Side Decryption State
@@ -356,8 +359,10 @@
         // Initialize postMessage listener for wallet communication
         initPostMessageListener();
 
-        // Detect if wallet is open
-        await detectWallet();
+        // In iframe mode the parent IS the wallet — no detection needed
+        if (!isInWalletIframe) {
+          await detectWallet();
+        }
 
         await loadDashboard();
 
@@ -393,7 +398,12 @@
         }
 
         const message = event.data;
-        console.log('[postMessage] Received message from wallet:', message.type);
+
+        // Ignore messages without a recognised type (browser extensions, etc.)
+        const knownTypes = ['PONG', 'WALLET_READY', 'DECRYPT_RESPONSE', 'DECRYPT_ERROR'];
+        if (!message?.type || !knownTypes.includes(message.type)) {
+          return;
+        }
 
         switch (message.type) {
           case 'PONG':
@@ -413,7 +423,7 @@
             break;
 
           default:
-            console.warn('[postMessage] Unknown message type:', message.type);
+            break;
         }
       });
 
@@ -425,36 +435,37 @@
      */
     function handleWalletReady(message) {
       console.log('[Wallet] Ready signal received from:', message.walletId);
-      walletDetected = true;
-      updateWalletStatus(true);
 
-      // Show status notification
-      showDecryptionStatus('Wallet connected. Starting decryption...', 'success');
-
-      // If there are encrypted sections waiting, trigger decryption
-      if (currentSections.some(s => s.encryptedContent?.encrypted)) {
-        console.log('[Wallet] Encrypted content waiting - triggering decryption');
-
-        // Reset progress tracking
-        decryptedSectionsCount = 0;
-        totalEncryptedSections = currentSections.filter(s => s.encryptedContent?.encrypted).length;
-        decryptionInProgress = true;
-
-        console.log(`[Wallet] Starting decryption of ${totalEncryptedSections} sections`);
-
-        // Trigger decryption for all encrypted sections
-        currentSections.forEach(section => {
-          if (section.encryptedContent?.encrypted) {
-            requestDecryption(section.id, section.encryptedContent);
-          }
-        });
+      // Ignore repeated WALLET_READY signals after decryption is already started/done
+      if (decryptionInProgress || decryptedSectionsCount > 0) {
+        console.log('[Wallet] Ignoring duplicate WALLET_READY — decryption already done');
+        return;
       }
+
+      walletDetected = true;
+      // Do NOT hide the decrypt button here — user must explicitly click it
     }
 
     /**
-     * Open wallet window for decryption
+     * Open wallet window for decryption (skipped when running inside wallet iframe)
      */
     function openWalletWindow() {
+      // When embedded in the wallet iframe, the parent IS the wallet — no popup needed
+      if (isInWalletIframe) {
+        walletDetected = true;
+        updateWalletStatus(true);
+        // Trigger decryption of any waiting encrypted sections
+        const encryptedSections = currentSections.filter(s => s.encryptedContent?.encrypted);
+        if (encryptedSections.length > 0) {
+          console.log('[Wallet] iframe mode — triggering decryption of', encryptedSections.length, 'sections');
+          decryptedSectionsCount = 0;
+          totalEncryptedSections = encryptedSections.length;
+          decryptionInProgress = true;
+          encryptedSections.forEach(section => requestDecryption(section.id, section.encryptedContent));
+        }
+        return window.parent;
+      }
+
       console.log('[Wallet] Opening wallet window...');
 
       // Check if wallet already open and not closed
@@ -531,17 +542,10 @@
         window._walletPongHandler = handlePong;
 
         // Send PING via postMessage
-        if (walletWindow && !walletWindow.closed) {
+        const walletTarget = isInWalletIframe ? window.parent : walletWindow;
+        if (walletTarget && (isInWalletIframe || !walletWindow.closed)) {
           try {
-            // DIAGNOSTIC: Log detailed postMessage info
-            console.log('[DIAGNOSTIC] Sending PING postMessage:', {
-              targetOrigin: 'https://identuslabel.cz',
-              dashboardOrigin: window.location.origin,
-              dashboardUrl: window.location.href,
-              walletWindowClosed: walletWindow.closed
-            });
-
-            walletWindow.postMessage({
+            walletTarget.postMessage({
               type: 'PING',
               source: 'secure-dashboard',
               timestamp: Date.now()
@@ -812,10 +816,10 @@
       renderSections(data.sections);
 
       // Update wallet status based on encrypted content
-      // Show decrypt button if we have encrypted sections
       if (isEncrypted) {
-        updateWalletStatus(false); // Show "Decrypt with Wallet" button
-        console.log('[Dashboard] Encrypted sections detected - user must click decrypt button to proceed');
+        // Always show the decrypt button — user must explicitly click to decrypt
+        updateWalletStatus(false);
+        console.log('[Dashboard] Encrypted sections detected - showing Decrypt with Wallet button');
       }
     }
 
@@ -930,8 +934,8 @@
     function requestDecryption(sectionId, encryptedContent) {
       console.log(`[Decrypt Request] Requesting decryption for section: ${sectionId}`);
 
-      // Check if wallet window is available
-      if (!walletWindow || walletWindow.closed) {
+      // Check if wallet is available (popup window when standalone, parent frame when in iframe)
+      if (!isInWalletIframe && (!walletWindow || walletWindow.closed)) {
         console.warn('[Decrypt Request] Wallet window not available');
         const contentEl = document.getElementById(`content-${sectionId}`);
         if (contentEl) {
@@ -950,18 +954,9 @@
       });
 
       // Send decrypt request via postMessage
+      const walletTarget = isInWalletIframe ? window.parent : walletWindow;
       try {
-        // DIAGNOSTIC: Log detailed postMessage info
-        console.log('[DIAGNOSTIC] Sending DECRYPT_REQUEST postMessage:', {
-          targetOrigin: 'https://identuslabel.cz',
-          dashboardOrigin: window.location.origin,
-          dashboardUrl: window.location.href,
-          sectionId,
-          requestId,
-          walletWindowClosed: walletWindow.closed
-        });
-
-        walletWindow.postMessage({
+        walletTarget.postMessage({
           type: 'DECRYPT_REQUEST',
           requestId,
           sectionId,

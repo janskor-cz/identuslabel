@@ -222,7 +222,7 @@ async function initiateClearanceVerification() {
             if (data.error === 'NoDirectConnection') {
                 showClearanceError('No Direct Connection',
                     'No DIDComm connection found from your company to your personal wallet. ' +
-                    'Please ensure your Alice Wallet is connected to TechCorp before verifying clearance.');
+                    'Please ensure your personal wallet is connected to TechCorp before verifying clearance.');
                 return;
             }
             if (data.error === 'NoCAConnection') {
@@ -278,15 +278,8 @@ function showClearanceWaitingState() {
             waiting.innerHTML = `
                 <div style="text-align: center; padding: 20px;">
                     <div class="spinner" style="margin: 0 auto 15px;"></div>
-                    <h3>Sending Proof Request...</h3>
-                    <p id="clearanceWaitingMessage">Requesting Security Clearance verification via DIDComm...</p>
-                    <div id="clearanceInstructions" style="margin-top: 15px; text-align: left; background: #f7fafc; padding: 15px; border-radius: 8px; display: none;">
-                        <strong>Instructions:</strong>
-                        <ol id="clearanceInstructionsList" style="margin: 10px 0 0 20px; line-height: 1.8;"></ol>
-                        <a id="aliceWalletLink" href="#" target="_blank" style="display: inline-block; margin-top: 15px; background: #4299e1; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none;">
-                            Open Alice Wallet
-                        </a>
-                    </div>
+                    <h3>Proof Request Sent</h3>
+                    <p id="clearanceWaitingMessage">A proof request has been sent to your personal wallet. Please approve it there.</p>
                     <p id="clearancePollingStatus" style="margin-top: 15px; color: #718096; font-size: 0.9em;">
                         Waiting for wallet response...
                     </p>
@@ -306,25 +299,8 @@ function showClearanceWaitingState() {
     }
 }
 
-// Update instructions in waiting state
+// Update instructions in waiting state (no-op, content is already set)
 function updateClearanceInstructions(instructions, aliceWalletUrl) {
-    const instructionsDiv = document.getElementById('clearanceInstructions');
-    const instructionsList = document.getElementById('clearanceInstructionsList');
-    const walletLink = document.getElementById('aliceWalletLink');
-    const waitingMessage = document.getElementById('clearanceWaitingMessage');
-
-    if (waitingMessage) {
-        waitingMessage.textContent = 'A proof request has been sent to your Alice Wallet. Please approve it.';
-    }
-
-    if (instructionsDiv && instructionsList && instructions) {
-        instructionsList.innerHTML = instructions.map(inst => `<li>${inst}</li>`).join('');
-        instructionsDiv.style.display = 'block';
-    }
-
-    if (walletLink && aliceWalletUrl) {
-        walletLink.href = aliceWalletUrl;
-    }
 }
 
 // Start polling for clearance verification status
@@ -650,11 +626,6 @@ async function handleLogout() {
     }
 }
 
-// View credentials (placeholder)
-function viewCredentials() {
-    showError('Credentials view coming soon! This feature will display all your verifiable credentials.');
-}
-
 // Load and display available documents
 // ── Document icon grid state ──────────────────────────────────────────────────
 let _allDocuments = [];
@@ -771,6 +742,9 @@ function renderDocGrid() {
         <div class="doc-icon-card folder-card"
              onclick="openFolder('${fid}', '${fname}')"
              oncontextmenu="showCtxMenu(event,this)"
+             ondragover="return folderDragOver(event,this)"
+             ondragleave="folderDragLeave(event,this)"
+             ondrop="folderDrop(event,this)"
              data-type="folder"
              data-folder-id="${fid}"
              data-folder-name="${fname}">
@@ -799,8 +773,11 @@ function renderDocGrid() {
 
         html += `
         <div class="doc-icon-card"
+             draggable="true"
              onclick="${viewAction}"
              oncontextmenu="showCtxMenu(event,this)"
+             ondragstart="docDragStart(event,this)"
+             ondragend="docDragEnd(event,this)"
              data-type="doc"
              data-did="${safeDID}"
              data-title="${safeTitle}"
@@ -885,6 +862,7 @@ function showCtxMenu(event, el) {
         <div class="ctx-item" onclick="ctxCopyDID('${did}')">⧉ Copy DID</div>
         <div class="ctx-item" onclick="ctxMoveToFolder('${did}')">📁 Move to folder…</div>
         <div class="ctx-sep"></div>
+        <div class="ctx-item" onclick="ctxShowDetails('${did}')">ℹ Details</div>
         <div class="ctx-item" onclick="${isClassified ? `viewClassifiedDocument('${did}','${title}')` : `viewDocument('${did}')`}">👁 Open</div>`;
     }
 
@@ -1053,11 +1031,140 @@ function showToast(msg) {
     setTimeout(() => { t.style.opacity = '0'; setTimeout(() => document.body.removeChild(t), 300); }, 2000);
 }
 
+// ── Drag-and-drop ─────────────────────────────────────────────────────────────
+
+let _dragDID = null;
+
+function docDragStart(event, el) {
+    _dragDID = el.dataset.did;
+    event.dataTransfer.setData('text/plain', _dragDID);
+    event.dataTransfer.effectAllowed = 'move';
+    el.classList.add('dragging');
+}
+
+function docDragEnd(event, el) {
+    el.classList.remove('dragging');
+    _dragDID = null;
+    // Clean up any lingering folder highlights
+    document.querySelectorAll('.folder-drag-over').forEach(f => f.classList.remove('folder-drag-over'));
+}
+
+function folderDragOver(event, el) {
+    if (!_dragDID) return true;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    el.classList.add('folder-drag-over');
+    return false;
+}
+
+function folderDragLeave(event, el) {
+    if (!el.contains(event.relatedTarget)) {
+        el.classList.remove('folder-drag-over');
+    }
+}
+
+async function folderDrop(event, el) {
+    event.preventDefault();
+    el.classList.remove('folder-drag-over');
+    const did = event.dataTransfer.getData('text/plain') || _dragDID;
+    const folderId = el.dataset.folderId;
+    if (!did || !folderId) return;
+    try {
+        const res = await fetch(
+            `/company-admin/api/folders/${encodeURIComponent(folderId)}/documents/${encodeURIComponent(did)}`,
+            { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ownerCompanyDID: _currentIssuerDID }) }
+        );
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Move failed');
+        _folderMembership[did] = folderId;
+        renderDocGrid();
+    } catch (err) {
+        alert('Could not move document: ' + err.message);
+    }
+}
+
+window.docDragStart  = docDragStart;
+window.docDragEnd    = docDragEnd;
+window.folderDragOver  = folderDragOver;
+window.folderDragLeave = folderDragLeave;
+window.folderDrop      = folderDrop;
+
+async function ctxShowDetails(documentDID) {
+    hideCtxMenu();
+    const modal = document.getElementById('docDetailsModal');
+    const content = document.getElementById('docDetailsContent');
+    if (!modal || !content) return;
+
+    content.innerHTML = '<div style="text-align:center;padding:30px;color:#718096">Loading…</div>';
+    modal.style.display = 'flex';
+
+    try {
+        const res = await fetch(`/company-admin/api/ephemeral-documents/metadata/${encodeURIComponent(documentDID)}`, { credentials: 'include' });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.message || 'Not found');
+        const d = json.document;
+
+        const clsColors = {
+            INTERNAL: '#38a169', UNCLASSIFIED: '#38a169',
+            CONFIDENTIAL: '#d69e2e',
+            RESTRICTED: '#e53e3e', SECRET: '#e53e3e',
+            'TOP-SECRET': '#9b2c2c', TOP_SECRET: '#9b2c2c'
+        };
+        const cls = (d.classificationLevel || 'UNKNOWN').toUpperCase();
+        const clsColor = clsColors[cls] || '#718096';
+
+        const fmt = ts => ts ? new Date(ts).toLocaleString() : '—';
+
+        content.innerHTML = `
+        <div style="margin-bottom:16px">
+            <div style="font-size:11px;font-weight:700;color:#718096;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Document Name</div>
+            <div style="font-size:15px;font-weight:600;color:#2d3748">${escapeHtml(d.title || d.filename || 'Untitled')}</div>
+        </div>
+        <div style="margin-bottom:16px">
+            <div style="font-size:11px;font-weight:700;color:#718096;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Classification</div>
+            <span style="display:inline-block;padding:2px 10px;border-radius:4px;font-size:12px;font-weight:700;background:${clsColor}22;color:${clsColor};border:1px solid ${clsColor}55">${escapeHtml(cls)}</span>
+        </div>
+        <div style="border-top:1px solid #e2e8f0;padding-top:14px;margin-bottom:14px">
+            <div style="font-size:11px;font-weight:700;color:#718096;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Creation</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div>
+                    <div style="font-size:11px;color:#a0aec0;margin-bottom:2px">Created by</div>
+                    <div style="font-size:13px;color:#2d3748;word-break:break-all">${escapeHtml(d.createdBy || '—')}</div>
+                </div>
+                <div>
+                    <div style="font-size:11px;color:#a0aec0;margin-bottom:2px">Created at</div>
+                    <div style="font-size:13px;color:#2d3748">${fmt(d.createdAt)}</div>
+                </div>
+            </div>
+        </div>
+        <div style="border-top:1px solid #e2e8f0;padding-top:14px">
+            <div style="font-size:11px;font-weight:700;color:#718096;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Latest Version</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div>
+                    <div style="font-size:11px;color:#a0aec0;margin-bottom:2px">Version</div>
+                    <div style="font-size:13px;color:#2d3748">${d.versionNumber != null ? 'v' + d.versionNumber : '—'}</div>
+                </div>
+                <div>
+                    <div style="font-size:11px;color:#a0aec0;margin-bottom:2px">Last updated</div>
+                    <div style="font-size:13px;color:#2d3748">${fmt(d.lastUpdatedAt)}</div>
+                </div>
+                <div style="grid-column:1/-1">
+                    <div style="font-size:11px;color:#a0aec0;margin-bottom:2px">Updated by</div>
+                    <div style="font-size:13px;color:#2d3748;word-break:break-all">${escapeHtml(d.lastUpdatedBy || '—')}</div>
+                </div>
+            </div>
+        </div>`;
+    } catch (err) {
+        content.innerHTML = `<div style="color:#e53e3e;font-size:13px;padding:10px">Failed to load details: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
 window.showCtxMenu = showCtxMenu;
 window.ctxRenameFolder = ctxRenameFolder;
 window.ctxDeleteFolder = ctxDeleteFolder;
 window.ctxCopyDID = ctxCopyDID;
 window.ctxMoveToFolder = ctxMoveToFolder;
+window.ctxShowDetails = ctxShowDetails;
 
 function showDocumentsError(message) {
     const loadingEl = document.getElementById('documentsLoading');
@@ -1539,9 +1646,12 @@ window.openDocxViewer = openDocxViewer;
 async function viewDocument(documentDID) {
     console.log(`[Documents] View document via wallet bridge: ${documentDID}`);
 
-    // NOTE: Clearance level is now handled server-side from the VP-verified session
-    // The client no longer sends clearance level - this is a security improvement
+    // Always delegate to wallet (via iframe postMessage or BroadcastChannel).
+    openDocumentInWallet(documentDID, '');
+}
 
+// Legacy non-iframe path kept for reference but no longer called directly.
+async function _viewDocumentLegacy(documentDID) {
     try {
         // Show loading state
         showLoading(true);
@@ -1974,6 +2084,9 @@ async function initializeDashboard() {
         displayProfile(profile);
         displayTrainingStatus(profile);
 
+        // Clear any leftover clearance_prompt_pending flag (modal is now user-initiated)
+        sessionStorage.removeItem('clearance_prompt_pending');
+
         // Load and display available documents
         await loadDocuments(profile);
 
@@ -2015,7 +2128,6 @@ document.addEventListener('DOMContentLoaded', () => {
     checkSessionExpiry();
     initializeDashboard();
     startAutoRefresh();
-    updateWalletSelectorUI();  // Initialize wallet selector
 });
 
 // Handle browser back/forward buttons
@@ -2029,6 +2141,55 @@ window.addEventListener('popstate', () => {
 // ============================================================================
 // WALLET BRIDGE COMMUNICATION (Ephemeral DID Document Access)
 // ============================================================================
+
+/**
+ * Detect whether this page is running inside an iframe (i.e. the wallet in-portal browser).
+ * When true, we can talk to the parent wallet via postMessage instead of opening a new window.
+ */
+function isInWalletIframe() {
+    try {
+        return window.self !== window.top;
+    } catch {
+        return true; // Cross-origin guard means we're in a frame
+    }
+}
+
+/**
+ * Send a document DID to the wallet for access.
+ * - When running inside the wallet iframe: send OPEN_DOCUMENT postMessage to parent
+ *   → parent will minimize portal and auto-trigger the DID access flow
+ * - Otherwise: use the existing wallet-window approach (open new tab)
+ *
+ * @param {string} documentDID - The PRISM DID of the document
+ * @param {string} title - Document title (for fallback display)
+ */
+function openDocumentInWallet(documentDID, title) {
+    if (isInWalletIframe()) {
+        console.log('[WalletBridge] Sending OPEN_DOCUMENT to parent wallet:', documentDID);
+        window.parent.postMessage({ type: 'OPEN_DOCUMENT', documentDID }, getWalletOrigin());
+        return;
+    }
+
+    // Not in iframe — broadcast to any already-running wallet tab via BroadcastChannel.
+    // The wallet listens on 'wallet-document-channel' and routes to /documents?did=...
+    // without opening a disconnected new window.
+    console.log('[WalletBridge] Broadcasting OPEN_DOCUMENT via BroadcastChannel:', documentDID);
+    try {
+        const bc = new BroadcastChannel('wallet-document-channel');
+        bc.postMessage({ type: 'OPEN_DOCUMENT', documentDID });
+        bc.close();
+
+        // Also navigate the wallet tab to the documents page (in case it needs to be focused).
+        // Using window.open with a named target: if the tab is already open it focuses it,
+        // otherwise it opens a new tab pre-loaded on the documents page.
+        const walletUrl = `${getWalletOrigin()}/wallet/documents?did=${encodeURIComponent(documentDID)}`;
+        window.open(walletUrl, 'identus-wallet');
+    } catch (bcErr) {
+        console.warn('[WalletBridge] BroadcastChannel failed, falling back to direct open:', bcErr);
+        const walletUrl = `${getWalletOrigin()}/wallet/documents?did=${encodeURIComponent(documentDID)}`;
+        window.open(walletUrl, 'identus-wallet');
+    }
+}
 
 // Wallet window reference for postMessage communication
 let walletWindow = null;
@@ -2053,32 +2214,6 @@ function getWalletOrigin() {
     return window.location.hostname === 'localhost'
         ? 'http://localhost:3001'
         : 'https://identuslabel.cz';
-}
-
-function setWalletPath(path) {
-    localStorage.setItem('selectedWalletPath', path);
-    // Close existing wallet window if open
-    if (walletWindow && !walletWindow.closed) {
-        walletWindow.close();
-    }
-    walletWindow = null;
-    walletReady = false;
-    updateWalletSelectorUI();
-}
-
-function updateWalletSelectorUI() {
-    const currentPath = getCurrentWalletPath();
-    document.querySelectorAll('.wallet-option').forEach(el => {
-        el.classList.toggle('active', el.dataset.path === currentPath);
-    });
-    const customInput = document.getElementById('customWalletPath');
-    if (customInput) {
-        customInput.value = currentPath;
-    }
-    const display = document.getElementById('currentWalletDisplay');
-    if (display) {
-        display.textContent = getWalletUrl();
-    }
 }
 
 // Listen for messages from wallet
@@ -2263,9 +2398,14 @@ async function requestDocumentAccess(documentDID) {
  * @param {string} title - Document title for display
  */
 async function viewClassifiedDocument(documentDID, title) {
-    console.log('[ViewClassified] Starting SSI-compliant view flow:', documentDID);
+    console.log('[ViewClassified] Delegating to wallet:', documentDID);
 
-    // Show loading modal
+    // Always delegate to wallet (via iframe postMessage or BroadcastChannel).
+    openDocumentInWallet(documentDID, title);
+}
+
+// Legacy non-iframe SSI flow kept for reference but no longer called directly.
+async function _viewClassifiedDocumentLegacy(documentDID, title) {
     showViewingProgress('Connecting to wallet...', 10);
 
     try {
@@ -2360,7 +2500,7 @@ function hideViewingProgress() {
  * @param {string} title - Document title
  * @param {object} sourceInfo - Document source info (format, contentType)
  */
-async function openDocumentInWallet(ephemeralDID, title, sourceInfo) {
+async function openDocumentInWalletPopup(ephemeralDID, title, sourceInfo) {
     return new Promise((resolve, reject) => {
         const requestId = crypto.randomUUID();
 
@@ -2395,7 +2535,7 @@ async function openDocumentInWallet(ephemeralDID, title, sourceInfo) {
             walletWindow.focus();
         } else {
             // Open wallet with document parameter
-            const walletUrl = `${getWalletOrigin()}/my-documents?open=${encodeURIComponent(ephemeralDID)}`;
+            const walletUrl = `${getWalletOrigin()}/wallet/documents?did=${encodeURIComponent(ephemeralDID)}`;
             walletWindow = window.open(walletUrl, 'alice-wallet');
 
             if (walletWindow) {
@@ -2449,7 +2589,7 @@ async function downloadToWallet(documentDID, title) {
         // Ensure wallet window is open
         if (!walletWindow || walletWindow.closed) {
             walletWindow = window.open(
-                `${getWalletOrigin()}/my-documents`,
+                `${getWalletOrigin()}/wallet/documents`,
                 'identus-wallet',
                 'width=600,height=800'
             );
@@ -2658,7 +2798,7 @@ async function sendDocumentToWallet(documentData) {
     const openWallet = confirm('Document encrypted and ready!\n\nWould you like to open your wallet to receive it?\n\n(The document is stored securely and will be available when you open your wallet)');
 
     if (openWallet) {
-        const walletUrl = 'https://identuslabel.cz/alice/my-documents';
+        const walletUrl = 'https://identuslabel.cz/wallet/documents';
         window.open(walletUrl, 'identus-wallet');
     }
 
@@ -2824,8 +2964,63 @@ async function handleCreateClassifiedDocument(event, isModal) {
     document.getElementById('classifiedDocError' + suffix).classList.add('hidden');
 
     try {
+        // ── SSI-aligned: browser encrypts file before sending to server ──────────
+        // 1. Read original file bytes
+        const originalBytes = await fileToUpload.arrayBuffer();
+
+        // 2. Compute content hash of ORIGINAL plaintext (server stores this; wallet
+        //    verifies sha256(decryptedBytes) === contentHash after access)
+        const hashBuf = await crypto.subtle.digest('SHA-256', originalBytes);
+        const contentHash = 'sha256:' + Array.from(new Uint8Array(hashBuf))
+            .map(b => b.toString(16).padStart(2, '0')).join('');
+
+        // 3. Generate DEK and IV
+        const dekRaw = crypto.getRandomValues(new Uint8Array(32));
+        const fileIvBytes = crypto.getRandomValues(new Uint8Array(12));
+        const dekCryptoKey = await crypto.subtle.importKey('raw', dekRaw, 'AES-GCM', false, ['encrypt']);
+
+        // 4. Encrypt file (AES-256-GCM — WebCrypto appends 16-byte auth tag)
+        const encryptedWithTag = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv: fileIvBytes },
+            dekCryptoKey,
+            originalBytes
+        );
+        const encryptedBytes = new Uint8Array(encryptedWithTag);
+        // Separate ciphertext and auth tag (WebCrypto appends authTag at end)
+        const ciphertext = encryptedBytes.slice(0, -16);
+        const fileAuthTagBytes = encryptedBytes.slice(-16);
+        const fileIv     = btoa(String.fromCharCode(...fileIvBytes));
+        const fileAuthTag = btoa(String.fromCharCode(...fileAuthTagBytes));
+
+        // 5. Get classification level for DEK wrapping
+        const classificationLevelInput = document.getElementById('docClassificationLevel' + suffix);
+        const classificationLevel = classificationLevelInput?.value || 'INTERNAL';
+
+        // 6. Wrap DEK on server (server sees 32 bytes only, zeros immediately)
+        const wrapResp = await fetch('/company-admin/api/employee-portal/wrap-dek', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionToken },
+            body: JSON.stringify({
+                rawDEK: btoa(String.fromCharCode(...dekRaw)),
+                classificationLevel
+            })
+        });
+        if (!wrapResp.ok) throw new Error('DEK wrapping failed: ' + (await wrapResp.text()));
+        const { wrappedKey, iv: wrapIv, authTag: wrapAuthTag, wrappingAlgorithm } = await wrapResp.json();
+        dekRaw.fill(0); // zero raw DEK immediately after server wraps it
+
+        // ── Build FormData with pre-encrypted file ──────────────────────────────
         const formData = new FormData();
-        formData.append('file', fileToUpload);
+        formData.append('file', new Blob([ciphertext], { type: fileToUpload.type }), fileToUpload.name);
+        formData.append('preEncrypted', 'true');
+        formData.append('fileIv',             fileIv);
+        formData.append('fileAuthTag',        fileAuthTag);
+        formData.append('fileAlgorithm',      'AES-256-GCM');
+        formData.append('wrappedKey',         wrappedKey);
+        formData.append('wrapIv',             wrapIv);
+        formData.append('wrapAuthTag',        wrapAuthTag);
+        formData.append('wrappingAlgorithm',  wrappingAlgorithm);
+        formData.append('contentHash',        contentHash);
 
         const titleInput = document.getElementById('classifiedDocTitle' + suffix);
         const title = titleInput ? titleInput.value.trim() : '';
@@ -2833,10 +3028,8 @@ async function handleCreateClassifiedDocument(event, isModal) {
             formData.append('title', title);
         }
 
-        // Get classification level (user-selected minimum clearance)
-        const classificationLevelInput = document.getElementById('docClassificationLevel' + suffix);
         if (classificationLevelInput && classificationLevelInput.value) {
-            formData.append('classificationLevel', classificationLevelInput.value);
+            formData.append('classificationLevel', classificationLevel);
         }
 
         // Get releasableTo from within the form
@@ -2856,10 +3049,13 @@ async function handleCreateClassifiedDocument(event, isModal) {
 
         if (result.success) {
             // Show success message
+            const encNote = result.sectionCount > 1
+                ? `${result.sectionCount} sections encrypted. `
+                : 'File encrypted in browser. ';
             document.getElementById('classifiedSuccessMessage' + suffix).textContent =
                 `Document "${result.title}" uploaded successfully! ` +
-                `${result.sectionCount} sections encrypted. ` +
-                `Overall classification: ${result.overallClassification}`;
+                encNote +
+                `Classification: ${result.overallClassification}`;
             document.getElementById('classifiedDocSuccess' + suffix).classList.remove('hidden');
 
             // Reset form
@@ -2932,7 +3128,6 @@ function closeUploadModal() {
 // Export functions for inline onclick handlers
 window.copyToClipboard = copyToClipboard;
 window.handleLogout = handleLogout;
-window.viewCredentials = viewCredentials;
 window.viewDocument = viewDocument;
 window.handleCreateDocument = handleCreateDocument;
 window.openClearanceModal = openClearanceModal;

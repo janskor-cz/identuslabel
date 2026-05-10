@@ -92,10 +92,21 @@ async function resolveDocumentDID(documentDID) {
     throw new Error(`DocumentMetadata missing iagonFileId in DID: ${documentDID}`);
   }
 
-  // ---- DocumentAccessGate -----------------------------------------------
+  // ---- DocumentAccessGate (document-service /access — no redaction) --------
   const accessService  = services.find(s => s.type === 'DocumentAccessGate');
   const accessEndpoint = accessService
     ? _unwrapEndpoint(accessService.serviceEndpoint)
+    : null;
+
+  // ---- DocumentAccessGate challenge (company-admin — applies redaction) ----
+  // Identified by service id "document-access-gate" to distinguish from the
+  // document-service /access endpoint (same type, different id).
+  const challengeService  = services.find(s =>
+    s.id === 'document-access-gate' ||
+    (typeof s.id === 'string' && s.id.endsWith('#document-access-gate'))
+  );
+  const challengeEndpoint = challengeService
+    ? _unwrapEndpoint(challengeService.serviceEndpoint)
     : null;
 
   // ---- AuditLog ---------------------------------------------------------
@@ -104,9 +115,33 @@ async function resolveDocumentDID(documentDID) {
     ? _unwrapEndpoint(auditService.serviceEndpoint)
     : (config.AUDIT_FALLBACK_URL || null);
 
+  // ---- IagonStorage — extract filename from Iagon download URL -----------
+  // The iagon-storage service endpoint contains a URL with a `filename` query
+  // parameter (e.g. ?filename=ACME_Test.docx). Use this as fallback when the
+  // metadata service does not carry originalFilename or mimeType.
+  let iagonFilenameFromUrl = null;
+  const iagonStorageService = services.find(s => s.type === 'IagonStorage' || s.id === 'iagon-storage');
+  if (iagonStorageService) {
+    try {
+      const rawEndpoint = _unwrapEndpoint(iagonStorageService.serviceEndpoint);
+      // serviceEndpoint may be a JSON-encoded array string: ["https://..."]
+      let urlStr = rawEndpoint;
+      if (urlStr && urlStr.startsWith('[')) {
+        try { urlStr = JSON.parse(urlStr)[0]; } catch (_) {}
+      }
+      if (urlStr) {
+        const parsed = new URL(urlStr);
+        const fn = parsed.searchParams.get('filename');
+        if (fn) iagonFilenameFromUrl = fn;
+      }
+    } catch (_) {
+      // Non-fatal: URL parse failure — filename stays null
+    }
+  }
+
   return {
     iagonFileId:         metadata.iagonFileId,
-    iagonFilename:       metadata.iagonFilename       || null,
+    iagonFilename:       metadata.iagonFilename       || iagonFilenameFromUrl || null,
     originalFilename:    metadata.originalFilename    || null,
     mimeType:            metadata.mimeType            || null,
     clearanceLevel:      metadata.clearanceLevel      || 'INTERNAL',
@@ -117,6 +152,7 @@ async function resolveDocumentDID(documentDID) {
     // found in VCKeyStore.
     iagonEncManifestId:  metadata.iagonEncManifestId  || null,
     accessEndpoint,
+    challengeEndpoint,
     auditEndpoint,
     verificationMethods
   };

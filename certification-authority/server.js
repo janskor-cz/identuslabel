@@ -243,6 +243,24 @@ function generateEd25519Keypair() {
   }
 }
 
+function generateX25519Keypair() {
+  try {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('x25519', {
+      publicKeyEncoding: { type: 'spki', format: 'der' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'der' }
+    });
+    const rawPublicKey = publicKey.slice(-32);
+    const rawPrivateKey = privateKey.slice(-32);
+    return {
+      publicKey: rawPublicKey.toString('base64url'),
+      privateKey: rawPrivateKey.toString('base64url')
+    };
+  } catch (error) {
+    console.error('Error generating X25519 keypair:', error);
+    throw new Error('Failed to generate X25519 keypair');
+  }
+}
+
 // ✅ SECURE: Store only public key metadata (no private keys)
 global.securityPublicKeys = global.securityPublicKeys || new Map();
 
@@ -2196,30 +2214,34 @@ app.post('/api/credentials/issue-confidential-clearance', async (req, res) => {
       }
     }
 
-    // ✅ Generate Ed25519 keypair for Security Clearance credential
-    console.log('🔑 Generating Ed25519 keypair for Confidential Security Clearance...');
-    const keypair = generateEd25519Keypair();
-    const publicKey = keypair.publicKey;
-    const privateKey = keypair.privateKey;
-    console.log(`✅ Ed25519 keypair generated. Public key: ${publicKey.substring(0, 16)}...`);
+    // Accept clearanceLevel from body or holderPersonalInfo, default to CONFIDENTIAL
+    const selectedClearanceLevel = (req.body.clearanceLevel || holderPersonalInfo.clearanceLevel || 'CONFIDENTIAL').toUpperCase();
+    const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'];
+    const effectiveClearanceLevel = validLevels.includes(selectedClearanceLevel) ? selectedClearanceLevel : 'CONFIDENTIAL';
+
+    // Generate Ed25519 + X25519 keypairs for Security Clearance credential
+    const edKeypair = generateEd25519Keypair();
+    const xKeypair = generateX25519Keypair();
+    const publicKey = edKeypair.publicKey;
+    const privateKey = edKeypair.privateKey;
 
     // Generate unique clearance ID
     const timestamp = Date.now().toString();
     const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
-    const clearanceId = `CONF-${timestamp}-${randomSuffix}`;
+    const clearanceId = `${effectiveClearanceLevel.substring(0, 4)}-${timestamp}-${randomSuffix}`;
 
-    // Set expiry date (1 year from now)
+    const expiryYearsMap = { INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3, SECRET: 5 };
     const issuedDate = new Date();
     const expiryDate = new Date();
-    expiryDate.setFullYear(expiryDate.getFullYear() + 1);
+    expiryDate.setFullYear(expiryDate.getFullYear() + (expiryYearsMap[effectiveClearanceLevel] || 2));
 
-    // ✅ SECURITY FIX: Store only public key and fingerprint (no private key)
     const fingerprint = generateEd25519Fingerprint(publicKey);
+    const x25519Fingerprint = generateX25519Fingerprint(xKeypair.publicKey);
     global.securityPublicKeys.set(clearanceId, {
       publicKey: publicKey,
       fingerprint: fingerprint,
       algorithm: 'Ed25519',
-      clearanceLevel: 'CONFIDENTIAL',
+      clearanceLevel: effectiveClearanceLevel,
       holderUniqueId: holderPersonalInfo.uniqueId
     });
 
@@ -2244,24 +2266,18 @@ app.post('/api/credentials/issue-confidential-clearance', async (req, res) => {
       throw new Error('No DID found for Certification Authority. Please create and publish a DID first.');
     }
 
-    // ✅ Create credential data AFTER retrieving issuingDID (required for schema validation)
     const credentialData = {
-      clearanceLevel: 'CONFIDENTIAL',
+      credentialType: 'SecurityClearance',
+      clearanceLevel: effectiveClearanceLevel,
       holderName: `${holderPersonalInfo.firstName} ${holderPersonalInfo.lastName}`,
       holderUniqueId: holderPersonalInfo.uniqueId,
-      publicKey: publicKey,
-      keyAlgorithm: 'Ed25519',
-      keyFingerprint: fingerprint,
+      ed25519PublicKey: publicKey,
+      ed25519Fingerprint: fingerprint,
+      x25519PublicKey: xKeypair.publicKey,
+      x25519Fingerprint: x25519Fingerprint,
       issuedDate: issuedDate.toISOString().split('T')[0],
       expiryDate: expiryDate.toISOString().split('T')[0],
-      clearanceId: clearanceId,
-      // ✅ SCHEMA FIX: Add required fields for SecurityClearanceLevel v2.0.0 schema
-      issuingAuthority: issuingDID,  // CA's DID for verifiable issuer identification
-      securityFeatures: {
-        requiresMultiFactorAuth: true,
-        allowsDigitalSigning: true,
-        allowsEncryption: true
-      }
+      clearanceId: clearanceId
     };
     
     // Get the unified Security Clearance schema
@@ -2275,14 +2291,17 @@ app.post('/api/credentials/issue-confidential-clearance', async (req, res) => {
     }
 
     const schemasData = await schemasResponse.json();
-    const securityClearanceSchema = schemasData.contents.find(schema =>
+    const allClearanceSchemas = schemasData.contents.filter(schema =>
       schema.name === 'SecurityClearanceLevel'
     );
+    const securityClearanceSchema = allClearanceSchemas.sort((a, b) =>
+      b.version.localeCompare(a.version, undefined, { numeric: true })
+    )[0];
 
     if (!securityClearanceSchema) {
       throw new Error('SecurityClearanceLevel schema not found. Please create the schema first.');
     }
-    
+
     const credentialOffer = {
       connectionId: actualConnectionId,
       credentialFormat: 'JWT',
@@ -2291,7 +2310,7 @@ app.post('/api/credentials/issue-confidential-clearance', async (req, res) => {
       issuingDID: issuingDID,
       schemaId: `${CLOUD_AGENT_URL}${securityClearanceSchema.self}`
     };
-    
+
     const response = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/credential-offers`, {
       method: 'POST',
       headers: {
@@ -2300,11 +2319,11 @@ app.post('/api/credentials/issue-confidential-clearance', async (req, res) => {
       },
       body: JSON.stringify(credentialOffer)
     });
-    
+
     if (!response.ok) {
       throw new Error(`Cloud Agent responded with ${response.status}: ${await response.text()}`);
     }
-    
+
     const offerData = await response.json();
     console.log(`✅ Confidential Security Clearance offered: ${offerData.recordId}`);
     
@@ -2314,13 +2333,14 @@ app.post('/api/credentials/issue-confidential-clearance', async (req, res) => {
       thid: offerData.thid,
       credentialData: credentialData,
       clearanceId: clearanceId,
-      keyFingerprint: fingerprint,
-      publicKey: publicKey,
-      privateKey: privateKey,  // ⚠️ User must securely store this!
-      message: 'Confidential Security Clearance issued successfully'
+      ed25519PublicKey: publicKey,
+      ed25519PrivateKey: privateKey,  // ⚠️ User must securely store this!
+      x25519PublicKey: xKeypair.publicKey,
+      x25519PrivateKey: xKeypair.privateKey,  // ⚠️ User must securely store this!
+      message: `${effectiveClearanceLevel} Security Clearance issued successfully`
     });
   } catch (error) {
-    console.error('❌ Error issuing Confidential clearance:', error);
+    console.error('❌ Error issuing clearance:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -2352,30 +2372,33 @@ app.post('/api/credentials/issue-restricted-clearance', async (req, res) => {
     console.log(`🔐 Issuing Restricted Security Clearance to user ${holderPersonalInfo.uniqueId}`);
     console.log(`🔗 Using user's mapped connection: ${actualConnectionId}`);
     
-    // ✅ Generate Ed25519 keypair for Security Clearance credential
-    console.log('🔑 Generating Ed25519 keypair for Restricted Security Clearance...');
-    const keypair = generateEd25519Keypair();
-    const publicKey = keypair.publicKey;
-    const privateKey = keypair.privateKey;
-    console.log(`✅ Ed25519 keypair generated. Public key: ${publicKey.substring(0, 16)}...`);
+    // Accept clearanceLevel from body or holderPersonalInfo
+    const selectedClearanceLevel = (req.body.clearanceLevel || holderPersonalInfo.clearanceLevel || 'RESTRICTED').toUpperCase();
+    const validLevels = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'];
+    const effectiveClearanceLevel = validLevels.includes(selectedClearanceLevel) ? selectedClearanceLevel : 'RESTRICTED';
 
-    // Generate unique clearance ID
+    // Generate Ed25519 + X25519 keypairs
+    const edKeypair = generateEd25519Keypair();
+    const xKeypair = generateX25519Keypair();
+    const publicKey = edKeypair.publicKey;
+    const privateKey = edKeypair.privateKey;
+
     const timestamp = Date.now().toString();
     const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
-    const clearanceId = `REST-${timestamp}-${randomSuffix}`;
+    const clearanceId = `${effectiveClearanceLevel.substring(0, 4)}-${timestamp}-${randomSuffix}`;
 
-    // Set expiry date (2 years from now for restricted)
+    const expiryYearsMap = { INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3, SECRET: 5 };
     const issuedDate = new Date();
     const expiryDate = new Date();
-    expiryDate.setFullYear(expiryDate.getFullYear() + 2);
+    expiryDate.setFullYear(expiryDate.getFullYear() + (expiryYearsMap[effectiveClearanceLevel] || 3));
 
-    // ✅ SECURITY FIX: Store only public key and fingerprint (no private key)
     const fingerprint = generateEd25519Fingerprint(publicKey);
+    const x25519Fingerprint = generateX25519Fingerprint(xKeypair.publicKey);
     global.securityPublicKeys.set(clearanceId, {
       publicKey: publicKey,
       fingerprint: fingerprint,
       algorithm: 'Ed25519',
-      clearanceLevel: 'RESTRICTED',
+      clearanceLevel: effectiveClearanceLevel,
       holderUniqueId: holderPersonalInfo.uniqueId
     });
 
@@ -2400,24 +2423,18 @@ app.post('/api/credentials/issue-restricted-clearance', async (req, res) => {
       throw new Error('No DID found for Certification Authority. Please create and publish a DID first.');
     }
 
-    // ✅ Create credential data AFTER retrieving issuingDID (required for schema validation)
     const credentialData = {
-      clearanceLevel: 'RESTRICTED',
+      credentialType: 'SecurityClearance',
+      clearanceLevel: effectiveClearanceLevel,
       holderName: `${holderPersonalInfo.firstName} ${holderPersonalInfo.lastName}`,
       holderUniqueId: holderPersonalInfo.uniqueId,
-      publicKey: publicKey,
-      keyAlgorithm: 'Ed25519',
-      keyFingerprint: fingerprint,
+      ed25519PublicKey: publicKey,
+      ed25519Fingerprint: fingerprint,
+      x25519PublicKey: xKeypair.publicKey,
+      x25519Fingerprint: x25519Fingerprint,
       issuedDate: issuedDate.toISOString().split('T')[0],
       expiryDate: expiryDate.toISOString().split('T')[0],
-      clearanceId: clearanceId,
-      // ✅ SCHEMA FIX: Add required fields for SecurityClearanceLevel v2.0.0 schema
-      issuingAuthority: issuingDID,  // CA's DID for verifiable issuer identification
-      securityFeatures: {
-        requiresMultiFactorAuth: true,
-        allowsDigitalSigning: true,
-        allowsEncryption: true
-      }
+      clearanceId: clearanceId
     };
 
     // Get the unified Security Clearance schema
@@ -2431,9 +2448,12 @@ app.post('/api/credentials/issue-restricted-clearance', async (req, res) => {
     }
 
     const schemasData = await schemasResponse.json();
-    const securityClearanceSchema = schemasData.contents.find(schema =>
+    const allClearanceSchemas = schemasData.contents.filter(schema =>
       schema.name === 'SecurityClearanceLevel'
     );
+    const securityClearanceSchema = allClearanceSchemas.sort((a, b) =>
+      b.version.localeCompare(a.version, undefined, { numeric: true })
+    )[0];
 
     if (!securityClearanceSchema) {
       throw new Error('SecurityClearanceLevel schema not found. Please create the schema first.');
@@ -2447,7 +2467,7 @@ app.post('/api/credentials/issue-restricted-clearance', async (req, res) => {
       issuingDID: issuingDID,
       schemaId: `${CLOUD_AGENT_URL}${securityClearanceSchema.self}`
     };
-    
+
     const response = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/credential-offers`, {
       method: 'POST',
       headers: {
@@ -2456,11 +2476,11 @@ app.post('/api/credentials/issue-restricted-clearance', async (req, res) => {
       },
       body: JSON.stringify(credentialOffer)
     });
-    
+
     if (!response.ok) {
       throw new Error(`Cloud Agent responded with ${response.status}: ${await response.text()}`);
     }
-    
+
     const offerData = await response.json();
     console.log(`✅ Restricted Security Clearance offered: ${offerData.recordId}`);
     
@@ -2470,13 +2490,14 @@ app.post('/api/credentials/issue-restricted-clearance', async (req, res) => {
       thid: offerData.thid,
       credentialData: credentialData,
       clearanceId: clearanceId,
-      keyFingerprint: fingerprint,
-      publicKey: publicKey,
-      privateKey: privateKey,  // ⚠️ User must securely store this!
-      message: 'Restricted Security Clearance issued successfully'
+      ed25519PublicKey: publicKey,
+      ed25519PrivateKey: privateKey,  // ⚠️ User must securely store this!
+      x25519PublicKey: xKeypair.publicKey,
+      x25519PrivateKey: xKeypair.privateKey,  // ⚠️ User must securely store this!
+      message: `${effectiveClearanceLevel} Security Clearance issued successfully`
     });
   } catch (error) {
-    console.error('❌ Error issuing Restricted clearance:', error);
+    console.error('❌ Error issuing clearance:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -2586,6 +2607,9 @@ app.post('/api/credentials/issue-realperson', async (req, res) => {
     const enrichedClaims = {
       ...credentialData,
       credentialType: 'RealPersonIdentity',
+      serviceUrl: `https://identuslabel.cz/ca/login?uid=${encodeURIComponent(credentialData.uniqueId)}`,
+      serviceName: 'Certification Authority',
+      serviceIcon: '🔐',
       issuedDate: issuedDate,
       expiryDate: expiryDate,
       credentialId: credentialId
@@ -5803,18 +5827,14 @@ app.post('/api/credentials/issue-security-clearance', async (req, res) => {
     let selectedSchema = null;
     let schemaVersion = null;
 
-    // Try v4.0.0 first (flattened structure for Cloud Agent compatibility)
-    selectedSchema = schemas.find(s => s.name === 'SecurityClearanceLevel' && s.version === '4.0.0');
-    schemaVersion = '4.0.0';
-
-    if (!selectedSchema) {
-      console.log('⚠️  [WEB-ISSUANCE] SecurityClearanceLevel v4.0.0 schema not found, falling back to v3.0.0');
-      selectedSchema = schemas.find(s => s.name === 'SecurityClearanceLevel' && s.version === '3.0.0');
-      schemaVersion = '3.0.0';
+    // Try v5.0.0 first (SECRET replaces TOP-SECRET), then v4.0.0, then v3.0.0
+    for (const ver of ['5.0.0', '4.0.0', '3.0.0']) {
+      selectedSchema = schemas.find(s => s.name === 'SecurityClearanceLevel' && s.version === ver);
+      if (selectedSchema) { schemaVersion = ver; break; }
     }
 
     if (!selectedSchema) {
-      throw new Error('SecurityClearanceLevel dual-key schema (v3.0.0 or v4.0.0) not found. Legacy format (v2.0.0) is no longer supported.');
+      throw new Error('SecurityClearanceLevel dual-key schema (v5.0.0/v4.0.0/v3.0.0) not found. Legacy format (v2.0.0) is no longer supported.');
     }
 
     console.log(`📋 [WEB-ISSUANCE] Using schema: SecurityClearanceLevel v${schemaVersion} (DUAL-KEY with X25519)`);
@@ -5837,12 +5857,13 @@ app.post('/api/credentials/issue-security-clearance', async (req, res) => {
     // Prepare credential claims based on schema version and format
     let credentialData = {};
 
-    if ((isDualKeyFormat || isPrismDIDX25519Only) && (schemaVersion === '3.0.0' || schemaVersion === '4.0.0')) {
-      // Dual-key or X25519-only format with v3.0.0/v4.0.0 schema (FLAT structure - Cloud Agent doesn't support nested objects)
+    if ((isDualKeyFormat || isPrismDIDX25519Only) && (schemaVersion === '3.0.0' || schemaVersion === '4.0.0' || schemaVersion === '5.0.0')) {
+      // Dual-key or X25519-only format with v3.0.0/v4.0.0/v5.0.0 schema (FLAT structure - Cloud Agent doesn't support nested objects)
       const formatMode = isPrismDIDX25519Only ? 'X25519-ONLY (PRISM DID auto-extracted)' : 'DUAL-KEY';
       console.log(`📝 [WEB-ISSUANCE] Building ${formatMode} credential claims (v${schemaVersion} - flat)`);
 
       credentialData = {
+        credentialType: 'SecurityClearance',
         clearanceLevel: clearanceLevel.toUpperCase(),
         holderName: `${session.userData.firstName} ${session.userData.lastName}`,
         holderUniqueId: session.userData.uniqueId,
@@ -6325,19 +6346,15 @@ app.post('/api/didcomm/request-security-clearance', async (req, res) => {
     let selectedSchema = null;
     let schemaVersion = null;
 
-    // Try v4.0.0 first (flattened structure for Cloud Agent compatibility)
-    selectedSchema = schemas.find(s => s.name === 'SecurityClearanceLevel' && s.version === '4.0.0');
-    schemaVersion = '4.0.0';
-
-    // Fallback to v3.0.0 (nested structure)
-    if (!selectedSchema) {
-      selectedSchema = schemas.find(s => s.name === 'SecurityClearanceLevel' && s.version === '3.0.0');
-      schemaVersion = '3.0.0';
+    // Try v5.0.0 first (SECRET replaces TOP-SECRET), then v4.0.0, then v3.0.0
+    for (const ver of ['5.0.0', '4.0.0', '3.0.0']) {
+      selectedSchema = schemas.find(s => s.name === 'SecurityClearanceLevel' && s.version === ver);
+      if (selectedSchema) { schemaVersion = ver; break; }
     }
 
     // No v2.0.0 fallback - throw error if dual-key schema not found
     if (!selectedSchema) {
-      throw new Error('SecurityClearanceLevel dual-key schema (v3.0.0 or v4.0.0) not found. Legacy format (v2.0.0) is no longer supported.');
+      throw new Error('SecurityClearanceLevel dual-key schema (v5.0.0/v4.0.0/v3.0.0) not found. Legacy format (v2.0.0) is no longer supported.');
     }
 
     console.log(`📋 Using schema: SecurityClearanceLevel v${schemaVersion}`);

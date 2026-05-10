@@ -121,15 +121,18 @@ export type DashboardMessage =
     }
   | {
       type: 'OPEN_DOCUMENT';
-      requestId: string;
-      ephemeralDID: string;
-      title: string;
-      sourceInfo: {
+      requestId?: string;
+      /** Stored document ephemeral DID (open already-downloaded document) */
+      ephemeralDID?: string;
+      /** PRISM document DID (trigger fetch + access flow) */
+      documentDID?: string;
+      title?: string;
+      sourceInfo?: {
         filename: string;
         format: string;
         contentType: string;
       };
-      timestamp: number;
+      timestamp?: number;
     }
   | {
       type: 'SSI_DOCUMENT_DOWNLOAD_REQUEST';
@@ -218,6 +221,23 @@ export function initSecureDashboardBridge(walletId: string): void {
 
     // Store handler reference for cleanup
     (window as any).__secureDashboardMessageHandler = messageHandler;
+
+    // BroadcastChannel listener: receives OPEN_DOCUMENT from the employee portal
+    // when it is accessed directly (not embedded in the wallet iframe).
+    // Fires wallet:openDocument so CAPortalRenderer navigates via the React router.
+    try {
+      const bc = new BroadcastChannel('wallet-document-channel');
+      bc.onmessage = (e: MessageEvent) => {
+        if (e.data?.type === 'OPEN_DOCUMENT' && e.data?.documentDID) {
+          console.log('📡 [SecureDashboardBridge] BroadcastChannel OPEN_DOCUMENT received:', e.data.documentDID.substring(0, 50));
+          window.dispatchEvent(new CustomEvent('wallet:openDocument', { detail: { documentDID: e.data.documentDID } }));
+        }
+      };
+      (window as any).__secureDashboardBroadcastChannel = bc;
+      console.log('✅ [SecureDashboardBridge] BroadcastChannel listener initialized');
+    } catch (bcErr) {
+      console.warn('⚠️ [SecureDashboardBridge] BroadcastChannel not supported:', bcErr);
+    }
 
     // Store walletId for deferred WALLET_READY signal (sent when agent is set)
     _walletId = walletId;
@@ -792,36 +812,34 @@ async function handleOpenDocumentRequest(
   origin: string,
   message: Extract<DashboardMessage, { type: 'OPEN_DOCUMENT' }>
 ): Promise<void> {
-  const { requestId, ephemeralDID, title, sourceInfo } = message;
+  const { requestId, ephemeralDID, documentDID, title, sourceInfo } = message as any;
 
-  console.log(`📖 [SecureDashboardBridge] Open document request: ${title}`);
-  console.log(`   Ephemeral DID: ${ephemeralDID.substring(0, 50)}...`);
-  console.log(`   Format: ${sourceInfo.format}`);
+  console.log(`📖 [SecureDashboardBridge] Open document request: ${title || documentDID || ephemeralDID || '(unknown)'}`);
+  if (ephemeralDID) console.log(`   Ephemeral DID: ${ephemeralDID.substring(0, 50)}...`);
+  if (documentDID)  console.log(`   Document DID: ${documentDID.substring(0, 50)}...`);
+  if (sourceInfo)   console.log(`   Format: ${sourceInfo.format}`);
 
   try {
-    // Store the document to open in a global variable
-    // (The document viewer page will read this)
-    (window as any).__documentToOpen = {
-      ephemeralDID,
-      title,
-      sourceInfo,
-      openedAt: Date.now()
-    };
-
-    // Navigate to the document viewer page
-    // Using hash-based routing to not reload the app
-    const viewerUrl = `/my-documents?view=${encodeURIComponent(ephemeralDID)}`;
-
-    // If we're in a popup, navigate there
-    // If we're the main window, open a new viewer
-    if (window.location.pathname.includes('dashboard-decrypt') ||
-        window.opener) {
-      // This is a popup window - navigate within it
-      window.location.href = viewerUrl;
-    } else {
-      // Main window - open viewer
-      window.location.href = viewerUrl;
+    // Case 1: documentDID only — navigate to documents page to trigger the access flow
+    if (documentDID && !ephemeralDID) {
+      const viewerUrl = `/wallet/documents?did=${encodeURIComponent(documentDID)}`;
+      // Dispatch a custom event so the React router handles navigation (soft nav, no reload).
+      // This avoids a hard location.href reload that would create a disconnected wallet state,
+      // especially when the employee portal is embedded as an iframe inside CAPortalModal.
+      window.dispatchEvent(new CustomEvent('wallet:openDocument', { detail: { documentDID } }));
+      source?.postMessage({
+        type: 'DOCUMENT_VIEWER_OPENED',
+        requestId,
+        success: true,
+        viewerUrl,
+        timestamp: Date.now()
+      }, origin);
+      return;
     }
+
+    // Case 2: ephemeralDID — open already-downloaded stored document
+    const viewerUrl = `/wallet/documents`;
+    window.dispatchEvent(new CustomEvent('wallet:openDocument', { detail: { ephemeralDID } }));
 
     // Send acknowledgment
     source.postMessage({
@@ -1135,10 +1153,15 @@ export function removeStoredDocument(ephemeralDID: string): void {
  */
 export function cleanupSecureDashboardBridge(): void {
   const handler = (window as any).__secureDashboardMessageHandler;
-
   if (handler) {
     console.log('🧹 [SecureDashboardBridge] Removing postMessage listener');
     window.removeEventListener('message', handler);
     delete (window as any).__secureDashboardMessageHandler;
+  }
+
+  const bc = (window as any).__secureDashboardBroadcastChannel;
+  if (bc) {
+    bc.close();
+    delete (window as any).__secureDashboardBroadcastChannel;
   }
 }

@@ -21,6 +21,20 @@ The classified document system allows you to mark different sections of a docume
 - CONFIDENTIAL users see CONFIDENTIAL and UNCLASSIFIED
 - UNCLASSIFIED users see only UNCLASSIFIED content
 
+### classificationLevel vs. Write-Gate Level
+
+`classificationLevel` is the **discovery level**: it controls which employees can see this document in their available-documents list (registry query). It does **not** fully determine who may edit the document.
+
+For DOCX documents, **write access** (editing/updating) is separately gated on the **highest paragraph style** present in the document body. This is resolved by `resolveDocumentHighestLevel()` in `company-admin-portal/server.js`, which inspects `document.metadata.sectionMetadata` (stored at upload time), or downloads and parses the original DOCX from Iagon if section metadata is absent, and falls back to `classificationLevel` only as a last resort.
+
+**These two values can differ by design.** For example:
+
+- A document registered with `classificationLevel: CONFIDENTIAL` (so it appears in the lists of CONFIDENTIAL+ employees) may contain paragraphs styled `TopSecret`.
+- An employee with CONFIDENTIAL clearance can discover and read their redacted view of that document.
+- The same employee is **blocked from submitting edits** because `resolveDocumentHighestLevel()` returns 4 (TOP_SECRET), which exceeds their clearance of 2.
+
+Both the `POST /api/document-update/request-edit` endpoint (edit token issuance) and the `POST /api/document-update/submit` endpoint (final submission) independently enforce this check as defence-in-depth.
+
 ## Document Formats
 
 ### HTML Format (Recommended)
@@ -372,5 +386,5 @@ For questions or issues:
 
 ---
 
-*Document Version: 1.0*
-*Last Updated: December 12, 2025*
+*Document Version: 1.1*
+*Last Updated: 2026-04-29*

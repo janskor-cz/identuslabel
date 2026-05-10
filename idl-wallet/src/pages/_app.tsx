@@ -3,6 +3,10 @@ import { AutoStartAgent } from '@/components/AutoStartAgent';
 import WasmMemoryGuard from '@/components/WasmMemoryGuard';
 import { CredentialOfferModal } from '@/components/CredentialOfferModal';
 import { EnterpriseCredentialOfferModal } from '@/components/EnterpriseCredentialOfferModal';
+import { CAPortalModal } from '@/components/CAPortalModal';
+import { CAPortalProvider, useCAPortal } from '@/utils/CAPortalContext';
+import { useAppSelector } from '@/reducers/store';
+import { useMountedApp } from '@/reducers/store';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { MainLayout } from '@/components/layouts/MainLayout';
 import { useRouter } from 'next/router';
@@ -21,6 +25,51 @@ import { initConsoleLogger, cleanupConsoleLogger } from '@/utils/ConsoleLogger';
 // Import cleanup utilities to auto-export to browser console
 import '@/utils/clearWalletData';
 import '@/utils/cleanupOrphanedPeerDIDs';
+
+function CAPortalRenderer() {
+    const { caPortalUrl, closeCAPortal, isMinimized, minimizeCAPortal, restoreCAPortal, setPendingDocumentDID } = useCAPortal();
+    const router = useRouter();
+    const app = useMountedApp();
+    const enterprisePendingRequests = useAppSelector(
+        state => state.enterpriseAgent?.pendingProofRequests?.length ?? 0
+    );
+    const personalPendingRequests = (app.presentationRequests ?? []).filter(r => r.status === 'pending').length;
+    const hasPendingRequests = enterprisePendingRequests > 0 || personalPendingRequests > 0;
+
+    // Listen for wallet:openDocument custom events dispatched by SecureDashboardBridge.
+    // This covers both the iframe-embedded portal case and the separate-popup case,
+    // routing via React router instead of a hard page reload.
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const { documentDID, ephemeralDID } = (e as CustomEvent).detail ?? {};
+            if (documentDID) {
+                setPendingDocumentDID(documentDID);
+            }
+            router.push('/documents');
+        };
+        window.addEventListener('wallet:openDocument', handler);
+        return () => window.removeEventListener('wallet:openDocument', handler);
+    }, [setPendingDocumentDID, router]);
+
+    if (!caPortalUrl) return null;
+
+    const handleOpenDocument = (documentDID: string) => {
+        setPendingDocumentDID(documentDID);
+        router.push('/documents');
+    };
+
+    return (
+        <CAPortalModal
+            url={caPortalUrl}
+            isMinimized={isMinimized}
+            hasPendingRequests={hasPendingRequests}
+            onClose={closeCAPortal}
+            onMinimize={minimizeCAPortal}
+            onRestore={restoreCAPortal}
+            onOpenDocument={handleOpenDocument}
+        />
+    );
+}
 
 function App({ Component, pageProps }) {
     const router = useRouter();
@@ -107,6 +156,7 @@ function App({ Component, pageProps }) {
     }, [router]);
 
     return (
+        <CAPortalProvider>
         <ErrorBoundary
             componentName="App Root"
             fallback={
@@ -135,11 +185,13 @@ function App({ Component, pageProps }) {
                 <UnifiedProofRequestModal />
                 <CredentialOfferModal />
                 <EnterpriseCredentialOfferModal />
+                <CAPortalRenderer />
                 <MainLayout>
                     <Component {...pageProps} />
                 </MainLayout>
             </MountSDK>
         </ErrorBoundary>
+        </CAPortalProvider>
     );
 }
 

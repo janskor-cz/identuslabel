@@ -19,6 +19,9 @@
  */
 
 import { createAsyncThunk } from '@reduxjs/toolkit';
+
+// Offers dismissed by the user this session — excluded from polling results so they don't reappear
+export const dismissedOfferIds = new Set<string>();
 import { WalletConfiguration } from '@/utils/serviceConfigManager';
 import { setActiveConfiguration } from '@/utils/configurationStorage';
 import { EnterpriseAgentClient } from '@/utils/EnterpriseAgentClient';
@@ -685,7 +688,11 @@ export const pollPendingCredentialOffers = createAsyncThunk(
       }));
 
       // ✅ FIX: Update Redux state with ALL credentials so EnterpriseCredentialOfferModal sees new offers
-      dispatch(setCredentials(allCredentials));
+      // Exclude offers the user has explicitly dismissed this session
+      const visibleCredentials = allCredentials.filter(
+        (c: any) => !dismissedOfferIds.has(c.recordId)
+      );
+      dispatch(setCredentials(visibleCredentials));
 
       // Filter for pending offers to return (for callers who need just offers)
       const pendingOffers = allCredentials.filter(

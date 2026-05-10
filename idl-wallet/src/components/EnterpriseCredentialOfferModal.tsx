@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAppSelector, useAppDispatch } from '@/reducers/store';
-import { acceptCredentialOffer } from '@/actions/enterpriseAgentActions';
+import { acceptCredentialOffer, dismissedOfferIds } from '@/actions/enterpriseAgentActions';
+import { removeCredential } from '@/reducers/enterpriseAgent';
 
 /**
  * EnterpriseCredentialOfferModal Component
@@ -247,17 +248,16 @@ export const EnterpriseCredentialOfferModal: React.FC = () => {
     };
 
     const handleReject = async () => {
-        if (isProcessing) return;
+        if (isProcessing || !currentOffer) return;
 
         setIsProcessing(true);
         setError(null);
 
         try {
-            // TODO: Implement reject API call when available
-            // For now, just log that it's not implemented
-            console.warn('⚠️ [ENTERPRISE CREDENTIAL OFFER] Reject functionality not yet implemented');
-            setError('Reject functionality not yet implemented. Please contact your administrator.');
-
+            // Dismiss the offer — removes from Redux state and suppresses in future polls.
+            // The Cloud Agent retains the record server-side (no formal holder-reject endpoint).
+            dismissedOfferIds.add(currentOffer.recordId);
+            dispatch(removeCredential(currentOffer.recordId));
         } catch (err) {
             console.error('❌ [ENTERPRISE CREDENTIAL OFFER] Failed to reject offer:', err);
             setError(err instanceof Error ? err.message : 'Failed to reject credential offer');
@@ -276,7 +276,7 @@ export const EnterpriseCredentialOfferModal: React.FC = () => {
 
     return (
         <div
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[9999] flex items-center justify-center"
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[10001] flex items-center justify-center"
         >
             <div
                 className="bg-slate-900 border border-slate-700/50 rounded-2xl p-6 max-w-2xl w-full mx-4 shadow-2xl max-h-[90vh] overflow-y-auto"

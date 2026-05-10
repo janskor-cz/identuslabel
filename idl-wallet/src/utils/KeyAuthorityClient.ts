@@ -60,15 +60,37 @@ export interface KAResponse {
 }
 
 /**
+ * Decode the payload of a JWT string without verifying its signature.
+ * Returns the payload object, or null if the string is not a valid 3-part JWT.
+ */
+function decodeJWTPayload(jwt: string): Record<string, any> | null {
+  try {
+    const parts = jwt.split('.');
+    if (parts.length !== 3) return null;
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build a minimal Verifiable Presentation from wallet credentials.
  * Includes EmployeeRole and SecurityClearance VCs (as raw JWT strings).
+ *
+ * Security: only VCs whose JWT `sub` field matches the first credential's subject
+ * are included. This prevents a holder from accidentally bundling peer credentials
+ * (received during OOB connection) belonging to a different subject — which would
+ * be a holder-binding violation and rejected by the server anyway.
  */
 function buildVP(credentials: any[]): { vp: object; hasCredentials: boolean } {
   const jwtStrings: string[] = [];
+  let holderSubject: string | null = null;
 
   for (const cred of credentials) {
     const type = getCredentialType(cred);
-    if (type !== 'EmployeeRole' && type !== 'SecurityClearance') continue;
+    if (type !== 'EmployeeRole' && type !== 'SecurityClearance' && type !== 'SecurityClearanceGrant') continue;
 
     // Credentials may be stored as raw JWT string, base64-encoded JWT, or object with .jwt / .credential field
     let jwtStr: string | null = null;
@@ -103,7 +125,23 @@ function buildVP(credentials: any[]): { vp: object; hasCredentials: boolean } {
       if (raw && typeof raw === 'string') jwtStr = raw;
     }
 
-    if (jwtStr) jwtStrings.push(jwtStr);
+    if (!jwtStr) continue;
+
+    // Holder-binding guard: all VCs must share the same credential subject (JWT sub).
+    // If this credential belongs to a different subject (e.g. a peer VC received
+    // during OOB connection that was accidentally stored in Pluto), skip it.
+    const payload = decodeJWTPayload(jwtStr);
+    const vcSubject = payload?.sub || payload?.vc?.credentialSubject?.id || null;
+    if (vcSubject) {
+      if (holderSubject === null) {
+        holderSubject = vcSubject;
+      } else if (vcSubject !== holderSubject) {
+        console.warn(`[buildVP] Skipping credential with mismatched subject (${vcSubject} ≠ ${holderSubject}) — holder-binding protection`);
+        continue;
+      }
+    }
+
+    jwtStrings.push(jwtStr);
   }
 
   const vp = {
@@ -225,14 +263,18 @@ export interface AccessGateResponse {
 
 /**
  * Request document access via the two-step challenge → VP presentation flow.
- * Replaces the legacy issue-section-keys / issue-docx endpoints.
  * The server applies clearance-based redaction and returns the document
  * (HTML or DOCX) re-encrypted with the wallet's ephemeral X25519 key.
+ *
+ * @param opts.challengeUrl  Full URL of the challenge endpoint from the DID's
+ *   "document-access-gate" service.  When omitted the COMPANY_ADMIN_BASE
+ *   constant is used as a fallback.
  */
 export async function requestDocumentAccess(
   documentDID: string,
   credentials: any[],
-  keyPair: nacl.BoxKeyPair
+  keyPair: nacl.BoxKeyPair,
+  opts?: { challengeUrl?: string }
 ): Promise<AccessGateResponse> {
   const { vp, hasCredentials } = buildVP(credentials);
 
@@ -245,9 +287,15 @@ export async function requestDocumentAccess(
 
   const ephemeralPublicKey = Buffer.from(keyPair.publicKey).toString('base64');
 
+  // Derive base URL: strip the trailing /challenge path segment if the caller
+  // passed the full challenge URL from the DID document service endpoint.
+  const accessGateBase = opts?.challengeUrl
+    ? opts.challengeUrl.replace(/\/challenge(\?.*)?$/, '')
+    : `${COMPANY_ADMIN_BASE}/api/access-gate`;
+
   // Step 1: Obtain a one-time challenge
   const challengeRes = await fetch(
-    `${COMPANY_ADMIN_BASE}/api/access-gate/challenge?documentDID=${encodeURIComponent(documentDID)}`
+    `${accessGateBase}/challenge?documentDID=${encodeURIComponent(documentDID)}`
   );
   const challengeJson = await challengeRes.json();
   if (!challengeRes.ok || !challengeJson.success) {
@@ -256,7 +304,7 @@ export async function requestDocumentAccess(
   const challenge: string = challengeJson.challenge;
 
   // Step 2: Present VP + ephemeral key to receive encrypted document
-  const res = await fetch(`${COMPANY_ADMIN_BASE}/api/access-gate/present`, {
+  const res = await fetch(`${accessGateBase}/present`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ documentDID, vp, challenge, ephemeralPublicKey })
@@ -269,6 +317,345 @@ export async function requestDocumentAccess(
   }
 
   return json as AccessGateResponse;
+}
+
+// ---------------------------------------------------------------------------
+// SSI-aligned VP-gated access via identus-document-service
+// ---------------------------------------------------------------------------
+
+/**
+ * Response shape from POST /access (document service, SSI-aligned).
+ * Server never decrypts the file — returns encrypted DEK + raw encrypted blob.
+ * Wallet decrypts: DEK via nacl.box.open, file via WebCrypto AES-GCM.
+ */
+export interface VPGatedAccessResponse {
+  success: true;
+  copyId: string;
+  copyHash: string;
+  filename: string;
+  mimeType: string;
+  clearanceLevel: string;
+  accessedAt: string;
+  /** nacl.box of the 32-byte DEK */
+  encryptedDEK: {
+    ciphertext:      string; // base64
+    nonce:           string; // base64
+    senderPublicKey: string; // base64 server ephemeral X25519
+  };
+  /** Raw AES-256-GCM encrypted file bytes from Iagon (base64) */
+  encryptedBlob:  string;
+  fileIv:         string; // base64
+  fileAuthTag:    string; // base64
+  fileAlgorithm:  string; // 'AES-256-GCM'
+  /** sha256 of plaintext — wallet verifies after decryption */
+  contentHash:    string | null;
+}
+
+/**
+ * Extract a stable employee identifier from wallet credentials.
+ * Preference order: email (EmployeeRole) → prismDid → employeeId.
+ */
+function extractEmployeeIdentifier(credentials: any[]): string {
+  for (const cred of credentials) {
+    const type    = getCredentialType(cred);
+    const subject = getCredentialSubject(cred);
+    if (type === 'EmployeeRole') {
+      if (subject?.email)      return subject.email;
+      if (subject?.prismDid)   return subject.prismDid;
+      if (subject?.employeeId) return subject.employeeId;
+    }
+  }
+  // Fallback: SecurityClearance holder
+  for (const cred of credentials) {
+    const subject = getCredentialSubject(cred);
+    if (subject?.prismDid)   return subject.prismDid;
+    if (subject?.email)      return subject.email;
+  }
+  throw new Error('Cannot determine employee identifier from wallet credentials — no EmployeeRole credential found');
+}
+
+/**
+ * Request document access via DIDComm present-proof (preferred over direct HTTP VP).
+ *
+ * Three-step flow:
+ *   1. POST /api/document-access/initiate  → server sends DIDComm RequestPresentation to wallet
+ *      The wallet's UnifiedProofRequestModal will appear for the user to approve.
+ *   2. Poll GET /api/document-access/status/:sessionId until status === 'authorized'
+ *   3. POST /api/document-access/complete  → server verifies VP (holder-bound) and returns doc
+ *
+ * Security advantages over direct HTTP VP submission:
+ *   - Holder binding: VP is signed by the wallet's DID key (cryptographic proof of ownership)
+ *   - Channel binding: VP is tied to the existing DIDComm connection (not just a challenge nonce)
+ *   - No credential exfiltration: VC JWTs never leave the DIDComm channel unencrypted
+ */
+export async function requestDocumentAccessDIDComm(
+  documentDID: string,
+  credentials: any[],
+  keyPair: nacl.BoxKeyPair,
+  opts?: { baseUrl?: string; timeoutMs?: number }
+): Promise<AccessGateResponse> {
+  const base             = opts?.baseUrl ?? COMPANY_ADMIN_BASE;
+  const timeoutMs        = opts?.timeoutMs ?? 3 * 60 * 1000;   // 3 min default
+  const ephemeralPublicKey = Buffer.from(keyPair.publicKey).toString('base64');
+  const employeeIdentifier = extractEmployeeIdentifier(credentials);
+
+  // Step 1: Initiate — server creates DIDComm proof request; wallet will receive it shortly
+  const initRes = await fetch(`${base}/api/document-access/initiate`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ documentDID, employeeIdentifier, ephemeralPublicKey })
+  });
+  const initJson = await initRes.json() as any;
+  if (!initRes.ok || !initJson.success) {
+    throw new Error(initJson.message || initJson.error || 'Failed to initiate DIDComm document access');
+  }
+  const { sessionId } = initJson;
+
+  // Step 2: Poll until authorized (user approves DIDComm proof request in modal)
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 2000));
+    const statusRes  = await fetch(`${base}/api/document-access/status/${sessionId}`);
+    const statusJson = await statusRes.json() as any;
+    if (statusJson.status === 'authorized') break;
+    if (statusJson.status === 'rejected' || statusJson.status === 'failed') {
+      throw new Error(`Document access denied: ${statusJson.status}`);
+    }
+  }
+
+  // Step 3: Complete — server verifies VP and returns encrypted document
+  const completeRes = await fetch(`${base}/api/document-access/complete`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ sessionId })
+  });
+  const completeJson = await completeRes.json() as any;
+  if (!completeRes.ok || !completeJson.success) {
+    throw new Error(completeJson.message || completeJson.error || 'Document access complete step failed');
+  }
+  return completeJson as AccessGateResponse;
+}
+
+/**
+ * Helper: base64 string → Uint8Array.
+ */
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Request VP-gated document access from the identus-document-service.
+ *
+ * SSI-aligned flow:
+ *   1. Wallet sends VP + ephemeral X25519 public key to POST /access
+ *   2. Server verifies VP, unwraps DEK (CMK), nacl.box(DEK, clientPubKey)
+ *   3. Server downloads raw encrypted blob from Iagon (no decryption)
+ *   4. Wallet decrypts DEK via nacl.box.open → rawDEK
+ *   5. Wallet decrypts file via WebCrypto AES-GCM → plaintext
+ *   6. Wallet verifies content hash
+ *
+ * @param documentDID  - full PRISM DID of the document
+ * @param accessUrl    - document service access endpoint (from DID's DocumentAccessGate service)
+ * @param credentials  - wallet credentials array (EmployeeRole + SecurityClearance VCs)
+ * @param keyPair      - ephemeral nacl.box keypair (caller generates per request)
+ * @returns decrypted file as Uint8Array
+ */
+export async function requestVPGatedAccess(
+  documentDID: string,
+  accessUrl: string,
+  credentials: any[],
+  keyPair: nacl.BoxKeyPair
+): Promise<{ plaintext: Uint8Array; filename: string; mimeType: string; copyId: string; clearanceLevel: string }> {
+  const { vp, hasCredentials } = buildVP(credentials);
+
+  if (!hasCredentials) {
+    throw new Error(
+      'No EmployeeRole or SecurityClearance credentials found in wallet. ' +
+      'Please ensure your credentials are loaded.'
+    );
+  }
+
+  const ephemeralPublicKey = Buffer.from(keyPair.publicKey).toString('base64');
+
+  // Step 1: Send VP + ephemeral public key to document service
+  const res = await fetch(accessUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ documentDID, vp, ephemeralPublicKey })
+  });
+
+  const json = await res.json();
+
+  if (!res.ok || !json.success) {
+    throw new Error(json.message || json.error || 'VP-gated access denied');
+  }
+
+  const data = json as VPGatedAccessResponse;
+
+  // Step 2: Decrypt DEK — nacl.box.open with server's ephemeral public key
+  const dek = nacl.box.open(
+    b64ToBytes(data.encryptedDEK.ciphertext),
+    b64ToBytes(data.encryptedDEK.nonce),
+    b64ToBytes(data.encryptedDEK.senderPublicKey),
+    keyPair.secretKey
+  );
+  if (!dek) {
+    throw new Error('DEK decryption failed — nacl.box.open returned null');
+  }
+
+  // Step 3: Decrypt file — WebCrypto AES-256-GCM
+  // WebCrypto AES-GCM expects ciphertext || authTag concatenated
+  const encryptedBytes = b64ToBytes(data.encryptedBlob);
+  const fileAuthTagBytes = b64ToBytes(data.fileAuthTag);
+  const combined = new Uint8Array(encryptedBytes.length + fileAuthTagBytes.length);
+  combined.set(encryptedBytes);
+  combined.set(fileAuthTagBytes, encryptedBytes.length);
+
+  const dekCryptoKey = await crypto.subtle.importKey('raw', dek, 'AES-GCM', false, ['decrypt']);
+  let plaintextBuf: ArrayBuffer;
+  try {
+    plaintextBuf = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: b64ToBytes(data.fileIv) },
+      dekCryptoKey,
+      combined
+    );
+  } finally {
+    // Zero DEK from memory (TypedArray — fill with zeros)
+    (dek as Uint8Array).fill(0);
+  }
+
+  const plaintext = new Uint8Array(plaintextBuf);
+
+  // Step 4: Verify content hash (sha256 of decrypted plaintext)
+  if (data.contentHash) {
+    const hashBuf = await crypto.subtle.digest('SHA-256', plaintext);
+    const actualHash = 'sha256:' + Array.from(new Uint8Array(hashBuf))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    if (actualHash !== data.contentHash) {
+      throw new Error(`CONTENT_INTEGRITY_FAILED: expected ${data.contentHash}, got ${actualHash}`);
+    }
+  }
+
+  return {
+    plaintext,
+    filename:       data.filename,
+    mimeType:       data.mimeType,
+    copyId:         data.copyId,
+    clearanceLevel: data.clearanceLevel
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Manifest VC version history + chain verification
+// ---------------------------------------------------------------------------
+
+export interface ManifestVCEntry {
+  vcId: string;
+  vcJwt?: string;       // present on current; may be present on history entries
+  issuedAt: string;
+  documentDID?: string;
+  claims?: {
+    versionNumber?: number;
+    updatedBy?: string;
+    predecessorHash?: string;
+    classificationLevel?: string;
+    iagonFileId?: string;
+  };
+}
+
+export interface ManifestHistoryResponse {
+  documentDID: string;
+  current: ManifestVCEntry;
+  history: ManifestVCEntry[]; // newest-first (history[0] = immediate predecessor)
+}
+
+export interface ChainVerificationResult {
+  valid: boolean;
+  /** Index into history[] where the chain breaks, if any (0 = current→history[0]) */
+  brokenAt?: number;
+  reason?: string;
+}
+
+/**
+ * Compute SHA-256 of a string and return 'sha256:<hex>'.
+ * Uses WebCrypto (available in browser and Node.js ≥ 15).
+ */
+async function computeSha256Prefix(input: string): Promise<string> {
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.digest('SHA-256', enc.encode(input));
+  const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return 'sha256:' + hex;
+}
+
+/**
+ * Fetch the KeyManifest VC version history for a document from the company-admin proxy.
+ * Requires an active employee session (cookie-based auth).
+ *
+ * @param documentDID  Full PRISM DID of the document
+ */
+export async function fetchManifestHistory(documentDID: string): Promise<ManifestHistoryResponse> {
+  const res = await fetch(
+    `${COMPANY_ADMIN_BASE}/api/documents/${encodeURIComponent(documentDID)}/vc-history`,
+    { credentials: 'include' }
+  );
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(json.message || json.error || 'Failed to fetch manifest history');
+  }
+  return json as ManifestHistoryResponse;
+}
+
+/**
+ * Verify the predecessor hash chain in a ManifestHistoryResponse.
+ *
+ * Verification:
+ *   For each adjacent pair (newer, older) where newer.claims.predecessorHash is set:
+ *     sha256(older.vcJwt) must equal newer.claims.predecessorHash
+ *
+ * Returns { valid: true } if the chain is intact (or there is only one version).
+ * Returns { valid: false, brokenAt, reason } if a link is broken.
+ *
+ * Note: entries without vcJwt cannot be verified — those links are skipped.
+ *
+ * @param data  ManifestHistoryResponse from fetchManifestHistory
+ */
+export async function verifyManifestChain(data: ManifestHistoryResponse): Promise<ChainVerificationResult> {
+  if (!data.current) {
+    return { valid: false, reason: 'No current VC in history response' };
+  }
+
+  // Build ordered array: [current, history[0], history[1], ...]
+  const chain: ManifestVCEntry[] = [data.current, ...data.history];
+
+  // Verify each link: chain[i].predecessorHash === sha256(chain[i+1].vcJwt)
+  for (let i = 0; i < chain.length - 1; i++) {
+    const newer = chain[i];
+    const older = chain[i + 1];
+
+    const claimedHash = newer.claims?.predecessorHash;
+    if (!claimedHash) {
+      // No predecessorHash claim — this link is unverifiable, skip
+      continue;
+    }
+    if (!older.vcJwt) {
+      // Cannot verify without vcJwt
+      continue;
+    }
+
+    const actualHash = await computeSha256Prefix(older.vcJwt);
+    if (actualHash !== claimedHash) {
+      return {
+        valid: false,
+        brokenAt: i,
+        reason: `Chain broken at position ${i}: expected ${claimedHash.slice(0, 20)}… got ${actualHash.slice(0, 20)}…`
+      };
+    }
+  }
+
+  return { valid: true };
 }
 
 /**

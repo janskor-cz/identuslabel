@@ -239,7 +239,7 @@ const appSlice = createSlice({
             // ✅ FIX: Deduplicate messages loaded from IndexedDB to prevent React duplicate key warnings
             state.messages = removeDuplicates(action.payload.messages) as any;
             state.connections = action.payload.connections;
-            state.credentials = action.payload.credentials;
+            state.credentials = removeDuplicates(action.payload.credentials) as any;
         },
         [Credential.success]: (
             state,
@@ -487,7 +487,7 @@ const appSlice = createSlice({
             console.log('🔍 [REDUCER] Previous credential IDs:', state.credentials.map(c => c.id));
             console.log('🔍 [REDUCER] New credential IDs:', action.payload.credentials.map(c => c.id));
 
-            state.credentials = action.payload.credentials;
+            state.credentials = removeDuplicates(action.payload.credentials) as any;
 
             console.log('✅ [REDUCER] State updated with new credentials');
         });

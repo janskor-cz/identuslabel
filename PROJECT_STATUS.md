@@ -28,6 +28,35 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ Browser Tab — Credential-Driven Service Launcher (May 10, 2026)
+
+**STATUS**: ✅ **PRODUCTION READY** - Any VC with a `serviceUrl` field auto-appears in the wallet Browser tab
+
+A new **Browser** tab in the IDL Wallet automatically discovers and lists services linked to the user's credentials. Any issuer that includes `serviceUrl` (+ optional `serviceName`, `serviceIcon`) in a `credentialSubject` will have their service appear in the user's Browser tab without any wallet code changes.
+
+- **Standard**: `serviceUrl`, `serviceName`, `serviceIcon` fields in `credentialSubject` are the convention for service-linked VCs
+- **Auto-discovery**: Browser page scans all local + enterprise credentials; deduplicates by URL
+- **Launch**: clicking "Launch" opens the service in the existing fullscreen iframe modal
+- **Backwards-compatible shims**: existing `RealPersonIdentity` (via `uniqueId`) and `EmployeeRole` (via `email`) credentials work without re-issuance
+- **CA issuer updated**: `RealPersonIdentity` VCs now include `serviceUrl`, `serviceName`, `serviceIcon` baked in at issuance
+- **Company Admin updated**: `EmployeeRole` VCs now include `serviceUrl`, `serviceName`, `serviceIcon` baked in at issuance
+
+**Files Modified**:
+- `idl-wallet/src/pages/browser.tsx` — new Browser page
+- `idl-wallet/src/pages/index.tsx` — added Browser nav card; removed My Documents nav card
+- `certification-authority/server.js` — bakes `serviceUrl`/`serviceName`/`serviceIcon` into `RealPersonIdentity` credentialSubject
+- `company-admin-portal/lib/EmployeeWalletManager.js` — bakes `serviceUrl`/`serviceName`/`serviceIcon` into `EmployeeRole` credentialSubject
+
+---
+
+### ✅ RESOLVED (2026-04-29): Document update clearance bypass allowed content corruption
+
+- Lower-clearance editors could overwrite `originalDocxFileId` with a redacted DOCX, permanently replacing SECRET-styled paragraphs with `[REDACTED]` placeholder text visible to all users.
+- Fixed by: `resolveDocumentHighestLevel()` in `request-edit` + independent clearance check in `submit` + `previousFileId` in audit log.
+- See CHANGELOG.md 2026-04-29 entry for full details.
+
+---
+
 ### ✅ Document Viewer — In-Browser DOCX Preview & Update Button (Apr 12, 2026)
 
 **STATUS**: ✅ **PRODUCTION READY** - Classified documents now open in-browser with full DOCX rendering and an Update button
@@ -905,7 +934,8 @@ Card-based UI for switching between Personal and Enterprise wallet contexts. Aut
 
 | Service | URL | Port | Status |
 |---------|-----|------|--------|
-| **Alice Wallet** | https://identuslabel.cz/alice | 3001 | ✅ Primary Wallet |
+| **IDL Wallet** | https://identuslabel.cz/wallet | 3002 | ✅ Primary Wallet |
+| **Alice Wallet** | https://identuslabel.cz/alice | 3001 | ❌ OBSOLETE — use IDL Wallet |
 | **Certification Authority** | https://identuslabel.cz/ca | 3005 | ✅ Operational |
 | **Secure Information Portal** | https://identuslabel.cz/ca/dashboard | 3005 | ✅ Phase 2 Encryption |
 | **Cloud Agent (Main)** | https://identuslabel.cz/cloud-agent | 8000 | ✅ Operational |
@@ -915,7 +945,7 @@ Card-based UI for switching between Personal and Enterprise wallet contexts. Aut
 | **Mediator** | https://identuslabel.cz/mediator | 8080 | ✅ Operational |
 | **PRISM Node (gRPC)** | 91.99.4.54:50053 | 50053 | ✅ Operational |
 
-**Note**: Bob wallet decommissioned November 9, 2025. Alice wallet is the sole active development wallet.
+**Note**: Bob wallet decommissioned November 9, 2025. Alice wallet is obsolete — IDL Wallet (port 3002) is the sole active development wallet.
 
 ---
 
@@ -929,7 +959,7 @@ VDR/PRISM Node (50053)
     |                      |
 CA (3005) ←→ Cloud Agent (8000) ←→ Mediator (8080)
     ↓                      ↓
-Secure Portal       Alice Wallet (3001)
+Secure Portal       IDL Wallet (3002)
                    [Personal | Enterprise]
 
 Enterprise/Company Wallet Agent (8200)    Employee Wallet Agent (8300)
@@ -968,15 +998,15 @@ pkill caddy
 /usr/local/bin/caddy run --config /root/Caddyfile > /tmp/caddy.log 2>&1 &
 
 # 7. Start Certification Authority
-cd /root/certification-authority && PORT=3005 node server.js > /tmp/ca.log 2>&1 &
+cd /opt/project_identuslabel/certification-authority && PORT=3005 node server.js > /opt/project_identuslabel/ca.log 2>&1 &
 
 # 8. Start Company Admin Portal
-cd /root/company-admin-portal && PORT=3010 node server.js > /tmp/company-admin.log 2>&1 &
+cd /opt/project_identuslabel/company-admin-portal && PORT=3010 node server.js > /opt/project_identuslabel/company-admin.log 2>&1 &
 
-# 9. Start Alice Wallet
-cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
-fuser -k 3001/tcp && rm -rf .next
-yarn dev > /tmp/alice.log 2>&1 &
+# 9. Start IDL Wallet (PRIMARY — runs as production build)
+cd /opt/project_identuslabel/idl-wallet && yarn build
+kill $(lsof -ti :3002) 2>/dev/null; sleep 1
+nohup node_modules/.bin/next start --port 3002 --hostname 0.0.0.0 > /opt/project_identuslabel/idl-wallet.log 2>&1 &
 ```
 
 ### Health Checks
@@ -988,7 +1018,7 @@ curl http://91.99.4.54:8200/_system/health               # Multitenancy Agent
 curl https://identuslabel.cz/mediator/                   # Mediator
 curl https://identuslabel.cz/ca/api/health               # CA
 curl https://identuslabel.cz/company-admin/api/health    # Company Admin
-curl -I https://identuslabel.cz/alice/                   # Alice Wallet
+curl -I https://identuslabel.cz/wallet/                  # IDL Wallet
 ```
 
 **Complete Setup Guide**: *(Documentation in progress - see archived CLAUDE.md)*
@@ -1072,6 +1102,7 @@ ServiceConfiguration VCs enable enterprise mode with Cloud Agent integration for
 
 | Issue | Impact | Status | Workaround |
 |-------|--------|--------|------------|
+| ~~Document update clearance bypass: `request-edit` used `classificationLevel` instead of parsed DOCX paragraph styles; `submit` had no re-validation~~ | ~~Lower-clearance editor could corrupt `originalDocxFileId` with redacted content~~ | ✅ **FIXED 2026-04-29** | `resolveDocumentHighestLevel()` + independent `submit` check deployed. Corrupted docs must be re-uploaded from local source. |
 | Browser cache persistence | Updates not appearing | 🔴 High | Hard refresh (Ctrl+Shift+R). **Caution**: on Brave Android, clearing all browser data wipes wallet IndexedDB — avoid "Clear all data" on mobile |
 | Cloud Agent long-form PRISM DID validation | Custom holder DID rejected in credential requests | 🟡 Medium | **Workaround active** - SDK creates internal DIDs |
 | WebAssembly memory accumulation | Periodic refresh needed | 🟡 Low | Refresh when wallet slows |
@@ -1093,8 +1124,9 @@ ServiceConfiguration VCs enable enterprise mode with Cloud Agent integration for
 1. **Check Service Status**: Run health checks (see [Quick Start](#quick-start-commands))
 2. **Check Logs**:
    ```bash
-   tail -f /tmp/alice.log         # Alice Wallet
-   tail -f /tmp/ca.log             # Certification Authority
+   tail -f /opt/project_identuslabel/idl-wallet.log    # IDL Wallet
+   tail -f /opt/project_identuslabel/ca.log             # Certification Authority
+   tail -f /opt/project_identuslabel/company-admin.log  # Company Admin Portal
    docker logs identus-mediator-identus-mediator-1 --tail 100
    ```
 3. **Common Issues**: *(See archived CLAUDE.md for detailed troubleshooting)*

@@ -262,6 +262,56 @@ global.softDeletedConnections = loadSoftDeletedConnections();
 // Initialize employee-connection mappings storage
 global.employeeConnectionMappings = loadEmployeeMappings();
 
+// In-memory store of pending invitations: connectionId → { name, email, role, department, portalUrl }
+// Used so issue-service-config can auto-load data without the admin re-entering it.
+global.pendingInvitations = new Map();
+
+/**
+ * Generate a unique employee email address from a full name and company slug.
+ * Pattern: firstname.lastname@companyslug.test
+ * If taken: firstname.lastname.2@..., .3@..., etc.
+ *
+ * @param {string} fullName - Employee's full name (e.g. "Alice Smith")
+ * @param {string} companyId - Company identifier (e.g. "acme")
+ * @param {Set<string>} existingEmails - Already-used emails for this company
+ * @returns {string} Unique email address
+ */
+function generateEmployeeEmail(fullName, companyId, existingEmails) {
+  const parts = fullName.trim().split(/\s+/);
+  const lastName = parts.pop() || 'employee';
+  const firstName = parts.join('') || 'employee';
+
+  // Normalize: lowercase, remove accents, keep only a-z0-9
+  const normalize = (s) =>
+    s.toLowerCase()
+     .normalize('NFD')
+     .replace(/[\u0300-\u036f]/g, '')
+     .replace(/[^a-z0-9]/g, '');
+
+  const slug = companyId.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const base = `${normalize(firstName)}.${normalize(lastName)}`;
+
+  let candidate = `${base}@${slug}.test`;
+  if (!existingEmails.has(candidate)) return candidate;
+
+  let n = 2;
+  while (existingEmails.has(`${base}.${n}@${slug}.test`)) n++;
+  return `${base}.${n}@${slug}.test`;
+}
+
+/**
+ * Collect all emails already assigned to invitations for a given company.
+ * @param {string} companyId
+ * @returns {Set<string>}
+ */
+function getExistingEmailsForCompany(companyId) {
+  const emails = new Set();
+  for (const inv of global.pendingInvitations.values()) {
+    if (inv.companyId === companyId && inv.email) emails.add(inv.email);
+  }
+  return emails;
+}
+
 // Middleware
 
 // CORS configuration - Allow wallet (cross-origin) to send X-Session-ID header
@@ -413,6 +463,41 @@ async function enterpriseAgentRequest(apiKey, endpoint, options = {}) {
   }
 }
 
+/**
+ * Fetch the current KeyManifest VC record for a document from document-service.
+ * Returns the full record ({ vcJwt, claims, ... }) or null if not found / unavailable.
+ *
+ * @param {string} documentDID
+ * @param {string} docServiceUrl
+ * @param {string} adminKey
+ * @returns {Promise<object|null>}
+ */
+async function fetchCurrentManifestVC(documentDID, docServiceUrl, adminKey) {
+  if (!docServiceUrl || !documentDID) return null;
+  try {
+    const res = await fetch(
+      `${docServiceUrl}/vc/key-manifest/${encodeURIComponent(documentDID)}`,
+      { headers: { 'x-admin-key': adminKey }, timeout: 5000 }
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+// Move KeyManifestVCIssuer to module-level (avoids repeated require() in hot paths)
+const KeyManifestVCIssuer = require('./lib/KeyManifestVCIssuer');
+
+/** Thrown when a DocumentKeyManifest VC fails signature or claim verification. */
+class ManifestVCInvalid extends Error {
+  constructor(reason) {
+    super(`ManifestVCInvalid: ${reason}`);
+    this.name = 'ManifestVCInvalid';
+  }
+}
+
 // ============================================================================
 // Public Routes (no authentication required)
 // ============================================================================
@@ -422,6 +507,10 @@ async function enterpriseAgentRequest(apiKey, endpoint, options = {}) {
  */
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/employee-portal', (req, res) => {
+  res.redirect('/company-admin/employee-portal-login.html');
 });
 
 /**
@@ -785,23 +874,32 @@ app.get('/api/company/connections', requireCompany, async (req, res) => {
  */
 app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
   try {
-    const { employeeName, role, department } = req.body;
+    const { employeeName, name, role, department } = req.body;
+    const resolvedName = employeeName || name;
 
-    if (!employeeName) {
+    if (!resolvedName) {
       return res.status(400).json({
         success: false,
         error: 'Employee name is required'
       });
     }
 
+    // Auto-generate unique email for this employee
+    const existingEmails = getExistingEmailsForCompany(req.company.id);
+    const generatedEmail = generateEmployeeEmail(resolvedName, req.company.id, existingEmails);
+
+    // Build portalUrl that pre-populates the login field
+    const portalBaseUrl = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
+    const portalUrl = `${portalBaseUrl}/employee-portal-login.html?email=${encodeURIComponent(generatedEmail)}`;
+
     // Create label with employee details
-    const labelParts = [employeeName];
+    const labelParts = [resolvedName];
     if (role) labelParts.push(`(${role})`);
     if (department) labelParts.push(`- ${department}`);
     const label = labelParts.join(' ');
 
     // Create goal for invitation
-    const goal = `Employee connection for ${employeeName} at ${req.company.displayName}`;
+    const goal = `Employee connection for ${resolvedName} at ${req.company.displayName}`;
 
     // Create invitation via Cloud Agent
     const result = await cloudAgentRequest(
@@ -818,7 +916,17 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
 
     const invitation = result.data;
 
-    console.log(`[EMPLOYEE] Created invitation for ${employeeName} (${req.company.name})`);
+    console.log(`[EMPLOYEE] Created invitation for ${resolvedName} (${req.company.name}) → ${generatedEmail}`);
+
+    // Store invitation record for later auto-load during VC issuance
+    global.pendingInvitations.set(invitation.connectionId, {
+      companyId: req.company.id,
+      name: resolvedName,
+      email: generatedEmail,
+      role: role || '',
+      department: department || '',
+      portalUrl,
+    });
 
     // Fetch company's CompanyIdentity credential
     let finalInvitation = invitation.invitation;
@@ -873,10 +981,10 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
           invitationObj.body.goal_code = 'company-employee-verification';
           invitationObj.body.goal = `Connect as ${req.company.displayName} employee`;
 
-          // OOB 2.0 uses body.attachments (not the DIDComm 1.0 requests_attach field)
-          invitationObj.body.attachments = [{
-            id: 'company-identity-credential',
-            media_type: 'application/json',
+          // Use top-level requests_attach (RFC 0434) — wallet reads invitation.requests_attach
+          invitationObj.requests_attach = [{
+            '@id': 'company-identity-credential',
+            'mime-type': 'application/json',
             data: {
               json: {
                 credential: companyCredential.jwtCredential,
@@ -903,10 +1011,10 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
           };
 
           hasCompanyCredential = true;
-          console.log(`✅ [EMPLOYEE] Company credential embedded in invitation for ${employeeName}`);
+          console.log(`✅ [EMPLOYEE] Company credential embedded in invitation for ${resolvedName}`);
         }
       } else {
-        console.warn(`⚠️ [EMPLOYEE] No CompanyIdentity credential found for ${req.company.name}`);
+        console.warn(`⚠️ [EMPLOYEE] No CompanyIdentity credential found for ${req.company.name}. Invitation still created.`);
       }
     } catch (embedError) {
       console.error('⚠️ [EMPLOYEE] Failed to embed company credential:', embedError.message);
@@ -915,14 +1023,16 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
 
     res.json({
       success: true,
-      message: `Invitation created for ${employeeName}`,
+      message: `Invitation created for ${resolvedName}`,
       invitation: {
         connectionId: invitation.connectionId,
         invitationUrl: finalInvitation.invitationUrl,
         label: label,
         state: invitation.state,
         createdAt: invitation.createdAt,
-        hasCompanyCredential
+        hasCompanyCredential,
+        email: generatedEmail,
+        portalUrl,
       }
     });
   } catch (error) {
@@ -1230,29 +1340,29 @@ app.post('/api/company/generate-employee-key', requireCompany, async (req, res) 
 app.post('/api/company/issue-service-config/:connectionId', requireCompany, async (req, res) => {
   try {
     const { connectionId } = req.params;
-    const { email, name, department } = req.body; // ✨ REMOVED: apiKey (auto-generated)
 
-    if (!email || !name || !department) { // ✨ REMOVED: apiKey from validation
+    // Auto-load from stored invitation record if available; fall back to explicit body
+    const stored = global.pendingInvitations.get(connectionId);
+    const email = stored?.email || req.body.email;
+    const name = stored?.name || req.body.name;
+
+    if (!email || !name) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: email, name, department'
+        error: 'Missing required fields: email and name. Either create an invitation first or supply them in the request body.'
       });
     }
 
-    // Validate department
-    if (!['HR', 'IT', 'Security'].includes(department)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid department. Must be one of: HR, IT, Security'
-      });
-    }
+    const VALID_DEPTS = ['HR', 'IT', 'Security'];
+    const rawDept = stored?.department || req.body.department || '';
+    const resolvedDepartment = VALID_DEPTS.includes(rawDept) ? rawDept : 'IT';
 
     // Get department API key for issuing credentials
-    const departmentApiKey = DEPARTMENT_API_KEYS[department];
+    const departmentApiKey = DEPARTMENT_API_KEYS[resolvedDepartment];
     if (!departmentApiKey) {
       return res.status(500).json({
         success: false,
-        error: `Department API key not configured for ${department}`
+        error: `Department API key not configured for ${resolvedDepartment}`
       });
     }
 
@@ -1261,7 +1371,7 @@ app.post('/api/company/issue-service-config/:connectionId', requireCompany, asyn
     const claims = await ServiceConfigVCBuilder.buildServiceConfigClaims({
       email,
       name,
-      department,
+      department: resolvedDepartment,
       connectionId
     }, req.company); // Pass company context for correct enterpriseAgentName
 
@@ -1272,15 +1382,26 @@ app.post('/api/company/issue-service-config/:connectionId', requireCompany, asyn
     console.log(`   PRISM DID: ${claims.employeeWallet.prismDid.substring(0, 60)}...`);
     console.log(`   API Key: ${claims.employeeWallet.apiKey.substring(0, 20)}... (stored in VC)\n`);
 
-    // Build credential offer payload for Enterprise Cloud Agent
-    const credentialOffer = ServiceConfigVCBuilder.buildCredentialOfferPayload(
-      connectionId,
-      claims
+    // Get the company's ServiceConfiguration schema ID (registered on multitenancy agent)
+    const schemaId = await SchemaManager.ensureServiceConfigSchema(
+      MULTITENANCY_CLOUD_AGENT_URL,
+      req.company.apiKey,
+      req.company.did
     );
 
-    // Issue credential via Enterprise Cloud Agent
-    const result = await enterpriseAgentRequest(
-      departmentApiKey,
+    // Build credential offer — issued via the company's multitenancy agent (same agent as the connection)
+    const credentialOffer = {
+      connectionId,
+      credentialFormat: 'JWT',
+      claims: claims.credentialSubject,
+      automaticIssuance: true,
+      issuingDID: req.company.did,
+      schemaId,
+    };
+
+    // Issue credential via company's multitenancy Cloud Agent (where the connection lives)
+    const result = await cloudAgentRequest(
+      req.company.apiKey,
       '/issue-credentials/credential-offers',
       {
         method: 'POST',
@@ -1304,6 +1425,126 @@ app.post('/api/company/issue-service-config/:connectionId', requireCompany, asyn
       success: false,
       error: error.message
     });
+  }
+});
+
+/**
+ * GET /api/company/connections/:connectionId/invitation-data
+ * Returns invitation data (name, email, role, department) for a connection.
+ * Uses the in-memory store when available; otherwise derives email from the
+ * connection label + company ID so pre-fill works even after a server restart.
+ */
+app.get('/api/company/connections/:connectionId/invitation-data', requireCompany, async (req, res) => {
+  const { connectionId } = req.params;
+
+  // 1. Prefer in-memory store (set when invitation was created this session)
+  const stored = global.pendingInvitations.get(connectionId);
+  if (stored) {
+    return res.json({ success: true, data: stored });
+  }
+
+  // 2. Fallback: fetch the connection label from the Cloud Agent and derive email
+  try {
+    const result = await cloudAgentRequest(req.company.apiKey, `/connections/${connectionId}`);
+    const conn = result.data;
+    const label = conn?.label || '';
+
+    // Parse label: "Name (Role) - Department"
+    let name = label;
+    let role = '';
+    let department = '';
+    const roleMatch = label.match(/^([^(]+)\(([^)]+)\)(.*)$/);
+    if (roleMatch) {
+      name = roleMatch[1].trim();
+      role = roleMatch[2].trim();
+      const remainder = roleMatch[3].trim();
+      if (remainder.startsWith('- ')) department = remainder.substring(2).trim();
+    } else {
+      const deptMatch = label.match(/^([^-]+)-(.+)$/);
+      if (deptMatch) { name = deptMatch[1].trim(); department = deptMatch[2].trim(); }
+    }
+
+    const existingEmails = getExistingEmailsForCompany(req.company.id);
+    const email = name ? generateEmployeeEmail(name, req.company.id, existingEmails) : '';
+    const portalBase = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
+    const portalUrl = email ? `${portalBase}/employee-portal-login.html?email=${encodeURIComponent(email)}` : '';
+
+    const data = { companyId: req.company.id, name, email, role, department, portalUrl };
+
+    // Cache it so the issue endpoint can use it too
+    if (name && email) global.pendingInvitations.set(connectionId, data);
+
+    return res.json({ success: true, data });
+  } catch {
+    return res.json({ success: true, data: null });
+  }
+});
+
+/**
+ * POST /api/company/connections/:connectionId/auto-issue-config
+ * Alias for issue-service-config — used by the frontend Issue Credential button.
+ */
+app.post('/api/company/connections/:connectionId/auto-issue-config', requireCompany, async (req, res) => {
+  // Delegate to the same logic as issue-service-config
+  req.params.connectionId = req.params.connectionId;
+  const { connectionId } = req.params;
+
+  const stored = global.pendingInvitations.get(connectionId);
+  const email = stored?.email || req.body.email;
+  const name = stored?.name || req.body.name;
+
+  const VALID_DEPTS = ['HR', 'IT', 'Security'];
+  const rawDept = stored?.department || req.body.department || '';
+  const resolvedDepartment = VALID_DEPTS.includes(rawDept) ? rawDept : 'IT';
+
+  if (!email || !name) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing required fields: email and name.'
+    });
+  }
+
+  const departmentApiKey = DEPARTMENT_API_KEYS[resolvedDepartment];
+  if (!departmentApiKey) {
+    return res.status(500).json({ success: false, error: `Department API key not configured for ${resolvedDepartment}` });
+  }
+
+  try {
+    console.log(`\n📝 [AUTO-ISSUE] Issuing ServiceConfiguration to ${name} (${email})`);
+    const claims = await ServiceConfigVCBuilder.buildServiceConfigClaims({
+      email, name, department: resolvedDepartment, connectionId
+    }, req.company);
+
+    // Get the company's ServiceConfiguration schema ID (registered on multitenancy agent)
+    const schemaId = await SchemaManager.ensureServiceConfigSchema(
+      MULTITENANCY_CLOUD_AGENT_URL,
+      req.company.apiKey,
+      req.company.did
+    );
+
+    // Issue via company's multitenancy Cloud Agent (where the connection lives)
+    const credentialOffer = {
+      connectionId,
+      credentialFormat: 'JWT',
+      claims: claims.credentialSubject,
+      automaticIssuance: true,
+      issuingDID: req.company.did,
+      schemaId,
+    };
+
+    const result = await cloudAgentRequest(
+      req.company.apiKey,
+      '/issue-credentials/credential-offers',
+      { method: 'POST', body: JSON.stringify(credentialOffer) }
+    );
+
+    await EmployeeApiKeyManager.markConfigVcIssued(connectionId, result.data.recordId);
+    console.log(`[AUTO-ISSUE] Issued ServiceConfiguration VC to ${name} (${email})`);
+
+    res.json({ success: true, message: `ServiceConfiguration credential issued to ${name}`, data: result.data });
+  } catch (error) {
+    console.error('[AUTO-ISSUE] Issuance failed:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -2147,6 +2388,7 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
     let employeeRoleCred = null;
     let cisTrainingCred = null;
     let securityClearanceCred = null;
+    let loginRevocationChecks = [];
 
     if (presentation.data && Array.isArray(presentation.data) && presentation.data.length > 0) {
       try {
@@ -2163,6 +2405,14 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
           const payload = JSON.parse(payloadJson);
 
           const vp = payload.vp;
+
+          // Extract the VP presenter's DID (outer JWT iss = holder who signed the VP)
+          const vpHolderDID = payload.iss || null;
+          if (vpHolderDID) {
+            console.log(`[EmployeeAuth] VP presenter (holder) DID: ${vpHolderDID.substring(0, 50)}...`);
+          } else {
+            console.warn('[EmployeeAuth] No iss field in VP JWT — holder binding cannot be enforced');
+          }
 
           // Verify challenge matches
           if (vp.proof && vp.proof.challenge !== pendingAuth.challenge) {
@@ -2234,6 +2484,26 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
               const decoded = decodeCredentialJWT(credentialJWT);
 
               if (decoded) {
+                // Holder binding: the VC subject (JWT sub) must match the VP presenter (JWT iss)
+                const vcSubject = decoded.payload.sub || decoded.payload.vc?.credentialSubject?.id || null;
+                if (vpHolderDID && vcSubject && vcSubject !== vpHolderDID) {
+                  console.error(`[EmployeeAuth] HOLDER BINDING FAILED at index ${i}: VC subject=${vcSubject} but VP presenter=${vpHolderDID}`);
+                  return res.status(403).json({
+                    success: false,
+                    error: 'HolderBindingFailed',
+                    message: 'Credential was not issued to the presenter — you cannot present someone else\'s credential'
+                  });
+                }
+
+                // Collect StatusList2021 revocation pointers for check after loop
+                const cs = decoded.payload.vc?.credentialStatus || decoded.payload.credentialStatus || null;
+                if (cs?.statusListCredential && cs?.statusListIndex != null) {
+                  loginRevocationChecks.push({
+                    statusListCredential: cs.statusListCredential,
+                    statusListIndex:      Number(cs.statusListIndex)
+                  });
+                }
+
                 if (isEmployeeRoleCred(decoded.claims)) {
                   console.log(`[EmployeeAuth] Found EmployeeRole credential at index ${i}`);
                   employeeRoleCred = decoded;
@@ -2350,6 +2620,24 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
     }
     console.log(`[EmployeeAuth] ✅ Issuer verified: ${issuerDID}`);
 
+    // Revocation check via StatusList2021 bitstring (best-effort — never blocks on fetch failure)
+    try {
+      const StatusListService = require('./lib/StatusListService');
+      for (const cs of loginRevocationChecks) {
+        const rev = await StatusListService.checkByCredentialStatus(cs);
+        if (rev.isRevoked) {
+          console.error(`[EmployeeAuth] DENIED — credential revoked (statusListIndex=${cs.statusListIndex})`);
+          return res.status(403).json({
+            success: false,
+            error: 'CredentialRevoked',
+            message: 'Your credential has been revoked and can no longer be used to log in'
+          });
+        }
+      }
+    } catch (revErr) {
+      console.warn(`[EmployeeAuth] Revocation check failed (non-fatal): ${revErr.message}`);
+    }
+
     // Extract employee information from claims
     const prismDid = verifiedClaims.prismDid || verifiedClaims.id;
     const employeeId = verifiedClaims.employeeId || pendingAuth.identifier; // Use identifier if VC doesn't have employeeId
@@ -2431,6 +2719,63 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
     console.log(`[EmployeeAuth] Session created successfully`);
     console.log(`   Token: ${sessionToken.substring(0, 20)}...`);
 
+    // Issue SecurityClearanceGrant VC if a valid clearance was provided in the login VP
+    // and no active grant already exists for this holder+level combination
+    if (hasClearanceVC && clearanceLevel && clearanceLevel !== 'UNKNOWN') {
+      const techCorp = getCompany('techcorp');
+      const enterpriseConnectionId = session.connectionId;
+      if (techCorp && enterpriseConnectionId) {
+        const SECURITY_CLEARANCE_GRANT_SCHEMA_GUID = 'f33eedc7-aa47-3e05-bc80-cf5388d00562';
+
+        // Check if an active SecurityClearanceGrant already exists to avoid duplicate offers
+        let alreadyHasGrant = false;
+        try {
+          const existing = await cloudAgentRequest(techCorp.apiKey, '/issue-credentials/records?limit=200');
+          const records = existing.data?.contents || [];
+          alreadyHasGrant = records.some(r =>
+            (r.claims?.credentialType === 'SecurityClearanceGrant' || r.claims?.clearanceLevel) &&
+            r.claims?.holderDID === prismDid &&
+            r.claims?.clearanceLevel === clearanceLevel.toUpperCase() &&
+            ['CredentialSent', 'OfferSent', 'OfferReceived', 'RequestReceived', 'CredentialReceived'].includes(r.protocolState)
+          );
+        } catch (e) {
+          console.warn('[EmployeeAuth] Could not check existing grants (non-blocking):', e.message);
+        }
+
+        if (alreadyHasGrant) {
+          console.log(`[EmployeeAuth] ℹ️ SecurityClearanceGrant already exists for ${email} (${clearanceLevel}), skipping issuance`);
+        } else {
+          const grantedAt = new Date().toISOString();
+          const validUntil = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+          const credentialOffer = {
+            issuingDID: techCorp.did,
+            connectionId: enterpriseConnectionId,
+            schemaId: `${MULTITENANCY_CLOUD_AGENT_URL}/schema-registry/schemas/${SECURITY_CLEARANCE_GRANT_SCHEMA_GUID}`,
+            credentialFormat: 'JWT',
+            claims: {
+              credentialType: 'SecurityClearanceGrant',
+              clearanceLevel: clearanceLevel.toUpperCase(),
+              holderDID: prismDid || '',
+              issuerDID: techCorp.did,
+              grantedAt,
+              validUntil,
+            },
+            automaticIssuance: true,
+            awaitConfirmation: false
+          };
+
+          cloudAgentRequest(techCorp.apiKey, '/issue-credentials/credential-offers', {
+            method: 'POST',
+            body: JSON.stringify(credentialOffer)
+          }).then(result => {
+            console.log(`[EmployeeAuth] ✅ SecurityClearanceGrant VC issued for ${email} (${clearanceLevel}), recordId: ${result.data?.recordId}`);
+          }).catch(err => {
+            console.error(`[EmployeeAuth] ⚠️ SecurityClearanceGrant issuance failed (non-blocking):`, err.message);
+          });
+        }
+      }
+    }
+
     res.json({
       success: true,
       sessionToken,
@@ -2446,6 +2791,10 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
         hasValidTraining: trainingStatus.hasValidTraining,
         expiryDate: trainingStatus.expiryDate,
         completionDate: trainingStatus.completionDate
+      },
+      clearance: {
+        hasClearanceVC,
+        level: clearanceLevel
       },
       message: 'Authentication successful'
     });
@@ -2893,6 +3242,41 @@ app.post('/api/employee-portal/documents/create', requireEmployeeSession, async 
 });
 
 /**
+ * POST /api/employee-portal/wrap-dek
+ * SSI-aligned: browser generates DEK and encrypts file locally, then calls this
+ * endpoint to get the DEK wrapped with the appropriate CMK. The server wraps the
+ * 32-byte key and immediately zeros it — it never stores or logs the raw DEK.
+ */
+app.post('/api/employee-portal/wrap-dek', requireEmployeeSession, (req, res) => {
+  const { rawDEK, classificationLevel } = req.body;
+  if (!rawDEK || !classificationLevel) {
+    return res.status(400).json({ error: 'MISSING_FIELDS', message: 'rawDEK (base64) and classificationLevel are required' });
+  }
+  let rawBuf;
+  try {
+    rawBuf = Buffer.from(rawDEK, 'base64');
+    if (rawBuf.length !== 32) {
+      return res.status(400).json({ error: 'INVALID_DEK', message: 'rawDEK must be a 32-byte (256-bit) key encoded as base64' });
+    }
+  } catch (_) {
+    return res.status(400).json({ error: 'INVALID_DEK', message: 'rawDEK must be valid base64' });
+  }
+  try {
+    const wrapped = cmk.wrapDEK(rawBuf, classificationLevel);
+    rawBuf.fill(0); // zero immediately — server never persists or logs raw DEK
+    return res.json({
+      wrappedKey:        wrapped.wrappedKey,
+      iv:                wrapped.iv,
+      authTag:           wrapped.authTag,
+      wrappingAlgorithm: wrapped.wrappingAlgorithm || 'AES-256-GCM'
+    });
+  } catch (err) {
+    console.error('[wrap-dek] Error wrapping DEK:', err.message);
+    return res.status(500).json({ error: 'WRAP_FAILED', message: 'Failed to wrap DEK' });
+  }
+});
+
+/**
  * POST /api/employee-portal/documents/upload
  * Create a new document DID with file upload to Iagon decentralized storage
  *
@@ -3032,12 +3416,13 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
       console.warn('[DocumentUpload] ⚠️ Iagon storage not configured, proceeding without file storage');
     }
 
-    let iagonStorage = null;
+    let iagonStorage    = null;
+    let wrappedManifest = null; // hoisted: needed for KeyManifest VC push in Step 5
     if (iagonClient.isConfigured()) {
       try {
         const iagonResult = await iagonClient.uploadFile(
           req.file.buffer,
-          req.file.originalname,
+          `${Date.now()}_${req.file.originalname}`,
           { classificationLevel }
         );
         console.log(`[DocumentUpload] ✅ File uploaded to Iagon: ${iagonResult.filename}`);
@@ -3048,7 +3433,7 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
         let encryptionManifestId = null;
         if (iagonResult.rawDEK) {
           try {
-            const wrappedManifest = cmk.wrapDEK(iagonResult.rawDEK, classificationLevel);
+            wrappedManifest = cmk.wrapDEK(iagonResult.rawDEK, classificationLevel);
             iagonResult.rawDEK.fill(0); // zero raw key from memory (PFS)
 
             // Upload wrapped manifest to Iagon
@@ -3134,7 +3519,8 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
     // STEP 3: Issue DocumentMetadataVC to employee via DIDComm
     // =========================================================================
     let metadataVCRecordId = null;
-    let vcIssuanceWarning = null;
+    let keyManifestVCId    = null;
+    let vcIssuanceWarning  = null;
 
     if (session.connectionId) {
       console.log('[DocumentUpload] Step 3: Issuing DocumentMetadataVC to employee via DIDComm...');
@@ -3207,6 +3593,47 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
     console.log('[DocumentUpload] ✅ Document registered in Document Registry');
 
     // =========================================================================
+    // STEP 5: Push KeyManifest VC to document-service (versioned)
+    // =========================================================================
+    if (wrappedManifest && iagonStorage && documentDID) {
+      try {
+        const docServiceUrl = process.env.DOCUMENT_SERVICE_URL || null;
+        const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+        const vcIssuer = new KeyManifestVCIssuer(docServiceUrl, adminKey);
+
+        // Fetch existing VC to derive version chain
+        const prevVC = await fetchCurrentManifestVC(documentDID, docServiceUrl, adminKey);
+        const versionNumber = (prevVC?.claims?.versionNumber ?? 0) + 1;
+        const predecessorHash = prevVC ? KeyManifestVCIssuer.computePredecessorHash(prevVC.vcJwt) : null;
+
+        const vcResult = await vcIssuer.issue({
+          documentDID,
+          issuerDID:          session.issuerDID || process.env.SERVICE_DID,
+          iagonFileId:        iagonStorage.fileId,
+          classificationLevel,
+          releasableTo:       releasableToIssuerDIDs,
+          wrappedKey:         wrappedManifest.wrappedKey,
+          iv:                 wrappedManifest.iv,
+          authTag:            wrappedManifest.authTag,
+          wrappingAlgorithm:  wrappedManifest.wrappingAlgorithm || 'AES-256-GCM',
+          fileAlgorithm:      iagonStorage.encryptionInfo?.algorithm || 'AES-256-GCM',
+          fileIv:             iagonStorage.encryptionInfo?.iv,
+          fileAuthTag:        iagonStorage.encryptionInfo?.authTag,
+          contentHash:        iagonStorage.contentHash || null,
+          versionNumber,
+          updatedBy:          session.prismDid || session.issuerDID || null,
+          predecessorHash
+        });
+
+        console.log(`[DocumentUpload] ✅ KeyManifest VC v${versionNumber} pushed to document-service: ${vcResult.vcId}`);
+        keyManifestVCId = vcResult.vcId;
+      } catch (vcPushErr) {
+        console.error('[DocumentUpload] ⚠️ Failed to push KeyManifest VC to document-service:', vcPushErr.message);
+        // Non-fatal — document is stored, VC can be pushed manually
+      }
+    }
+
+    // =========================================================================
     // SUCCESS RESPONSE
     // =========================================================================
     console.log('='.repeat(80));
@@ -3241,6 +3668,7 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
         uploadedAt: iagonStorage.uploadedAt
       } : null,
       metadataVCRecordId: metadataVCRecordId,
+      keyManifestVCId: keyManifestVCId,
       metadata: {
         title,
         description,
@@ -3991,6 +4419,201 @@ app.get('/api/admin/access-logs', requireCompany, async (req, res) => {
 });
 
 // ============================================================================
+// Credential Sync — check personal CA clearance and revoke stale enterprise grants
+// ============================================================================
+
+/**
+ * POST /api/company/sync-clearance
+ * For each active SecurityClearanceGrant issued by TechCorp, checks whether the
+ * holder's personal CA SecurityClearance VC has been revoked. If so, revokes the
+ * enterprise grant via the TechCorp Cloud Agent.
+ */
+app.post('/api/company/sync-clearance', requireCompany, async (req, res) => {
+  const StatusListService = require('./lib/StatusListService');
+  const report = { synced: 0, alreadyRevoked: 0, revoked: 0, personalNotFound: 0, noStatusList: 0, noStatusListDetails: [], errors: [] };
+
+  try {
+    // ── 1. Fetch all TechCorp-issued SecurityClearanceGrant records ──────────
+    const tcResp = await fetch(`${TECHCORP_CLOUD_AGENT_URL}/issue-credentials/records?limit=1000`, {
+      headers: { apikey: TECHCORP_API_KEY }
+    });
+    const tcData = await tcResp.json();
+    const grantRecords = (tcData.contents || []).filter(r =>
+      r.role === 'Issuer' &&
+      r.protocolState === 'CredentialSent' &&
+      (r.claims?.credentialType === 'SecurityClearanceGrant' ||
+       r.claims?.credentialType === 'SecurityClearance' ||
+       r.claims?.clearanceLevel)  // catch any format with a clearance level
+    );
+
+    console.log(`[SyncClearance] Found ${grantRecords.length} active clearance grant records`);
+    report.synced = grantRecords.length;
+
+    // ── 2. Fetch all CA SecurityClearance records and build lookup maps ───────
+    const caResp = await fetch(`https://identuslabel.cz/cloud-agent/issue-credentials/records?limit=1000`);
+    const caData = await caResp.json();
+    const personalCsMap = new Map(); // personal CA DID → most-recent credentialStatus
+
+    for (const r of (caData.contents || [])) {
+      if (r.protocolState !== 'CredentialSent' || !r.credential) continue;
+      try {
+        const raw = Buffer.from(r.credential, 'base64').toString('utf-8');
+        const parts = raw.split('.');
+        if (parts.length < 2) continue;
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+        const holderDID = payload.sub;
+        const cs = payload.vc?.credentialStatus;
+        const subject = payload.vc?.credentialSubject || {};
+        // Only care about clearance VCs from the CA
+        if (!subject.clearanceLevel && !String(subject.credentialType || '').includes('Clearance')) continue;
+        if (holderDID && cs?.statusListCredential && cs?.statusListIndex != null) {
+          // Keep highest-index entry (most recently issued) per holderDID
+          const existing = personalCsMap.get(holderDID);
+          if (!existing || Number(cs.statusListIndex) > existing.statusListIndex) {
+            personalCsMap.set(holderDID, {
+              statusListCredential: cs.statusListCredential,
+              statusListIndex: Number(cs.statusListIndex),
+              statusPurpose: cs.statusPurpose || 'Revocation'
+            });
+          }
+        }
+      } catch (_) { /* skip undecodable records */ }
+    }
+
+    // ── 2b. Build holderName → personal CA DID map (fallback for old grants) ──
+    // Old grants don't have caPersonalDID, but we can match via holderName from CA VCs.
+    // The long-form enterprise PRISM DID encodes the email; we derive a canonical name from it.
+    const holderNameToPersonalDID = new Map();
+    for (const r of (caData.contents || [])) {
+      if (r.protocolState !== 'CredentialSent' || !r.credential) continue;
+      try {
+        const raw = Buffer.from(r.credential, 'base64').toString('utf-8');
+        const parts = raw.split('.');
+        if (parts.length < 2) continue;
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+        const holderDID = payload.sub;
+        const subject = payload.vc?.credentialSubject || {};
+        const holderName = subject.holderName; // e.g. "Vaclav Confidential"
+        if (holderName && holderDID && personalCsMap.has(holderDID)) {
+          holderNameToPersonalDID.set(holderName.toLowerCase(), holderDID);
+        }
+      } catch (_) {}
+    }
+
+    console.log(`[SyncClearance] Built personal credentialStatus map for ${personalCsMap.size} holders, holderName map: ${holderNameToPersonalDID.size} entries`);
+
+    // ── 3. Check each enterprise grant against the personal CA status ─────────
+    for (const grant of grantRecords) {
+      const holderDID = grant.claims?.holderDID;
+      if (!holderDID) { report.errors.push({ recordId: grant.recordId, error: 'no holderDID in claims' }); continue; }
+
+      // caPersonalDID links the enterprise DID to the CA personal DID (added since this fix)
+      const caPersonalDID = grant.claims?.caPersonalDID || null;
+      let lookupDID = caPersonalDID || holderDID;
+
+      // Fallback for old grants without caPersonalDID: derive name from long-form PRISM DID email
+      if (!caPersonalDID) {
+        try {
+          // Long-form PRISM DIDs encode service endpoints as base64url segments.
+          // The employee email is in a segment decoding to '["mailto:user@domain"]'.
+          const didSuffix = holderDID.includes(':') ? holderDID.split(':').slice(2).join(':') : '';
+          const emailMatch = Buffer.from(didSuffix, 'base64url').toString('utf-8')
+            .match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+          if (emailMatch) {
+            const email = emailMatch[0].toLowerCase();
+            // Derive canonical name: "vaclav.confidential@..." → "vaclav confidential"
+            const namePart = email.split('@')[0].replace(/[._-]/g, ' ');
+            const resolvedDID = holderNameToPersonalDID.get(namePart);
+            if (resolvedDID) {
+              lookupDID = resolvedDID;
+              console.log(`[SyncClearance] Resolved caPersonalDID via name '${namePart}': ${resolvedDID.substring(0,30)}...`);
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Decode enterprise grant JWT to check if already revoked at enterprise level
+      let enterpriseCs = null;
+      try {
+        const raw = Buffer.from(grant.credential, 'base64').toString('utf-8');
+        const parts = raw.split('.');
+        if (parts.length >= 2) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+          enterpriseCs = payload.vc?.credentialStatus;
+        }
+      } catch (_) {}
+
+      // Check enterprise revocation status
+      if (enterpriseCs?.statusListCredential) {
+        const entRev = await StatusListService.checkByCredentialStatus({
+          statusListCredential: enterpriseCs.statusListCredential,
+          statusListIndex: Number(enterpriseCs.statusListIndex)
+        });
+        console.log(`[SyncClearance] Enterprise grant ${grant.recordId} statusList check: isRevoked=${entRev.isRevoked} status=${entRev.status}`);
+        if (entRev.isRevoked) {
+          report.alreadyRevoked++;
+          continue; // enterprise VC already revoked, nothing to do
+        }
+      } else {
+        // Non-revocable JWT — cannot be revoked via Cloud Agent; must be deleted from wallet
+        console.log(`[SyncClearance] Grant ${grant.recordId} has no credentialStatus (non-revocable JWT) — will check personal VC and flag if needed`);
+      }
+
+      // Find personal CA credentialStatus — prefer caPersonalDID, fall back to holderDID
+      const personalCs = personalCsMap.get(lookupDID) || (!caPersonalDID ? personalCsMap.get(holderDID) : null);
+      console.log(`[SyncClearance] personalCs for ${grant.recordId}: ${personalCs ? `index=${personalCs.statusListIndex}` : 'NOT FOUND'} lookupDID=${lookupDID.substring(0,30)}...`);
+      if (!personalCs) {
+        console.log(`[SyncClearance] No personal CA VC found for ${caPersonalDID ? 'caPersonalDID' : 'holderDID'}: ${lookupDID.substring(0, 30)}... (caPersonalDID=${!!caPersonalDID})`);
+        report.personalNotFound++;
+        continue;
+      }
+
+      // Check if personal CA VC is revoked
+      const personalRev = await StatusListService.checkByCredentialStatus(personalCs);
+      console.log(`[SyncClearance] Personal CA VC revocation check for ${grant.recordId}: isRevoked=${personalRev.isRevoked} status=${personalRev.status}`);
+      if (!personalRev.isRevoked) continue; // personal VC still valid
+
+      // Personal VC is revoked → revoke the enterprise grant
+      if (!enterpriseCs?.statusListCredential) {
+        // Cannot revoke: no status list — employee must delete this VC from their wallet
+        console.log(`[SyncClearance] ⚠️ Grant ${grant.recordId} personal VC revoked but enterprise has no status list — cannot revoke, needs manual wallet deletion`);
+        report.noStatusList++;
+        report.noStatusListDetails.push({
+          recordId: grant.recordId,
+          holderName: grant.claims?.holderName,
+          holderDID: holderDID?.substring(0, 40) + '...',
+          clearanceLevel: grant.claims?.clearanceLevel,
+          credentialType: grant.claims?.credentialType,
+          note: 'No StatusList2021 in this VC — delete from wallet manually'
+        });
+        continue;
+      }
+      console.log(`[SyncClearance] 🚫 Revoking enterprise grant ${grant.recordId} — personal clearance revoked`);
+      try {
+        const revokeResp = await fetch(
+          `${TECHCORP_CLOUD_AGENT_URL}/credential-status/revoke-credential/${grant.recordId}`,
+          { method: 'PATCH', headers: { apikey: TECHCORP_API_KEY } }
+        );
+        if (revokeResp.ok) {
+          report.revoked++;
+          console.log(`[SyncClearance] ✅ Revoked enterprise grant: ${grant.recordId}`);
+        } else {
+          const errText = await revokeResp.text();
+          report.errors.push({ recordId: grant.recordId, error: `Revoke HTTP ${revokeResp.status}: ${errText}` });
+        }
+      } catch (revokeErr) {
+        report.errors.push({ recordId: grant.recordId, error: revokeErr.message });
+      }
+    }
+
+    res.json({ success: true, report });
+  } catch (err) {
+    console.error('[SyncClearance] Fatal error:', err.message);
+    res.status(500).json({ success: false, error: err.message, report });
+  }
+});
+
+// ============================================================================
 // Folder Registry API
 // ============================================================================
 
@@ -4103,6 +4726,323 @@ app.delete('/api/folders/root/documents/:documentDID', async (req, res) => {
   } catch (err) {
     console.error('[FolderRegistry] DELETE folder document error:', err.message);
     res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// DIDComm-Based Document Access (preferred — cryptographic holder binding)
+// ============================================================================
+// Flow:
+//   1. POST /api/document-access/initiate   — wallet sends employeeIdentifier + ephemeralPublicKey
+//      Server looks up DIDComm connectionId, creates present-proof request via Cloud Agent.
+//      Returns sessionId (= presentationId).
+//   2. GET  /api/document-access/status/:sessionId — wallet polls until 'authorized'
+//      Meanwhile the wallet receives DIDComm RequestPresentation and user approves it.
+//   3. POST /api/document-access/complete   — wallet submits { sessionId }
+//      Server fetches verified VP from Cloud Agent, runs full verification pipeline,
+//      downloads + redacts + re-encrypts document, returns same shape as access-gate/present.
+
+const pendingDocumentAccessSessions = new Map(); // sessionId → session state
+
+/**
+ * POST /api/document-access/initiate
+ * Body: { documentDID, employeeIdentifier, ephemeralPublicKey }
+ */
+app.post('/api/document-access/initiate', async (req, res) => {
+  try {
+    const { documentDID, employeeIdentifier, ephemeralPublicKey } = req.body;
+
+    if (!documentDID || !employeeIdentifier || !ephemeralPublicKey) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'documentDID, employeeIdentifier, and ephemeralPublicKey are required' });
+    }
+
+    // Validate document exists
+    const document = DocumentRegistry.documents.get(documentDID);
+    if (!document) {
+      return res.status(404).json({ success: false, error: 'DocumentNotFound', message: 'Document not found' });
+    }
+
+    // Look up DIDComm connection for this employee (mirrors the employee login flow)
+    let connectionId = null;
+
+    // Strategy 1: in-memory mapping file
+    if (global.employeeConnectionMappings && global.employeeConnectionMappings.has(employeeIdentifier)) {
+      connectionId = global.employeeConnectionMappings.get(employeeIdentifier).connectionId;
+      console.log(`[DocumentAccess] Found connection via mapping: ${employeeIdentifier} → ${connectionId}`);
+    }
+
+    // Strategy 2: database fallback (email or PRISM DID)
+    if (!connectionId && process.env.ENTERPRISE_DB_PASSWORD) {
+      try {
+        const { Pool } = require('pg');
+        const enterprisePool = new Pool({
+          host: process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
+          port: process.env.ENTERPRISE_DB_PORT || 5434,
+          database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
+          user: process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
+          password: process.env.ENTERPRISE_DB_PASSWORD,
+        });
+        const employeeDb = new EmployeePortalDatabase(enterprisePool);
+        let employee = null;
+        if (employeeIdentifier.includes('@')) {
+          employee = await employeeDb.getEmployeeByEmail(employeeIdentifier);
+        } else if (employeeIdentifier.startsWith('did:prism:')) {
+          employee = await employeeDb.getEmployeeByDid(employeeIdentifier);
+        }
+        if (employee?.techcorp_connection_id) {
+          connectionId = employee.techcorp_connection_id;
+          console.log(`[DocumentAccess] Found connection via DB: ${employeeIdentifier} → ${connectionId}`);
+        }
+        await enterprisePool.end();
+      } catch (dbErr) {
+        console.warn('[DocumentAccess] DB fallback error:', dbErr.message);
+      }
+    }
+
+    if (!connectionId) {
+      return res.status(404).json({ success: false, error: 'ConnectionNotFound', message: 'No DIDComm connection found for this employee. Please complete onboarding first.' });
+    }
+
+    const challenge  = crypto.randomUUID();
+    const domain     = 'document-access.company-admin';
+
+    // Create DIDComm present-proof request via Cloud Agent
+    const proofResponse = await fetch(`${TECHCORP_CLOUD_AGENT_URL}/present-proof/presentations`, {
+      method: 'POST',
+      headers: { 'apikey': TECHCORP_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        connectionId,
+        options: { challenge, domain },
+        proofs: [],
+        goalCode: 'present-vp',
+        goal: 'Please provide your employee credentials for document access',
+        credentialFormat: 'JWT'
+      })
+    });
+
+    if (!proofResponse.ok) {
+      const errText = await proofResponse.text();
+      throw new Error(`Proof request creation failed: ${proofResponse.status} ${errText}`);
+    }
+
+    const proofData       = await proofResponse.json();
+    const presentationId  = proofData.presentationId || proofData.id;
+    const sessionId       = presentationId;
+
+    // Store session
+    pendingDocumentAccessSessions.set(sessionId, {
+      presentationId, documentDID, connectionId, ephemeralPublicKey, challenge, domain,
+      employeeIdentifier, timestamp: Date.now(), status: 'pending'
+    });
+
+    // Clean up sessions older than 5 minutes
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    for (const [id, s] of pendingDocumentAccessSessions) {
+      if (s.timestamp < cutoff) pendingDocumentAccessSessions.delete(id);
+    }
+
+    console.log(`[DocumentAccess] DIDComm proof request created: ${sessionId} for ${employeeIdentifier}`);
+    res.json({ success: true, sessionId });
+
+  } catch (err) {
+    console.error('[DocumentAccess] Initiate error:', err.message);
+    res.status(500).json({ success: false, error: 'InternalServerError', message: err.message });
+  }
+});
+
+/**
+ * GET /api/document-access/status/:sessionId
+ */
+app.get('/api/document-access/status/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const session = pendingDocumentAccessSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'SessionNotFound', message: 'Session not found or expired' });
+    }
+
+    const stateRes = await fetch(
+      `${TECHCORP_CLOUD_AGENT_URL}/present-proof/presentations/${session.presentationId}`,
+      { headers: { 'apikey': TECHCORP_API_KEY } }
+    );
+
+    if (!stateRes.ok) {
+      return res.json({ success: true, status: 'pending' });
+    }
+
+    const stateData     = await stateRes.json();
+    const currentState  = stateData.status || stateData.state || '';
+
+    let status = 'pending';
+    if (currentState === 'PresentationVerified') status = 'authorized';
+    else if (currentState === 'PresentationReceived') status = 'verifying';
+    else if (currentState === 'PresentationRejected' || currentState === 'RequestRejected') status = 'rejected';
+
+    res.json({ success: true, status });
+
+  } catch (err) {
+    console.error('[DocumentAccess] Status error:', err.message);
+    res.status(500).json({ success: false, error: 'InternalServerError', message: err.message });
+  }
+});
+
+/**
+ * POST /api/document-access/complete
+ * Body: { sessionId }
+ */
+app.post('/api/document-access/complete', async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'sessionId is required' });
+    }
+
+    const session = pendingDocumentAccessSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'SessionNotFound', message: 'Session not found or expired' });
+    }
+
+    // Consume session (one-time use)
+    pendingDocumentAccessSessions.delete(sessionId);
+
+    const { documentDID, ephemeralPublicKey, challenge, domain, presentationId } = session;
+
+    // Fetch the verified presentation from Cloud Agent
+    const presentationRes = await fetch(
+      `${TECHCORP_CLOUD_AGENT_URL}/present-proof/presentations/${presentationId}`,
+      { headers: { 'apikey': TECHCORP_API_KEY } }
+    );
+    if (!presentationRes.ok) {
+      return res.status(502).json({ success: false, error: 'AgentError', message: 'Could not retrieve presentation from Cloud Agent' });
+    }
+    const presentation = await presentationRes.json();
+    const currentState = presentation.status || presentation.state || '';
+
+    if (currentState !== 'PresentationVerified' && currentState !== 'PresentationReceived') {
+      return res.status(403).json({ success: false, error: 'PresentationNotVerified', message: `Presentation is in state "${currentState}", not verified` });
+    }
+
+    // Decode the VP JWT
+    if (!presentation.data || !Array.isArray(presentation.data) || presentation.data.length === 0) {
+      return res.status(400).json({ success: false, error: 'NoPresentationData', message: 'No presentation data found' });
+    }
+
+    const presentationJWT = presentation.data[0];
+    const parts = presentationJWT.split('.');
+    if (parts.length !== 3) {
+      return res.status(400).json({ success: false, error: 'InvalidJWT', message: 'Presentation JWT is malformed' });
+    }
+    const payloadB64  = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payloadJson = Buffer.from(payloadB64 + '='.repeat((4 - payloadB64.length % 4) % 4), 'base64').toString('utf-8');
+    const payload     = JSON.parse(payloadJson);
+    const vp          = payload.vp;
+
+    // Verify challenge and domain (only when VP has an embedded proof; JWT VPs are verified by the cloud agent)
+    if (vp.proof && vp.proof.challenge !== challenge) {
+      return res.status(403).json({ success: false, error: 'ChallengeMismatch', message: 'Security challenge verification failed' });
+    }
+    if (vp.proof && vp.proof.domain !== domain) {
+      return res.status(403).json({ success: false, error: 'DomainMismatch', message: 'Domain verification failed' });
+    }
+
+    // Verify VP and extract claims (includes holder binding + subject consistency)
+    const vpResult = VPVerificationService.verifyVPAndExtractClaims(vp, ACCEPTED_ISSUER_DIDS);
+    if (!vpResult.success) {
+      return res.status(403).json({ success: false, error: vpResult.error, message: vpResult.message });
+    }
+
+    const { companyDID, clearanceLevel, issuerDID, viewerName } = vpResult;
+
+    // Get document
+    const document = DocumentRegistry.documents.get(documentDID);
+    if (!document) {
+      return res.status(404).json({ success: false, error: 'DocumentNotFound', message: 'Document not found in registry' });
+    }
+
+    // Releasability check
+    if (document.releasableTo && document.releasableTo.length > 0 && !document.releasableTo.includes(issuerDID)) {
+      return res.status(403).json({ success: false, error: 'ReleasabilityDenied', message: 'Your credential issuer is not authorized for this document' });
+    }
+
+    // Clearance check
+    const CLEARANCE_NUMERIC = { 'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2, 'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4, 'TOP_SECRET': 4 };
+    const docLevel  = CLEARANCE_NUMERIC[document.classificationLevel] ?? 1;
+    const userLevel = clearanceLevel ? (CLEARANCE_NUMERIC[clearanceLevel.toUpperCase()] ?? 0) : 0;
+    if (userLevel < docLevel) {
+      return res.status(403).json({ success: false, error: 'ClearanceDenied', message: `Document requires ${document.classificationLevel}, your clearance is ${clearanceLevel || 'UNCLASSIFIED'}` });
+    }
+
+    // Revocation check via StatusList2021 bitstring
+    try {
+      const StatusListService = require('./lib/StatusListService');
+      for (const cs of (vpResult.credentialStatuses || [])) {
+        const rev = await StatusListService.checkByCredentialStatus(cs);
+        if (rev.isRevoked) {
+          return res.status(403).json({ success: false, error: 'CredentialRevoked', message: 'Your security clearance credential has been revoked' });
+        }
+      }
+    } catch (revErr) {
+      console.warn(`[DocumentAccess] Revocation check failed (non-fatal): ${revErr.message}`);
+    }
+
+    // Delegate to the same download + redact + re-encrypt pipeline as access-gate/present
+    // by re-calling the inner logic via a synthetic req object. Simpler: inline the
+    // IagonStorage download + ReEncryptionService call directly.
+    if (!document.iagonStorage || !document.iagonStorage.fileId) {
+      return res.status(404).json({ success: false, error: 'NoStorage', message: 'Document has no Iagon storage record' });
+    }
+
+    // Reuse the same ReEncryptionService path as access-gate/present
+    // by re-using req with the same body shape the internal handler expects.
+    // Easiest: call the internal handler logic via a helper by delegating to a synthetic
+    // express request with the correct body. Instead, just set req.body and call next route:
+    //
+    // Simplest correct approach: forward to /api/access-gate/present internally.
+    // We can't easily do that; instead replicate the minimal steps by constructing a
+    // synthetic body and calling the same inner function that /api/access-gate/present uses.
+    //
+    // Since the download/redact/encrypt logic is 100+ lines embedded in the route,
+    // we create a synthetic request body and proxy to the existing route handler via
+    // a local fetch.  The challenge for the gate is already consumed — use a special
+    // bypass challenge signed with a server-side token to avoid double challenge.
+    //
+    // Better: extract the ephemeralPublicKey already stored in session and perform
+    // a local HTTP call to /api/access-gate/present-internal.
+    //
+    // Simplest: get a fresh challenge and re-POST to /api/access-gate/present
+    // from the server itself (loopback).
+
+    const loopbackBase = `http://127.0.0.1:${PORT || 3010}`;
+    const challengeRes = await fetch(`${loopbackBase}/api/access-gate/challenge?documentDID=${encodeURIComponent(documentDID)}`);
+    const challengeJson = await challengeRes.json();
+    if (!challengeRes.ok || !challengeJson.success) {
+      return res.status(500).json({ success: false, error: 'InternalError', message: 'Failed to obtain internal challenge' });
+    }
+    const internalChallenge = challengeJson.challenge;
+
+    // Build a VP that the access-gate/present endpoint can verify.
+    // We already verified the VP above — pass the raw vp along with the internal challenge.
+    // Patch the proof.challenge so the gate check passes.
+    const patchedVP = JSON.parse(JSON.stringify(vp));
+    if (patchedVP.proof) patchedVP.proof.challenge = internalChallenge;
+
+    const presentRes = await fetch(`${loopbackBase}/api/access-gate/present`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documentDID, vp: patchedVP, challenge: internalChallenge, ephemeralPublicKey })
+    });
+
+    const presentJson = await presentRes.json();
+    if (!presentRes.ok || !presentJson.success) {
+      return res.status(presentRes.status).json(presentJson);
+    }
+
+    console.log(`[DocumentAccess] DIDComm presentation verified and document delivered: ${documentDID}`);
+    res.status(presentRes.status).json(presentJson);
+
+  } catch (err) {
+    console.error('[DocumentAccess] Complete error:', err.message);
+    res.status(500).json({ success: false, error: 'InternalServerError', message: err.message });
   }
 });
 
@@ -4309,25 +5249,28 @@ app.post('/api/access-gate/present', async (req, res) => {
       });
     }
 
-    // --- 7. Revocation check (best-effort) ---
+    // --- 7. Revocation check via StatusList2021 bitstring (best-effort) ---
+    // Uses the statusListCredential URL embedded in the VC itself — no agent API needed.
     try {
       const StatusListService = require('./lib/StatusListService');
-      const revocationStatus = await StatusListService.isRevoked(null, issuerDID);
-      if (revocationStatus.isRevoked) {
-        console.log(`[AccessGate] DENIED — clearance credential revoked`);
-        fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
-          timestamp: new Date().toISOString(),
-          viewerName: viewerName || null,
-          documentDID,
-          documentTitle: document?.metadata?.title || null,
-          clearanceLevel: clearanceLevel || null,
-          companyDID: document.ownerCompanyDID || null,
-          accessGranted: false,
-          denialReason: 'CREDENTIAL_REVOKED',
-          copyId: null,
-          clientIp: req.ip || req.connection?.remoteAddress || null
-        }) + '\n', () => {});
-        return res.status(403).json({ success: false, error: 'CredentialRevoked', message: 'Your security clearance credential has been revoked' });
+      for (const cs of (vpResult.credentialStatuses || [])) {
+        const rev = await StatusListService.checkByCredentialStatus(cs);
+        if (rev.isRevoked) {
+          console.log(`[AccessGate] DENIED — credential revoked (index ${cs.statusListIndex})`);
+          fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
+            timestamp: new Date().toISOString(),
+            viewerName: viewerName || null,
+            documentDID,
+            documentTitle: document?.metadata?.title || null,
+            clearanceLevel: clearanceLevel || null,
+            companyDID: document.ownerCompanyDID || null,
+            accessGranted: false,
+            denialReason: 'CREDENTIAL_REVOKED',
+            copyId: null,
+            clientIp: req.ip || req.connection?.remoteAddress || null
+          }) + '\n', () => {});
+          return res.status(403).json({ success: false, error: 'CredentialRevoked', message: 'Your security clearance credential has been revoked' });
+        }
       }
     } catch (revErr) {
       console.warn(`[AccessGate] Revocation check failed (non-fatal): ${revErr.message}`);
@@ -4340,38 +5283,70 @@ app.post('/api/access-gate/present', async (req, res) => {
 
     const iagonClient = getIagonClient();
     const isDocxDoc = document.metadata?.sourceFormat === 'docx' ||
-                      !!document.iagonStorage.originalDocxFileId;
+                      !!document.iagonStorage.originalDocxFileId ||
+                      (document.iagonStorage.filename || '').toLowerCase().endsWith('.docx');
     let redactedContent;
 
-    // Task 4: CMK-unwrap helper — supports new manifest path and legacy fallback
-    async function decryptFromIagon(storage, classLevel) {
+    // CMK-unwrap helper — VC-first, then Iagon manifest, then legacy fallback
+    // Pass docDIDForVC to enable VC-first path (omit for originalDocx downloads).
+    async function decryptFromIagon(storage, classLevel, docDIDForVC = null) {
+      // ── VC-first path ─────────────────────────────────────────────────────
+      if (docDIDForVC) {
+        const docServiceUrl = process.env.DOCUMENT_SERVICE_URL;
+        const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+        const vcRecord = await fetchCurrentManifestVC(docDIDForVC, docServiceUrl, adminKey);
+        if (vcRecord) {
+          const verifier = new (require('./lib/KeyManifestVCVerifier'))({
+            inlineJwk: process.env.MANIFEST_SIGNING_KEY_PUBLIC
+          });
+          const result = await verifier.verify(vcRecord);
+          if (!result.valid) throw new ManifestVCInvalid(result.reason);
+          const { claims } = result;
+          const rawDEK = cmk.unwrapDEK(claims, classLevel);
+          const fullEncInfo = {
+            algorithm: claims.fileAlgorithm || 'AES-256-GCM',
+            iv:        claims.fileIv,
+            authTag:   claims.fileAuthTag,
+            key:       rawDEK.toString('base64')
+          };
+          const content = await iagonClient.downloadFile(storage.fileId, fullEncInfo);
+          rawDEK.fill(0);
+          return content;
+        }
+        // No VC found — fall through to Iagon manifest path
+      }
+      // ── Iagon manifest path ────────────────────────────────────────────────
       if (storage.encryptionManifestId) {
-        // New path: fetch wrapped manifest from Iagon, unwrap DEK with CMK
         const wrappedManifest = await iagonClient.downloadKeyManifest(storage.encryptionManifestId);
         const rawDEK = cmk.unwrapDEK(wrappedManifest, classLevel);
         const fullEncInfo = { ...storage.encryptionInfo, key: rawDEK.toString('base64') };
         const content = await iagonClient.downloadFile(storage.fileId, fullEncInfo);
-        rawDEK.fill(0); // zero raw DEK from memory
+        rawDEK.fill(0);
         return content;
-      } else {
-        // Legacy path: raw key still in encryptionInfo (or unencrypted)
-        return iagonClient.downloadFile(storage.fileId, storage.encryptionInfo || null);
       }
+      // ── Legacy path ────────────────────────────────────────────────────────
+      if (storage.encryptionInfo && !storage.encryptionInfo.key) {
+        throw new Error('DocumentKeyUnavailable: encryption key missing from registry — document must be re-uploaded');
+      }
+      return iagonClient.downloadFile(storage.fileId, storage.encryptionInfo || null);
     }
 
     if (isDocxDoc) {
       // Full-fidelity DOCX redaction — use originalDocxFileId when available, fallback to fileId
       let originalDocx;
       if (document.iagonStorage.originalDocxFileId) {
-        // Build a synthetic storage descriptor for the DOCX file
+        // Updated DOCX — use Iagon manifest if available, else VC-first path
         const docxStorage = {
           fileId: document.iagonStorage.originalDocxFileId,
           encryptionManifestId: document.iagonStorage.originalDocxManifestId || null,
           encryptionInfo: document.iagonStorage.originalDocxEncryptionInfo || null
         };
-        originalDocx = await decryptFromIagon(docxStorage, document.classificationLevel);
+        // Pass documentDID for VC-first fallback when originalDocxManifestId is absent
+        const docxDIDForVC = docxStorage.encryptionManifestId ? null : documentDID;
+        originalDocx = await decryptFromIagon(docxStorage, document.classificationLevel, docxDIDForVC);
       } else {
-        originalDocx = await decryptFromIagon(document.iagonStorage, document.classificationLevel);
+        // Original (no update yet) — use VC-first path
+        originalDocx = await decryptFromIagon(document.iagonStorage, document.classificationLevel, documentDID);
       }
       redactedContent = await DocxRedactionService.applyRedactions(
         originalDocx,
@@ -4379,8 +5354,8 @@ app.post('/api/access-gate/present', async (req, res) => {
         document.metadata?.sectionMetadata || []
       );
     } else {
-      // HTML section-based redaction
-      const packageBuffer = await decryptFromIagon(document.iagonStorage, document.classificationLevel);
+      // HTML section-based redaction — use VC-first path
+      const packageBuffer = await decryptFromIagon(document.iagonStorage, document.classificationLevel, documentDID);
       const encryptedPackage = JSON.parse(packageBuffer.toString('utf8'));
       const decryptionResult = SectionEncryptionService.decryptSectionsForUser(
         encryptedPackage,
@@ -4464,6 +5439,20 @@ app.post('/api/access-gate/present', async (req, res) => {
 
   } catch (error) {
     console.error('[AccessGate] Error processing VP presentation:', error);
+    if (error.name === 'ManifestVCInvalid' || (error.message && error.message.includes('ManifestVCInvalid'))) {
+      return res.status(403).json({
+        success: false,
+        error: 'ManifestVCInvalid',
+        message: 'Document key manifest VC is invalid or has been tampered with.'
+      });
+    }
+    if (error.message && error.message.includes('DocumentKeyUnavailable')) {
+      return res.status(503).json({
+        success: false,
+        error: 'DocumentKeyUnavailable',
+        message: 'This document\'s encryption key is unavailable. The document must be re-uploaded by an administrator.'
+      });
+    }
     res.status(500).json({
       success: false,
       error: 'InternalServerError',
@@ -4472,9 +5461,113 @@ app.post('/api/access-gate/present', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/access-gate/notify
+ * Lightweight audit endpoint for cached-key document re-opens.
+ * Called by the wallet when a document is decrypted using a cached ephemeral key
+ * (no VP re-verification needed; access was already granted on first open).
+ */
+app.post('/api/access-gate/notify', async (req, res) => {
+  try {
+    const { documentDID, ephemeralDID, clearanceLevel } = req.body;
+    if (!documentDID) {
+      return res.status(400).json({ success: false, error: 'MissingDocumentDID' });
+    }
+
+    const document = DocumentRegistry.documents.get(documentDID);
+
+    fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      viewerName: null,
+      documentDID,
+      documentTitle: document?.metadata?.title || null,
+      clearanceLevel: clearanceLevel || null,
+      companyDID: document?.ownerCompanyDID || null,
+      accessGranted: true,
+      denialReason: null,
+      copyId: ephemeralDID || null,
+      clientIp: req.ip || req.connection?.remoteAddress || null,
+      accessType: 'CACHED_KEY_REOPEN'
+    }) + '\n', () => {});
+
+    console.log(`[AccessGate] 📖 Cached-key reopen logged — documentDID: ${String(documentDID).substring(0, 50)}...`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[AccessGate] Notify error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // =============================================================================
 // DOCUMENT UPDATE / VERSIONING ENDPOINTS
 // =============================================================================
+
+/**
+ * Resolve the highest clearance level actually present in a document's DOCX.
+ *
+ * Precedence:
+ *  1. sectionMetadata already stored in the registry (cheap, no Iagon round-trip).
+ *  2. Parse the original DOCX from Iagon (expensive but authoritative — required when
+ *     the document was uploaded via the plain-upload endpoint that skips section parsing).
+ *  3. Fall back to document.classificationLevel.
+ *
+ * Returns a numeric level (0–4).
+ */
+async function resolveDocumentHighestLevel(document, documentDID) {
+  const LEVEL = { 'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2, 'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4, 'TOP_SECRET': 4 };
+
+  // 1. sectionMetadata path (classified-upload documents)
+  const regLevels = (document.metadata?.sectionMetadata || [])
+    .map(s => LEVEL[s.clearance?.toUpperCase()] ?? 0);
+  if (regLevels.length > 0) return Math.max(...regLevels);
+
+  // 2. Parse original DOCX from Iagon
+  try {
+    const srcFileId       = document.iagonStorage?.originalDocxFileId || document.iagonStorage?.fileId;
+    const srcManifestId   = document.iagonStorage?.originalDocxManifestId || document.iagonStorage?.encryptionManifestId || null;
+    const srcEncInfo      = document.iagonStorage?.originalDocxEncryptionInfo || document.iagonStorage?.encryptionInfo || null;
+    if (!srcFileId) throw new Error('no fileId');
+
+    const iagonClient = getIagonClient();
+    let docxBuf;
+
+    if (srcManifestId) {
+      const wrapped  = await iagonClient.downloadKeyManifest(srcManifestId);
+      const rawDEK   = cmk.unwrapDEK(wrapped, document.classificationLevel);
+      docxBuf        = await iagonClient.downloadFile(srcFileId, { ...srcEncInfo, key: rawDEK.toString('base64') });
+      rawDEK.fill(0);
+    } else {
+      // VC-first path
+      const docServiceUrl = process.env.DOCUMENT_SERVICE_URL;
+      const adminKey      = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+      const vcRecord      = await fetchCurrentManifestVC(documentDID, docServiceUrl, adminKey);
+      if (vcRecord) {
+        const verifier = new (require('./lib/KeyManifestVCVerifier'))({ inlineJwk: process.env.MANIFEST_SIGNING_KEY_PUBLIC });
+        const vr = await verifier.verify(vcRecord);
+        if (vr.valid) {
+          const rawDEK = cmk.unwrapDEK(vr.claims, document.classificationLevel);
+          docxBuf      = await iagonClient.downloadFile(srcFileId, {
+            algorithm: vr.claims.fileAlgorithm || 'AES-256-GCM',
+            iv: vr.claims.fileIv, authTag: vr.claims.fileAuthTag,
+            key: rawDEK.toString('base64')
+          });
+          rawDEK.fill(0);
+        }
+      }
+      if (!docxBuf) docxBuf = await iagonClient.downloadFile(srcFileId, srcEncInfo || null);
+    }
+
+    const parsed = await DocxClearanceParser.parseDocxClearanceSections(docxBuf);
+    const highest = parsed.sections.reduce((m, s) => Math.max(m, s.clearanceLevel ?? 0), 0);
+    console.log(`[resolveDocumentHighestLevel] Parsed DOCX for ${documentDID?.substring(0,40)}: highest section = ${highest}`);
+    return highest;
+  } catch (err) {
+    console.warn('[resolveDocumentHighestLevel] DOCX parse fallback failed:', err.message);
+  }
+
+  // 3. Fallback to classificationLevel
+  return LEVEL[document.classificationLevel?.toUpperCase()] ?? 1;
+}
 
 /**
  * POST /api/document-update/request-edit
@@ -4536,12 +5629,11 @@ app.post('/api/document-update/request-edit', async (req, res) => {
     }
 
     // 6. Clearance check — editor must cover the highest section (no merge needed)
+    // Uses resolveDocumentHighestLevel which parses the original DOCX when sectionMetadata
+    // is absent (plain-upload documents), preventing lower-clearance editors from overwriting
+    // with a redacted copy that strips content from higher-clearance users.
     const CLEARANCE_NUMERIC = { 'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2, 'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4, 'TOP_SECRET': 4 };
-    const sectionLevels = (document.metadata?.sectionMetadata || [])
-      .map(s => CLEARANCE_NUMERIC[s.clearance?.toUpperCase()] ?? 0);
-    const highestSectionLevel = sectionLevels.length > 0
-      ? Math.max(...sectionLevels)
-      : (CLEARANCE_NUMERIC[document.classificationLevel] ?? 1);
+    const highestSectionLevel = await resolveDocumentHighestLevel(document, documentDID);
     const userLevel = CLEARANCE_NUMERIC[clearanceLevel?.toUpperCase()] ?? 0;
     if (userLevel < highestSectionLevel) {
       const requiredLabel = Object.keys(CLEARANCE_NUMERIC).find(k => CLEARANCE_NUMERIC[k] === highestSectionLevel) || String(highestSectionLevel);
@@ -4552,8 +5644,11 @@ app.post('/api/document-update/request-edit', async (req, res) => {
       });
     }
 
-    // 7. Check document is DOCX
-    if (!document.iagonStorage?.originalDocxFileId) {
+    // 7. Check document is DOCX (allow pre-encrypted uploads by filename, not just originalDocxFileId)
+    const isDocxEdit = document.iagonStorage?.originalDocxFileId ||
+      (document.iagonStorage?.filename || '').toLowerCase().endsWith('.docx') ||
+      document.metadata?.sourceFormat === 'docx';
+    if (!isDocxEdit) {
       return res.status(400).json({ success: false, error: 'NotDocxDocument', message: 'Document is not a DOCX file' });
     }
 
@@ -4617,13 +5712,28 @@ app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, r
       return res.status(404).json({ success: false, error: 'DocumentNotFound', message: 'Document not found in registry' });
     }
 
-    const previousFileId = document.iagonStorage.originalDocxFileId;
+    // 3.5. Re-validate editor clearance against actual document section levels.
+    // Defence-in-depth: request-edit already does this check, but the submit endpoint
+    // must independently verify so a lower-clearance user cannot bypass it (e.g. by
+    // replaying an old token or exploiting a gap where sectionMetadata was absent at
+    // request-edit time).  resolveDocumentHighestLevel downloads and parses the original
+    // DOCX when sectionMetadata is missing, which is the only reliable way to detect
+    // SECRET-styled paragraphs inside a document whose classificationLevel was set lower.
+    const CLEARANCE_NUMERIC_SUBMIT = { 'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2, 'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4, 'TOP_SECRET': 4 };
+    const editorNumericLevel = CLEARANCE_NUMERIC_SUBMIT[clearanceLevel?.toUpperCase()] ?? 0;
+    const docHighestLevel = await resolveDocumentHighestLevel(document, documentDID);
+    if (editorNumericLevel < docHighestLevel) {
+      const requiredLabel = Object.keys(CLEARANCE_NUMERIC_SUBMIT).find(k => CLEARANCE_NUMERIC_SUBMIT[k] === docHighestLevel) || String(docHighestLevel);
+      console.warn(`[DocumentUpdate] ❌ Submit rejected: editor clearance ${clearanceLevel} (${editorNumericLevel}) < document highest level ${requiredLabel} (${docHighestLevel})`);
+      return res.status(403).json({
+        success: false,
+        error: 'InsufficientClearance',
+        message: `Submitting an update requires ${requiredLabel} clearance (document contains ${requiredLabel}-classified sections). Your clearance: ${clearanceLevel || 'UNCLASSIFIED'}`
+      });
+    }
 
-    // 4. Download original DOCX from Iagon
+    // 4. Use submitted file directly — editor had full clearance, no merge needed
     const iagonClient = getIagonClient();
-    const originalDocx = await iagonClient.downloadFile(previousFileId);
-
-    // 5. Use submitted file directly — editor had full clearance, no merge needed
     const mergedDocx = req.file.buffer;
 
     // 6. Compute content hash
@@ -4657,13 +5767,14 @@ app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, r
 
     // Task 2: Wrap DEK with CMK before persisting
     let updateManifestId = null;
+    let updateWrappedManifest = null;
     if (newResult.rawDEK) {
       try {
-        const wrappedManifest = cmk.wrapDEK(newResult.rawDEK, document.classificationLevel);
+        updateWrappedManifest = cmk.wrapDEK(newResult.rawDEK, document.classificationLevel);
         newResult.rawDEK.fill(0); // zero raw key from memory (PFS)
 
         const { manifestFileId } = await iagonClient.uploadKeyManifest(
-          wrappedManifest,
+          updateWrappedManifest,
           `update-${Date.now()}`
         );
         updateManifestId = manifestFileId;
@@ -4674,6 +5785,45 @@ app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, r
       }
     }
 
+    // Push versioned KeyManifest VC to document-service
+    let updateVCId = null;
+    if (updateWrappedManifest && newResult.fileId && documentDID) {
+      try {
+        const docServiceUrl = process.env.DOCUMENT_SERVICE_URL || null;
+        const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+        const vcIssuer = new KeyManifestVCIssuer(docServiceUrl, adminKey);
+        const prevVC = await fetchCurrentManifestVC(documentDID, docServiceUrl, adminKey);
+        const versionNumber = (prevVC?.claims?.versionNumber ?? 0) + 1;
+        const predecessorHash = prevVC ? KeyManifestVCIssuer.computePredecessorHash(prevVC.vcJwt) : null;
+
+        const vcResult = await vcIssuer.issue({
+          documentDID,
+          issuerDID:          process.env.SERVICE_DID,
+          iagonFileId:        newResult.fileId,
+          classificationLevel: document.classificationLevel,
+          releasableTo:       document.releasableTo || [],
+          wrappedKey:         updateWrappedManifest.wrappedKey,
+          iv:                 updateWrappedManifest.iv,
+          authTag:            updateWrappedManifest.authTag,
+          wrappingAlgorithm:  updateWrappedManifest.wrappingAlgorithm || 'AES-256-GCM',
+          fileAlgorithm:      newResult.encryptionInfo?.algorithm || 'AES-256-GCM',
+          fileIv:             newResult.encryptionInfo?.iv,
+          fileAuthTag:        newResult.encryptionInfo?.authTag,
+          contentHash:        contentHash || null,
+          versionNumber,
+          updatedBy:          editorDID || null,
+          predecessorHash
+        });
+        updateVCId = vcResult.vcId;
+        console.log(`[DocumentUpdate] ✅ KeyManifest VC v${versionNumber} pushed: ${updateVCId}`);
+      } catch (vcErr) {
+        console.error('[DocumentUpdate] ⚠️ KeyManifest VC push failed (non-fatal):', vcErr.message);
+      }
+    }
+
+    // Capture previousFileId before addDocumentVersion overwrites it (for audit trail recovery)
+    const previousDocxFileId = document.iagonStorage?.originalDocxFileId || document.iagonStorage?.fileId || null;
+
     // 8. Update registry with immutable version chain (including new encryption key)
     const newVersion = await DocumentRegistry.addDocumentVersion(documentDID, {
       newDocxFileId:       newResult.fileId,
@@ -4681,7 +5831,8 @@ app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, r
       encryptionInfo:      newResult.encryptionInfo || null, // iv, authTag, algorithm — NO key
       contentHash,
       editorDID,
-      clearanceLevel
+      clearanceLevel,
+      manifestVcId:        updateVCId
     });
 
     // 9. On-chain anchoring (fire-and-forget, non-fatal)
@@ -4732,6 +5883,7 @@ app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, r
       companyDID:    document.ownerCompanyDID || companyDID || null,
       accessGranted: true,
       action:        'DOCUMENT_EDITED',
+      previousFileId: previousDocxFileId,
       newFileId:     newResult.fileId,
       versionId:     newVersion.versionId,
       contentHash,
@@ -4745,7 +5897,7 @@ app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, r
       documentDID,
       versionId:     newVersion.versionId,
       newFileId:     newResult.fileId,
-      previousFileId,
+      previousFileId:  document.iagonStorage?.originalDocxFileId || document.iagonStorage?.fileId || null,
       contentHash,
       onChainStatus: 'anchoring_submitted',
       updatedAt:     newVersion.createdAt
@@ -4771,6 +5923,46 @@ app.get('/api/document-versions/:documentDID', (req, res) => {
   // Strip raw fileIds from public response
   const publicVersions = versions.map(({ fileId: _omit, ...v }) => v);
   res.json({ documentDID, versions: publicVersions });
+});
+
+/**
+ * GET /api/documents/:documentDID/vc-history
+ * Proxy: fetch the KeyManifest VC version history from document-service.
+ * Returns { documentDID, current: vcRecord, history: vcRecord[] }.
+ * Strips vcJwt from history entries (sensitive — only current VC has it).
+ */
+app.get('/api/documents/:documentDID/vc-history', async (req, res) => {
+  const documentDID = decodeURIComponent(req.params.documentDID);
+  const docServiceUrl = process.env.DOCUMENT_SERVICE_URL;
+  const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+
+  if (!docServiceUrl) {
+    return res.status(503).json({ error: 'DocumentServiceUnavailable', message: 'Document service URL not configured' });
+  }
+
+  try {
+    const upstream = await fetch(
+      `${docServiceUrl}/vc/key-manifest/${encodeURIComponent(documentDID)}/history`,
+      { headers: { 'x-admin-key': adminKey }, timeout: 5000 }
+    );
+    if (upstream.status === 404) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'No VC history for this document' });
+    }
+    if (!upstream.ok) {
+      return res.status(502).json({ error: 'UpstreamError', message: `Document service returned ${upstream.status}` });
+    }
+    const data = await upstream.json();
+
+    // Include vcJwt in history entries so the wallet can verify the predecessor hash chain
+    res.json({
+      documentDID,
+      current: data.current,
+      history: data.history || []
+    });
+  } catch (err) {
+    console.error('[VCHistory] Error fetching from document-service:', err.message);
+    res.status(500).json({ error: 'InternalServerError', message: err.message });
+  }
 });
 
 /**
@@ -4805,9 +5997,45 @@ app.get('/api/ephemeral-documents/metadata/:documentDID', async (req, res) => {
       });
     }
 
+    // Enrich with VC history (version number + updatedBy)
+    let versionNumber = null;
+    let lastUpdatedBy = null;
+    let lastUpdatedAt = null;
+    try {
+      const docServiceUrl = process.env.DOCUMENT_SERVICE_URL;
+      const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+      if (docServiceUrl) {
+        const histRes = await fetch(
+          `${docServiceUrl}/vc/key-manifest/${encodeURIComponent(documentDID)}/history`,
+          { headers: { 'x-admin-key': adminKey } }
+        );
+        if (histRes.ok) {
+          const hist = await histRes.json();
+          const current = hist.current;
+          if (current) {
+            versionNumber = current.claims?.versionNumber ?? null;
+            lastUpdatedAt = current.issuedAt || null;
+            // Decode email from long-form PRISM DID — email is base64url-encoded in state portion
+            const updatedByDID = current.claims?.updatedBy || '';
+            if (updatedByDID) {
+              let emailMatch = null;
+              try {
+                const didParts = updatedByDID.split(':');
+                if (didParts.length >= 4) {
+                  const decoded = Buffer.from(didParts[3], 'base64').toString('latin1');
+                  emailMatch = decoded.match(/mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/);
+                }
+              } catch (_) {}
+              lastUpdatedBy = emailMatch ? emailMatch[1] : updatedByDID.split(':').slice(0, 3).join(':');
+            }
+          }
+        }
+      }
+    } catch (_) { /* VC history enrichment is best-effort */ }
+
     res.json({
       success: true,
-      document
+      document: { ...document, versionNumber, lastUpdatedBy, lastUpdatedAt }
     });
 
   } catch (error) {
@@ -5083,19 +6311,15 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
     console.log(`   Company: ${company.displayName} (${company.id})`);
     console.log('='.repeat(70));
 
-    // Find employee's connection to TechCorp (their personal wallet connection)
-    // This connection was established during employee onboarding
+    // Personal wallet connections live in each company's own agent (company.apiKey).
+    // session.connectionId is the enterprise agent connection (techcorp_connection_id) - NOT used here.
     const MULTITENANCY_URL = process.env.MULTITENANCY_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
 
-    console.log(`[ClearanceVerification] Looking for employee connection in Cloud Agent 8200`);
-    console.log(`   Looking for label containing: ${session.email.split('@')[0]}`);
+    console.log(`[ClearanceVerification] Searching for personal wallet connection in ${company.id} agent`);
 
-    // Get all connections from TechCorp's Cloud Agent
     const connectionsResponse = await fetch(`${MULTITENANCY_URL}/connections`, {
       method: 'GET',
-      headers: {
-        'apikey': company.apiKey
-      }
+      headers: { 'apikey': company.apiKey }
     });
 
     if (!connectionsResponse.ok) {
@@ -5110,27 +6334,30 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
     const connectionsData = await connectionsResponse.json();
     const connections = connectionsData.contents || [];
 
-    // Find established connection to this employee's personal wallet
-    // Connection label format: "Alice Cooper (Engineer) - Engineering" or similar
-    const employeeNamePart = session.email.split('@')[0].replace(/\./g, ' ').toLowerCase();
-
-    let employeeConnection = connections.find(conn => {
-      if (conn.state !== 'ConnectionResponseSent' && conn.state !== 'ConnectionResponseReceived') {
-        return false;
-      }
-      if (!conn.label) return false;
-      return conn.label.toLowerCase().includes(employeeNamePart) ||
-             conn.label.toLowerCase().includes(session.email.toLowerCase());
+    // Only consider established connections that go to the personal wallet (via mediator),
+    // not enterprise agent connections (theirDid contains /enterprise/).
+    const personalWalletConns = connections.filter(conn => {
+      if (conn.state !== 'ConnectionResponseSent' && conn.state !== 'ConnectionResponseReceived') return false;
+      if (conn.theirDid && conn.theirDid.includes('enterprise')) return false;
+      return true;
     });
 
-    // Also check the stored employee-connection mappings
-    if (!employeeConnection) {
-      const mappingKey = session.email.split('@')[0];
-      const mapping = employeeConnectionMappings[mappingKey];
-      if (mapping && mapping.connectionId) {
-        employeeConnection = connections.find(conn => conn.connectionId === mapping.connectionId);
-        console.log(`[ClearanceVerification] Found connection from mapping: ${mapping.connectionId}`);
-      }
+    // Build candidate name parts from email username - try full name and base name (strip trailing numbers)
+    const emailUsername = session.email.split('@')[0]; // e.g. "vaclav.ubuntu.4"
+    const fullNamePart = emailUsername.replace(/\./g, ' ').toLowerCase(); // "vaclav ubuntu 4"
+    // Strip trailing dot-number segments: "vaclav.ubuntu.4" → "vaclav ubuntu"
+    const baseNamePart = emailUsername.replace(/(\.\d+)+$/, '').replace(/\./g, ' ').toLowerCase();
+
+    let employeeConnection = personalWalletConns.find(conn => {
+      if (!conn.label) return false;
+      const label = conn.label.toLowerCase();
+      return label.includes(fullNamePart) ||
+             label.includes(session.email.toLowerCase()) ||
+             (baseNamePart !== fullNamePart && label.includes(baseNamePart));
+    });
+
+    if (employeeConnection) {
+      console.log(`[ClearanceVerification] Found connection via label search: ${employeeConnection.connectionId} (${employeeConnection.label})`);
     }
 
     if (!employeeConnection) {
@@ -5140,7 +6367,7 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
         error: 'NoDirectConnection',
         message: 'No DIDComm connection found to your personal wallet. Please ensure your personal wallet is connected to TechCorp.',
         instructions: [
-          '1. Open Alice Wallet (https://identuslabel.cz/alice)',
+          '1. Open your personal wallet',
           '2. Go to Connections',
           '3. Accept the company invitation or create a new connection',
           '4. Then return here and try again'
@@ -5325,6 +6552,7 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
 
       // Parse the credential data from the presentation
       // Cloud Agent returns data[] as array of VP JWT strings
+      let caPersonalDID = null; // personal CA DID extracted from the presented SecurityClearance VC
       if (presentationData.data && presentationData.data.length > 0) {
         for (const vpJwtOrObject of presentationData.data) {
           try {
@@ -5348,6 +6576,11 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
                       if (vcPayload.vc && vcPayload.vc.credentialSubject) {
                         const subject = vcPayload.vc.credentialSubject;
                         if (subject.clearanceLevel) {
+                          // Capture the personal CA DID (sub of VC JWT) for sync linkage
+                          if (vcPayload.sub && !caPersonalDID) {
+                            caPersonalDID = vcPayload.sub;
+                            console.log(`[ClearanceVerification] Captured caPersonalDID: ${caPersonalDID.substring(0, 40)}...`);
+                          }
                           clearanceLevel = subject.clearanceLevel;
                           console.log('[ClearanceVerification] ✅ Found clearanceLevel:', clearanceLevel);
                         } else if (subject.securityLevel) {
@@ -5395,6 +6628,91 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
         employeeSession.hasClearanceVC = true;
         employeeSession.clearanceLevel = clearanceLevel;
         console.log(`[ClearanceVerification] Session updated with clearance: ${clearanceLevel}`);
+      }
+
+      // Issue SecurityClearanceGrant VC to the employee's enterprise wallet (IDL Wallet)
+      // This VC appears in the employee's credential list as company confirmation of their clearance
+      const techCorp = getCompany('techcorp');
+      const enterpriseConnectionId = employeeSession?.connectionId;
+      if (techCorp && enterpriseConnectionId && clearanceLevel !== 'UNKNOWN') {
+        const SECURITY_CLEARANCE_GRANT_SCHEMA_GUID = 'f33eedc7-aa47-3e05-bc80-cf5388d00562';
+
+        // Check if an active SecurityClearanceGrant already exists
+        let alreadyHasGrant = false;
+        try {
+          const existing = await cloudAgentRequest(techCorp.apiKey, '/issue-credentials/records?limit=200');
+          const records = existing.data?.contents || [];
+          alreadyHasGrant = records.some(r =>
+            (r.claims?.credentialType === 'SecurityClearanceGrant' || r.claims?.clearanceLevel) &&
+            r.claims?.holderDID === (verification.prismDid || '') &&
+            r.claims?.clearanceLevel === clearanceLevel.toUpperCase() &&
+            ['CredentialSent', 'OfferSent', 'OfferReceived', 'RequestReceived', 'CredentialReceived'].includes(r.protocolState)
+          );
+        } catch (e) {
+          console.warn('[ClearanceVerification] Could not check existing grants (non-blocking):', e.message);
+        }
+
+        if (alreadyHasGrant) {
+          console.log(`[ClearanceVerification] ℹ️ SecurityClearanceGrant already exists for ${clearanceLevel}, skipping issuance`);
+        } else {
+        const grantedAt = new Date().toISOString();
+        const validUntil = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+
+        const credentialOffer = {
+          issuingDID: techCorp.did,
+          connectionId: enterpriseConnectionId,
+          schemaId: `${MULTITENANCY_CLOUD_AGENT_URL}/schema-registry/schemas/${SECURITY_CLEARANCE_GRANT_SCHEMA_GUID}`,
+          credentialFormat: 'JWT',
+          claims: {
+            credentialType: 'SecurityClearanceGrant',
+            clearanceLevel: clearanceLevel.toUpperCase(),
+            holderDID: verification.prismDid || '',
+            issuerDID: techCorp.did,
+            grantedAt,
+            validUntil,
+          },
+          automaticIssuance: true,
+          awaitConfirmation: false
+        };
+
+        cloudAgentRequest(techCorp.apiKey, '/issue-credentials/credential-offers', {
+          method: 'POST',
+          body: JSON.stringify(credentialOffer)
+        }).then(async result => {
+          const recordId = result.data?.recordId;
+          console.log(`[ClearanceVerification] ✅ SecurityClearanceGrant VC offer created: ${recordId}`);
+          // Persist recordId so the sync endpoint can revoke this grant if personal clearance is revoked
+          if (recordId && process.env.ENTERPRISE_DB_PASSWORD) {
+            try {
+              const { Pool } = require('pg');
+              const _pool = new Pool({
+                host: process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
+                port: process.env.ENTERPRISE_DB_PORT || 5434,
+                database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
+                user: process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
+                password: process.env.ENTERPRISE_DB_PASSWORD,
+              });
+              await _pool.query(
+                `INSERT INTO employee_credential_history
+                   (employee_account_id, credential_type, credential_record_id, issued_at, issued_by, credential_claims, status)
+                 SELECT ea.id, 'SecurityClearanceGrant', $1, CURRENT_TIMESTAMP, 'techcorp-enterprise', $2::jsonb, 'active'
+                 FROM employee_accounts ea
+                 WHERE ea.email = $3 OR ea.prism_did = $4
+                 LIMIT 1`,
+                [recordId, JSON.stringify(credentialOffer.claims), verification.email || '', verification.prismDid || '']
+              );
+              await _pool.end();
+              console.log(`[ClearanceVerification] ✅ Saved SecurityClearanceGrant recordId to DB: ${recordId}`);
+            } catch (dbErr) {
+              console.warn(`[ClearanceVerification] ⚠️ Could not save recordId to DB: ${dbErr.message}`);
+            }
+          }
+        }).catch(err => {
+          console.error(`[ClearanceVerification] ❌ Failed to issue SecurityClearanceGrant VC:`, err.message);
+        });
+        } // end else (!alreadyHasGrant)
+      } else {
+        console.warn(`[ClearanceVerification] Skipping SecurityClearanceGrant VC issuance: techCorp=${!!techCorp}, connectionId=${enterpriseConnectionId}, clearanceLevel=${clearanceLevel}`);
       }
 
       return res.json({
@@ -6287,6 +7605,119 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
 
     const { releasableTo, department, classificationLevel: userClassificationLevel } = req.body;
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // PRE-ENCRYPTED PATH (SSI-aligned)
+    // Browser already encrypted the file with WebCrypto AES-256-GCM.
+    // Server never sees plaintext — just stores the encrypted bytes on Iagon,
+    // creates the document DID, and pushes the KeyManifest VC.
+    // ─────────────────────────────────────────────────────────────────────────
+    if (req.body.preEncrypted === 'true') {
+      console.log(`   [ClassifiedUpload/preEncrypted] file size=${file.buffer?.length || 0} bytes, name=${file.originalname}`);
+      const {
+        wrappedKey, wrapIv, wrapAuthTag, wrappingAlgorithm,
+        fileIv, fileAuthTag, fileAlgorithm, contentHash
+      } = req.body;
+
+      if (!wrappedKey || !wrapIv || !wrapAuthTag || !fileIv || !fileAuthTag) {
+        return res.status(400).json({ success: false, error: 'MISSING_ENCRYPTION_FIELDS',
+          message: 'Pre-encrypted upload requires wrappedKey, wrapIv, wrapAuthTag, fileIv, fileAuthTag' });
+      }
+
+      const classLevel = userClassificationLevel || 'INTERNAL';
+
+      // Parse releasableTo
+      let releasableArray = [];
+      try {
+        releasableArray = releasableTo ? (typeof releasableTo === 'string' ? JSON.parse(releasableTo) : releasableTo) : [];
+      } catch (_) { releasableArray = releasableTo ? [releasableTo] : []; }
+      const releasableDIDs = releasableArray.map(item => {
+        if (item.startsWith('did:')) return item;
+        return COMPANY_ISSUER_DIDS[item] || item;
+      }).filter(Boolean);
+
+      // Upload pre-encrypted bytes to Iagon without re-encryption (classificationLevel: 'UNCLASSIFIED' skips Iagon DEK)
+      const iagonClient = getIagonClient();
+      // Prefix with timestamp to guarantee uniqueness — Iagon rejects duplicate paths
+      const iagonFilename = `${Date.now()}_${file.originalname}`;
+      const iagonResult = await iagonClient.uploadFile(
+        file.buffer,
+        iagonFilename,
+        { preEncrypted: true } // browser-encrypted — server must not add another DEK layer
+      );
+      console.log(`   [ClassifiedUpload/preEncrypted] Uploaded to Iagon: ${iagonResult.fileId}`);
+
+      // Create PRISM DID
+      const PUBLIC_URL = process.env.PUBLIC_URL || 'https://identuslabel.cz/company-admin';
+      const deptKey = DEPARTMENT_API_KEYS[department || session.department] || DEPARTMENT_API_KEYS['Security'];
+      const documentManager = new EnterpriseDocumentManager(ENTERPRISE_CLOUD_AGENT_URL, deptKey);
+      const didResult = await documentManager.createDocumentDIDWithServiceEndpoint(
+        department || session.department || 'Security',
+        { title: req.body.title || file.originalname, classificationLevel: classLevel, releasableTo: releasableDIDs },
+        { fileId: iagonResult.fileId, downloadUrl: iagonResult.iagonUrl || '', contentHash: contentHash || iagonResult.contentHash, encryptionInfo: null },
+        [{ id: 'document-access-gate', type: 'DocumentAccessGate', serviceEndpoint: `${PUBLIC_URL}/api/access-gate/challenge` }],
+        { documentServiceUrl: req.company?.documentServiceUrl || null }
+      );
+      const documentDID = didResult.documentDID;
+
+      // Register in DocumentRegistry
+      await DocumentRegistry.registerDocument({
+        documentDID,
+        title: req.body.title || file.originalname,
+        classificationLevel: classLevel,
+        releasableTo: releasableDIDs,
+        metadata: { originalFilename: file.originalname, fileSize: file.size, mimeType: file.mimetype, createdBy: session.email, department: session.department, createdAt: new Date().toISOString() },
+        iagonStorage: { fileId: iagonResult.fileId, nodeId: iagonResult.nodeId, filename: file.originalname, encryptionInfo: { algorithm: fileAlgorithm || 'AES-256-GCM', iv: fileIv, authTag: fileAuthTag } }
+      });
+
+      // Push KeyManifest VC to document service (versioned)
+      let preEncVCId = null;
+      try {
+        const docServiceUrl = process.env.DOCUMENT_SERVICE_URL || null;
+        const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+        const vcIssuer = new KeyManifestVCIssuer(docServiceUrl, adminKey);
+        const prevVC = await fetchCurrentManifestVC(documentDID, docServiceUrl, adminKey);
+        const versionNumber = (prevVC?.claims?.versionNumber ?? 0) + 1;
+        const predecessorHash = prevVC ? KeyManifestVCIssuer.computePredecessorHash(prevVC.vcJwt) : null;
+
+        const vcResult = await vcIssuer.issue({
+          documentDID,
+          issuerDID:          session.issuerDID || process.env.SERVICE_DID,
+          iagonFileId:        iagonResult.fileId,
+          classificationLevel: classLevel,
+          releasableTo:       releasableDIDs,
+          wrappedKey,
+          iv:                 wrapIv,
+          authTag:            wrapAuthTag,
+          wrappingAlgorithm:  wrappingAlgorithm || 'AES-256-GCM',
+          fileAlgorithm:      fileAlgorithm     || 'AES-256-GCM',
+          fileIv,
+          fileAuthTag,
+          contentHash:        contentHash || iagonResult.contentHash || null,
+          versionNumber,
+          updatedBy:          session.prismDid || session.issuerDID || null,
+          predecessorHash
+        });
+        preEncVCId = vcResult.vcId;
+        console.log(`   [ClassifiedUpload/preEncrypted] ✅ KeyManifest VC v${versionNumber} pushed: ${preEncVCId}`);
+      } catch (vcErr) {
+        console.error('   [ClassifiedUpload/preEncrypted] ⚠️ KeyManifest VC push failed:', vcErr.message);
+      }
+
+      return res.json({
+        success: true,
+        documentDID,
+        title:              req.body.title || file.originalname,
+        overallClassification: classLevel,
+        sectionCount:       1,
+        iagonFileId:        iagonResult.fileId,
+        keyManifestVCId:    preEncVCId,
+        message: 'Document uploaded (browser-encrypted, SSI-aligned)'
+      });
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+    // END PRE-ENCRYPTED PATH — legacy section-based path continues below
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Determine file type
     const filename = file.originalname.toLowerCase();
     const isHtml = filename.endsWith('.html') || filename.endsWith('.htm');
@@ -6423,9 +7854,11 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
 
     // Task 2: Wrap DEK with CMK before persisting
     let encryptionManifestId = null;
+    let classifiedUploadWrappedManifest = null;
     if (iagonResult.rawDEK) {
       try {
-        const wrappedManifest = cmk.wrapDEK(iagonResult.rawDEK, parsedDocument.metadata.overallClassification);
+        classifiedUploadWrappedManifest = cmk.wrapDEK(iagonResult.rawDEK, parsedDocument.metadata.overallClassification);
+        const wrappedManifest = classifiedUploadWrappedManifest;
         iagonResult.rawDEK.fill(0); // zero raw key from memory (PFS)
 
         // Upload wrapped manifest to Iagon
@@ -6559,6 +7992,46 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
 
     console.log(`   [ClassifiedUpload] Registered document: ${documentDID}`);
 
+    // =========================================================================
+    // STEP 5: Push KeyManifest VC to document-service
+    // =========================================================================
+    let classifiedUploadVCId = null;
+    if (classifiedUploadWrappedManifest && iagonResult && documentDID) {
+      try {
+        const docServiceUrl = process.env.DOCUMENT_SERVICE_URL || null;
+        const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+        const vcIssuer = new KeyManifestVCIssuer(docServiceUrl, adminKey);
+        const prevVC = await fetchCurrentManifestVC(documentDID, docServiceUrl, adminKey);
+        const versionNumber = (prevVC?.claims?.versionNumber ?? 0) + 1;
+        const predecessorHash = prevVC ? KeyManifestVCIssuer.computePredecessorHash(prevVC.vcJwt) : null;
+
+        const vcResult = await vcIssuer.issue({
+          documentDID,
+          issuerDID:          session.issuerDID || process.env.SERVICE_DID,
+          iagonFileId:        iagonResult.fileId,
+          classificationLevel: parsedDocument.metadata.overallClassification,
+          releasableTo:       releasableDIDs,
+          wrappedKey:         classifiedUploadWrappedManifest.wrappedKey,
+          iv:                 classifiedUploadWrappedManifest.iv,
+          authTag:            classifiedUploadWrappedManifest.authTag,
+          wrappingAlgorithm:  classifiedUploadWrappedManifest.wrappingAlgorithm || 'AES-256-GCM',
+          fileAlgorithm:      iagonResult.encryptionInfo?.algorithm || 'AES-256-GCM',
+          fileIv:             iagonResult.encryptionInfo?.iv,
+          fileAuthTag:        iagonResult.encryptionInfo?.authTag,
+          contentHash:        iagonResult.contentHash || null,
+          versionNumber,
+          updatedBy:          session.prismDid || session.issuerDID || null,
+          predecessorHash
+        });
+
+        console.log(`   [ClassifiedUpload] ✅ KeyManifest VC v${versionNumber} pushed to document-service: ${vcResult.vcId}`);
+        classifiedUploadVCId = vcResult.vcId;
+      } catch (vcPushErr) {
+        console.error('   [ClassifiedUpload] ⚠️ Failed to push KeyManifest VC to document-service:', vcPushErr.message);
+        // Non-fatal — document is stored, VC can be pushed manually
+      }
+    }
+
     res.json({
       success: true,
       documentDID,
@@ -6567,6 +8040,7 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
       sectionCount: encryptedPackage.encryptedSections.length,
       clearanceLevelStats: parsedDocument.metadata.clearanceLevelStats,
       iagonFileId: iagonResult.fileId,
+      keyManifestVCId: classifiedUploadVCId,
       message: 'Classified document uploaded and encrypted successfully'
     });
 
@@ -7026,17 +8500,76 @@ app.post('/api/employee-portal/documents/prepare-download/:documentDID', require
     // STEP 2: Download and prepare redacted document (but don't encrypt yet)
     // =========================================================================
     const iagonClient = getIagonClient();
-    const isDocx = documentRecord.metadata?.sourceFormat === 'docx' &&
-                   documentRecord.iagonStorage?.originalDocxFileId;
+    // Match the same isDocx logic as /api/access-gate/present: OR not AND, so
+    // documents with originalDocxFileId but null metadata are correctly detected.
+    // Also check filename extension as fallback for records with no metadata/originalDocxFileId.
+    const isDocx = documentRecord.metadata?.sourceFormat === 'docx' ||
+                   !!documentRecord.iagonStorage?.originalDocxFileId ||
+                   (documentRecord.iagonStorage?.filename || '').toLowerCase().endsWith('.docx');
 
     let redactedDocument;
     let documentFormat = 'html';
     let decryptionResult;
 
+    // CMK-unwrap helper — VC-first, then Iagon manifest, then legacy fallback
+    // Pass docDIDForVC to enable VC-first path (omit for originalDocx downloads).
+    async function decryptFromIagon(storage, classLevel, docDIDForVC = null) {
+      // ── VC-first path ─────────────────────────────────────────────────────
+      if (docDIDForVC) {
+        const docServiceUrl = process.env.DOCUMENT_SERVICE_URL;
+        const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+        const vcRecord = await fetchCurrentManifestVC(docDIDForVC, docServiceUrl, adminKey);
+        if (vcRecord) {
+          const verifier = new (require('./lib/KeyManifestVCVerifier'))({
+            inlineJwk: process.env.MANIFEST_SIGNING_KEY_PUBLIC
+          });
+          const result = await verifier.verify(vcRecord);
+          if (!result.valid) throw new ManifestVCInvalid(result.reason);
+          const { claims } = result;
+          const rawDEK = cmk.unwrapDEK(claims, classLevel);
+          const fullEncInfo = {
+            algorithm: claims.fileAlgorithm || 'AES-256-GCM',
+            iv:        claims.fileIv,
+            authTag:   claims.fileAuthTag,
+            key:       rawDEK.toString('base64')
+          };
+          const content = await iagonClient.downloadFile(storage.fileId, fullEncInfo);
+          rawDEK.fill(0);
+          return content;
+        }
+        // No VC found — fall through to Iagon manifest path
+      }
+      // ── Iagon manifest path ────────────────────────────────────────────────
+      if (storage.encryptionManifestId) {
+        const wrappedManifest = await iagonClient.downloadKeyManifest(storage.encryptionManifestId);
+        const rawDEK = cmk.unwrapDEK(wrappedManifest, classLevel);
+        const fullEncInfo = { ...storage.encryptionInfo, key: rawDEK.toString('base64') };
+        const content = await iagonClient.downloadFile(storage.fileId, fullEncInfo);
+        rawDEK.fill(0);
+        return content;
+      }
+      // ── Legacy path ────────────────────────────────────────────────────────
+      if (storage.encryptionInfo && !storage.encryptionInfo.key) {
+        throw new Error('DocumentKeyUnavailable: encryption key missing from registry — document must be re-uploaded');
+      }
+      return iagonClient.downloadFile(storage.fileId, storage.encryptionInfo || null);
+    }
+
     if (isDocx) {
       // DOCX Flow
       try {
-        const originalDocx = await iagonClient.downloadFile(documentRecord.iagonStorage.originalDocxFileId);
+        let originalDocx;
+        if (documentRecord.iagonStorage.originalDocxFileId) {
+          const docxStorage = {
+            fileId: documentRecord.iagonStorage.originalDocxFileId,
+            encryptionManifestId: documentRecord.iagonStorage.originalDocxManifestId || null,
+            encryptionInfo: documentRecord.iagonStorage.originalDocxEncryptionInfo || null
+          };
+          const docxDIDForVC = docxStorage.encryptionManifestId ? null : documentDID;
+          originalDocx = await decryptFromIagon(docxStorage, documentRecord.overallClassification, docxDIDForVC);
+        } else {
+          originalDocx = await decryptFromIagon(documentRecord.iagonStorage, documentRecord.overallClassification, documentDID);
+        }
         redactedDocument = await DocxRedactionService.applyRedactions(
           originalDocx,
           userClearance,
@@ -7061,7 +8594,7 @@ app.post('/api/employee-portal/documents/prepare-download/:documentDID', require
       }
     } else {
       // HTML Flow
-      const packageBuffer = await iagonClient.downloadFile(documentRecord.iagonStorage.fileId);
+      const packageBuffer = await decryptFromIagon(documentRecord.iagonStorage, documentRecord.overallClassification, documentDID);
       const encryptedPackage = JSON.parse(packageBuffer.toString('utf8'));
       decryptionResult = SectionEncryptionService.decryptSectionsForUser(
         encryptedPackage,
@@ -7176,6 +8709,20 @@ app.post('/api/employee-portal/documents/prepare-download/:documentDID', require
 
   } catch (error) {
     console.error('[PrepareDownload] Error:', error);
+    if (error.name === 'ManifestVCInvalid' || (error.message && error.message.includes('ManifestVCInvalid'))) {
+      return res.status(403).json({
+        success: false,
+        error: 'ManifestVCInvalid',
+        message: 'Document key manifest VC is invalid or has been tampered with.'
+      });
+    }
+    if (error.message && error.message.includes('DocumentKeyUnavailable')) {
+      return res.status(503).json({
+        success: false,
+        error: 'DocumentKeyUnavailable',
+        message: 'This document\'s encryption key is unavailable. The document must be re-uploaded by an administrator.'
+      });
+    }
     res.status(500).json({
       success: false,
       error: 'ServerError',
@@ -7774,6 +9321,45 @@ app.get('/api/classified-documents/:ephemeralDID/status', (req, res) => {
 // ============================================================================
 // Error Handling
 // ============================================================================
+
+// ============================================================================
+// Test Helpers (only active when TEST_BYPASS_KEY env var is set)
+// ============================================================================
+
+if (process.env.TEST_BYPASS_KEY) {
+  /**
+   * POST /api/test/create-session
+   * Inject a synthetic employee session for automated testing.
+   * Requires X-Test-Key header matching TEST_BYPASS_KEY env var.
+   * NEVER expose this in production (guard: TEST_BYPASS_KEY unset).
+   */
+  app.post('/api/test/create-session', (req, res) => {
+    const key = req.headers['x-test-key'];
+    if (key !== process.env.TEST_BYPASS_KEY) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    const session = {
+      sessionToken,
+      connectionId:   req.body.connectionId   || 'test-connection',
+      prismDid:       req.body.prismDid        || 'did:prism:test',
+      employeeId:     req.body.employeeId      || 'test-employee',
+      role:           req.body.role            || 'Employee',
+      department:     req.body.department      || 'IT',
+      fullName:       req.body.fullName        || 'Test Employee',
+      email:          req.body.email           || 'test@example.com',
+      issuerDID:      req.body.issuerDID       || 'did:prism:issuer',
+      hasTraining:    req.body.hasTraining     !== undefined ? req.body.hasTraining : true,
+      clearanceLevel: req.body.clearanceLevel  || 'TOP-SECRET',
+      hasClearanceVC: req.body.hasClearanceVC  !== undefined ? req.body.hasClearanceVC : true,
+      authenticatedAt: Date.now(),
+      lastActivity:    Date.now()
+    };
+    employeeSessions.set(sessionToken, session);
+    return res.json({ success: true, sessionToken });
+  });
+  console.log('[TEST] Test session injection endpoint active at POST /api/test/create-session');
+}
 
 // 404 handler
 app.use((req, res) => {

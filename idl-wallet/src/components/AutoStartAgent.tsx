@@ -59,9 +59,6 @@ export function AutoStartAgent() {
       if ((window as any).__enterprisePollingInterval) {
         clearInterval((window as any).__enterprisePollingInterval);
       }
-      if ((window as any).__didcommPollingInterval) {
-        clearInterval((window as any).__didcommPollingInterval);
-      }
     };
   }, [app.agent.hasStarted]); // Run when wallet starts
 
@@ -109,39 +106,11 @@ export function AutoStartAgent() {
               (window as any).__enterprisePollingInterval = pollingInterval;
             });
 
-            // ✅ AUTO-ACCEPT DIDCOMM CREDENTIAL OFFERS
-            // Poll for DIDComm credential offer messages in IndexedDB and auto-accept them
-            const didcommPollingInterval = setInterval(async () => {
-              try {
-                const agent = app.agent.instance;
-                if (!agent) return;
-
-                // Get all messages
-                const messages = await agent.pluto.getAllMessages();
-
-                // Find credential offer messages (piuri: https://didcomm.org/issue-credential/3.0/offer-credential)
-                const offerMessages = messages.filter((msg: any) =>
-                  msg.piuri?.includes('offer-credential')
-                );
-
-                if (offerMessages.length > 0) {
-                  // Import acceptCredentialOffer action
-                  const { acceptCredentialOffer } = await import('@/actions');
-
-                  for (const offerMsg of offerMessages) {
-                    try {
-                      await app.dispatch(acceptCredentialOffer({ agent, message: offerMsg })).unwrap();
-                    } catch (error) {
-                      console.error(`[AutoStartAgent] Failed to accept DIDComm offer:`, error);
-                    }
-                  }
-                }
-              } catch (error) {
-                console.error('[AutoStartAgent] DIDComm polling error:', error);
-              }
-            }, 10000); // 10 seconds (2x slower than original 5s)
-
-            (window as any).__didcommPollingInterval = didcommPollingInterval;
+            // CredentialOfferModal (mounted globally in _app.tsx) handles DIDComm
+            // offer-credential messages and presents them to the user for manual acceptance.
+            // DO NOT auto-accept here — blind auto-acceptance of all offers causes
+            // repeated concurrent IndexedDB writes (one new PRISM DID per offer per cycle)
+            // that corrupt the credential store.
           }
         })
         .catch((error) => {

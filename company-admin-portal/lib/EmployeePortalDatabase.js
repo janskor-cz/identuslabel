@@ -70,6 +70,17 @@ class EmployeePortalDatabase {
         created_by,
         metadata
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ON CONFLICT (email) DO UPDATE SET
+        full_name = EXCLUDED.full_name,
+        department = EXCLUDED.department,
+        wallet_id = EXCLUDED.wallet_id,
+        entity_id = EXCLUDED.entity_id,
+        api_key_hash = EXCLUDED.api_key_hash,
+        api_key_salt = EXCLUDED.api_key_salt,
+        api_key_hint = EXCLUDED.api_key_hint,
+        prism_did = EXCLUDED.prism_did,
+        prism_did_short = EXCLUDED.prism_did_short,
+        metadata = EXCLUDED.metadata
       RETURNING id, email, full_name, department, wallet_id, created_at
     `;
 
@@ -91,18 +102,8 @@ class EmployeePortalDatabase {
       JSON.stringify({ createdAt: new Date().toISOString() })
     ];
 
-    try {
-      const result = await this.db.query(query, values);
-      return result.rows[0];
-    } catch (error) {
-      if (error.constraint === 'employee_portal_accounts_email_key') {
-        throw new Error(`Employee with email ${email} already exists`);
-      }
-      if (error.constraint === 'employee_portal_accounts_wallet_id_key') {
-        throw new Error(`Wallet ID ${walletId} already assigned to another employee`);
-      }
-      throw error;
-    }
+    const result = await this.db.query(query, values);
+    return result.rows[0];
   }
 
   /**

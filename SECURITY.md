@@ -273,6 +273,27 @@ The Hyperledger Identus SSI Infrastructure team takes security seriously. We app
 
 ---
 
+## Document Update Clearance Bypass (CVE-class: Access Control)
+
+### Summary
+A lower-clearance user could permanently destroy higher-classification content in DOCX documents by uploading a redacted copy as an update.
+
+### Affected Components
+- `company-admin-portal/server.js`: `POST /api/document-update/request-edit`, `POST /api/document-update/submit`
+
+### Root Cause
+`document.classificationLevel` (a discovery-level field) was used as the clearance gate for write access. For DOCX documents, the actual highest content level is only determinable by parsing paragraph styles — `classificationLevel` can be set lower than the document's content.
+
+### Fix (2026-04-29)
+- `resolveDocumentHighestLevel()` helper resolves true content level via `sectionMetadata` → Iagon DOCX parse → `classificationLevel` fallback.
+- `request-edit` and `submit` both enforce this independently.
+- Audit log records `previousFileId` for data recovery.
+
+### Design Rule
+For any write operation on classified documents: **always resolve content-level from the document itself, never from the discovery-level `classificationLevel` field.**
+
+---
+
 ## Known Security Considerations
 
 ### Architectural Limitations

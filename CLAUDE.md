@@ -6,27 +6,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Infrastructure Services (Docker)
 ```bash
-# Start all infrastructure (run from /root)
+# Start all infrastructure (run from /root — docker-compose files live there)
 docker-compose -f cloud-agent-with-reverse-proxy.yml up -d
 docker-compose -f identus-mediator/docker-compose.yml up -d
 docker-compose -f enterprise-cloud-agent.yml up -d
 docker-compose -f test-multitenancy-cloud-agent.yml up -d
 docker-compose -f local-prism-node-addon.yml up -d
 
-# Start reverse proxy
-pkill caddy; /usr/local/bin/caddy run --config /root/Caddyfile > /tmp/caddy.log 2>&1 &
+# Reload reverse proxy config (Caddy runs inside Docker container identus-cloud-agent-proxy)
+docker exec identus-cloud-agent-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
 ### Application Services (Node.js)
 ```bash
 # Certification Authority (port 3005)
-cd /root/certification-authority && PORT=3005 node server.js > /tmp/ca.log 2>&1 &
+kill $(lsof -ti :3005) 2>/dev/null; sleep 1
+cd /opt/project_identuslabel/certification-authority && PORT=3005 nohup node server.js > /opt/project_identuslabel/ca.log 2>&1 &
 
 # Company Admin Portal (port 3010)
-cd /root/company-admin-portal && PORT=3010 node server.js > /tmp/company-admin.log 2>&1 &
+kill $(lsof -ti :3010) 2>/dev/null; sleep 1
+cd /opt/project_identuslabel/company-admin-portal && PORT=3010 nohup node server.js > /opt/project_identuslabel/company-admin.log 2>&1 &
 
 # Document Service (port 3020) - stateless VP-gated access for ACME
-cd /root/identus-document-service && PORT=3020 node server.js > /tmp/document-service.log 2>&1 &
+kill $(lsof -ti :3020) 2>/dev/null; sleep 1
+cd /opt/project_identuslabel/identus-document-service && PORT=3020 nohup node server.js > /opt/project_identuslabel/document-service.log 2>&1 &
 
 # Alice Wallet (port 3001) - OBSOLETE, do not use
 # cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
@@ -40,7 +43,10 @@ kill $(lsof -ti :3002) 2>/dev/null; sleep 1
 nohup node_modules/.bin/next start --port 3002 --hostname 0.0.0.0 > /opt/project_identuslabel/idl-wallet.log 2>&1 &
 ```
 
-### SDK Development (CRITICAL WORKFLOW)
+### SDK Development (OBSOLETE — Alice Wallet only)
+> **Note**: Alice Wallet (port 3001) is obsolete. IDL Wallet uses the SDK via npm packages.
+> This workflow only applies if modifying SDK source for legacy Alice Wallet testing.
+
 After modifying SDK source in `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/src/`:
 ```bash
 cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts
@@ -62,24 +68,24 @@ curl https://identuslabel.cz/document-service/health     # Document Service (302
 
 ### Testing
 ```bash
-# Wallet tests
+# Wallet tests (Alice Wallet — OBSOLETE, kept for SDK regression testing only)
 cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
 yarn test              # Run all tests
 yarn test:basic        # Basic load test
 yarn test:connect-ca   # CA connection test
 
 # E2E tests (Puppeteer) in company-admin-portal
-cd /root/company-admin-portal
+cd /opt/project_identuslabel/company-admin-portal
 node test-vc-issuance.js
 node test-employee-wallet-creation.js
 ```
 
 ### Viewing Logs
 ```bash
-tail -f /tmp/alice.log              # Alice Wallet
-tail -f /tmp/ca.log                 # Certification Authority
-tail -f /tmp/company-admin.log      # Company Admin Portal
-tail -f /tmp/document-service.log   # Document Service
+tail -f /opt/project_identuslabel/idl-wallet.log        # IDL Wallet (primary)
+tail -f /opt/project_identuslabel/ca.log                # Certification Authority
+tail -f /opt/project_identuslabel/company-admin.log     # Company Admin Portal
+tail -f /opt/project_identuslabel/document-service.log  # Document Service
 docker logs identus-mediator-identus-mediator-1 --tail 100  # Mediator
 ```
 
@@ -91,36 +97,38 @@ docker logs identus-mediator-identus-mediator-1 --tail 100  # Mediator
                                ↓
     ┌──────────────────────────┼──────────────────────────┐
     │                          │                          │
-Cloud Agent (8000)    Company Admin (3010)    Alice Wallet (3001)
-    ↓                          ↓                          ↓
-Mediator (8080)       Enterprise Agent (8300)    IDL Wallet (3000)
+Cloud Agent (8000)    Company Admin (3010)    IDL Wallet (3002)
+    ↓                          ↓
+Mediator (8080)       Enterprise Agent (8300)
     ↓                          ↓
 PRISM Node (50053)    Multitenancy Agent (8200)
 ```
 
 ### Key Directories
 ```
-/root/clean-identus-wallet/sdk-v6-test/sdk-ts/     # Identus SDK source (modified)
-  └── demos/alice-wallet/                          # Primary wallet (Next.js)
-      └── src/
-          ├── actions/                             # Redux async thunks
-          ├── components/                          # React components
-          ├── pages/                               # Next.js pages
-          └── utils/                               # Utilities (crypto, storage)
+/opt/project_identuslabel/idl-wallet/              # IDL Wallet — PRIMARY wallet (port 3002)
+  └── src/
+      ├── actions/                                 # Redux async thunks
+      ├── components/                              # React components
+      ├── pages/                                   # Next.js pages (browser.tsx, credentials.tsx, …)
+      └── utils/                                   # Utilities (crypto, storage, credentialTypeDetector)
 
-/root/company-admin-portal/                        # Multi-company management (Express.js)
-  ├── server.js                                    # Main server (~3500 lines)
+/opt/project_identuslabel/company-admin-portal/    # Multi-company management (Express.js)
+  ├── server.js                                    # Main server
   ├── lib/                                         # Core libraries
-  │   ├── EmployeeWalletManager.js                 # 11-step employee onboarding
+  │   ├── EmployeeWalletManager.js                 # 12-step employee onboarding
   │   ├── DocumentRegistry.js                      # Zero-knowledge document index
   │   ├── ReEncryptionService.js                   # Clearance-based access control
   │   ├── IagonStorageClient.js                    # Decentralized storage
   │   └── DocxRedactionService.js                  # DOCX clearance redaction
   └── public/                                      # Frontend assets
 
-/root/certification-authority/                     # CA server with secure portal
+/opt/project_identuslabel/certification-authority/ # CA server with secure portal
 
-/opt/project_identuslabel/idl-wallet/              # IDL Wallet — PRIMARY wallet (port 3002)
+/opt/project_identuslabel/identus-document-service/ # Stateless VP-gated document service (port 3020)
+
+/root/clean-identus-wallet/sdk-v6-test/sdk-ts/     # Identus SDK source (OBSOLETE — Alice Wallet only)
+  └── demos/alice-wallet/                          # Alice Wallet — OBSOLETE, do not use
 ```
 
 ### SDK Architecture (5 Building Blocks)
@@ -151,12 +159,13 @@ Multiple wallets use prefixed storage to prevent collisions:
 Standard hierarchy (used across all systems):
 | Level | Name | Numeric |
 |-------|------|---------|
+| 0 | UNCLASSIFIED | 0 |
 | 1 | INTERNAL | 1 |
 | 2 | CONFIDENTIAL | 2 |
 | 3 | RESTRICTED | 3 |
-| 4 | TOP-SECRET | 4 |
+| 4 | SECRET | 4 |
 
-Legacy mappings exist for backward compatibility (UNCLASSIFIED→INTERNAL, SECRET→RESTRICTED).
+Legacy mappings exist for backward compatibility: `TOP-SECRET` / `TOP_SECRET` / `TOPSECRET` → `SECRET` (renamed Mar 21, 2026). `UNCLASSIFIED` → level 0.
 
 ## Known Development Issues
 
@@ -199,11 +208,26 @@ const serviceConfig = getServiceConfigurationFromCredentials(credentials);
 // Use apiKey and baseUrl from serviceConfig for REST calls
 ```
 
+### Service-Linked VC Convention
+Any VC whose purpose is to grant access to a service should include these fields in `credentialSubject`:
+```json
+{
+  "serviceUrl": "https://identuslabel.cz/ca/login?uid=...",
+  "serviceName": "Certification Authority",
+  "serviceIcon": "🔐"
+}
+```
+The IDL Wallet **Browser tab** (`/browser`) scans all credentials for `serviceUrl` and auto-displays the service — no wallet code changes needed per new service type. `serviceName` and `serviceIcon` are optional but recommended.
+
+Current issuers baking this in:
+- `RealPersonIdentity` (CA server) — URL includes `uid` param for auto-login
+- `EmployeeRole` (Company Admin) — URL includes `email` param for portal login
+
 ## Service URLs
 
 | Service | URL | Port |
 |---------|-----|------|
-| Alice Wallet | https://identuslabel.cz/alice | 3001 |
+| IDL Wallet | https://identuslabel.cz/wallet | 3002 |
 | CA Portal | https://identuslabel.cz/ca | 3005 |
 | Company Admin | https://identuslabel.cz/company-admin | 3010 |
 | Document Service | https://identuslabel.cz/document-service | 3020 |
@@ -211,6 +235,7 @@ const serviceConfig = getServiceConfigurationFromCredentials(credentials);
 | Enterprise Agent | https://identuslabel.cz/enterprise | 8300 |
 | Multitenancy Agent | http://91.99.4.54:8200 | 8200 |
 | Mediator | https://identuslabel.cz/mediator | 8080 |
+| Alice Wallet | https://identuslabel.cz/alice | 3001 — **OBSOLETE** |
 
 ## Commit Message Format
 ```

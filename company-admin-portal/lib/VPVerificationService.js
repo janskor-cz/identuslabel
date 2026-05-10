@@ -79,20 +79,62 @@ function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
     return { success: false, error: 'NoCredentials', message: 'No verifiable credentials in presentation' };
   }
 
-  let employeeRoleCred    = null;
-  let securityClearanceCred = null;
+  const CLEARANCE_ORDER = ['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET', 'TOP-SECRET', 'TOP_SECRET'];
+
+  let employeeRoleCred      = null;
+  let securityClearanceCred = null; // highest-clearance trusted security VC found so far
 
   // Parse every credential in the VP
+  // Track credential subject DID for holder binding consistency check
+  let sharedSubjectDID  = null;
+  let credentialStatuses = [];
+
   for (let i = 0; i < vp.verifiableCredential.length; i++) {
     const decoded = decodeCredentialJWT(vp.verifiableCredential[i]);
     if (!decoded) continue;
+
+    // Subject consistency check: all VCs in a VP must belong to the same subject
+    const vcSubject = decoded.payload.sub || decoded.payload.vc?.credentialSubject?.id || null;
+    if (vcSubject) {
+      if (sharedSubjectDID === null) {
+        sharedSubjectDID = vcSubject;
+      } else if (vcSubject !== sharedSubjectDID) {
+        console.error(`[VPVerificationService] HOLDER BINDING: Mixed credential subjects detected — index ${i} subject=${vcSubject} differs from expected=${sharedSubjectDID}`);
+        return {
+          success: false,
+          error: 'MixedCredentialSubjects',
+          message: 'All credentials in a presentation must belong to the same subject'
+        };
+      }
+    }
+
+    // Extract StatusList2021 revocation pointer so callers can do a direct bitstring check
+    const cs = decoded.payload.vc?.credentialStatus || decoded.payload.credentialStatus || null;
+    if (cs?.statusListCredential && cs?.statusListIndex != null) {
+      credentialStatuses.push({
+        statusListCredential: cs.statusListCredential,
+        statusListIndex:      Number(cs.statusListIndex),
+        statusPurpose:        cs.statusPurpose || 'revocation'
+      });
+    }
 
     if (isEmployeeRoleCred(decoded.claims)) {
       console.log(`[VPVerificationService] Found EmployeeRole credential at index ${i}`);
       employeeRoleCred = decoded;
     } else if (isSecurityClearanceCred(decoded.claims)) {
-      console.log(`[VPVerificationService] Found SecurityClearance credential at index ${i}`);
-      securityClearanceCred = decoded;
+      console.log(`[VPVerificationService] Found SecurityClearance credential at index ${i} (issuer: ${decoded.issuer?.substring(0, 30)}...)`);
+      // Only keep if issuer is trusted; keep whichever has the highest clearance level
+      if (acceptedIssuerDIDs.includes(decoded.issuer)) {
+        const incoming = CLEARANCE_ORDER.indexOf((decoded.claims.clearanceLevel || '').toUpperCase());
+        const existing = securityClearanceCred
+          ? CLEARANCE_ORDER.indexOf((securityClearanceCred.claims.clearanceLevel || '').toUpperCase())
+          : -1;
+        if (incoming > existing) {
+          securityClearanceCred = decoded;
+        }
+      } else {
+        console.log(`[VPVerificationService] SecurityClearance at index ${i} has untrusted issuer — skipping`);
+      }
     } else {
       console.log(`[VPVerificationService] Unknown credential at index ${i}, claims:`, Object.keys(decoded.claims));
     }
@@ -121,15 +163,10 @@ function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
     };
   }
 
-  // Extract clearance level (optional)
-  let clearanceLevel = null;
-  if (securityClearanceCred) {
-    if (!acceptedIssuerDIDs.includes(securityClearanceCred.issuer)) {
-      console.warn(`[VPVerificationService] SecurityClearance has untrusted issuer: ${securityClearanceCred.issuer} — ignoring`);
-    } else {
-      clearanceLevel = securityClearanceCred.claims.clearanceLevel || null;
-      console.log(`[VPVerificationService] Clearance level from VC: ${clearanceLevel}`);
-    }
+  // Extract clearance level (already filtered to highest trusted level in the loop above)
+  const clearanceLevel = securityClearanceCred?.claims.clearanceLevel || null;
+  if (clearanceLevel) {
+    console.log(`[VPVerificationService] Clearance level from VC: ${clearanceLevel}`);
   }
 
   // Build viewer name from EmployeeRole claims (always present)
@@ -138,12 +175,14 @@ function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
     || null;
 
   return {
-    success:        true,
+    success:              true,
     companyDID,
     clearanceLevel,
     issuerDID,
     viewerName,
-    employeeRoleClaims: employeeRoleCred.claims
+    employeeRoleClaims:   employeeRoleCred.claims,
+    credentialSubjectDID: sharedSubjectDID,
+    credentialStatuses
   };
 }
 

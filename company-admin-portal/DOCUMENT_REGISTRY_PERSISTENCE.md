@@ -1,8 +1,8 @@
 # DocumentRegistry Persistence Architecture
 
-**Date**: 2025-12-02
+**Date**: 2025-12-02 (updated 2026-04-29)
 **Status**: ✅ Production Ready
-**Version**: 1.0
+**Version**: 1.1
 
 ## Table of Contents
 
@@ -10,10 +10,11 @@
 2. [Architectural Decision](#architectural-decision)
 3. [Implementation](#implementation)
 4. [Document Creation Workflow](#document-creation-workflow)
-5. [Document Access Workflow](#document-access-workflow)
-6. [Testing](#testing)
-7. [Security](#security)
-8. [Future Enhancements](#future-enhancements)
+5. [Document Versioning and Update Flow](#document-versioning-and-update-flow)
+6. [Document Access Workflow](#document-access-workflow)
+7. [Testing](#testing)
+8. [Security](#security)
+9. [Future Enhancements](#future-enhancements)
 
 ---
 
@@ -380,6 +381,66 @@ This section describes the **complete end-to-end workflow** for creating a docum
 ```
 
 **UI Update**: Admin sees success message with document DID
+
+---
+
+## Document Versioning and Update Flow
+
+### `resolveDocumentHighestLevel(document, documentDID)`
+
+**Location**: `company-admin-portal/server.js`, defined before the DOCUMENT UPDATE / VERSIONING ENDPOINTS section.
+
+**Purpose**: Resolves the true highest clearance level present in a document's content. Used to gate write access (edit/update) to documents — separate from the discovery-level check performed by the registry query.
+
+**Priority chain** (evaluated in order, first hit wins):
+
+1. `document.metadata.sectionMetadata` — stored at upload time for classified uploads; fast, no I/O required.
+2. Download + parse original DOCX from Iagon via `DocxClearanceParser` — authoritative; required when the document was uploaded via the plain-upload endpoint, which skips section metadata parsing.
+3. Fallback to `document.classificationLevel` — used when neither of the above is available.
+
+**Returns**: numeric level 0–4
+
+### classificationLevel vs. Content Level
+
+These are two distinct concepts that can legitimately differ:
+
+| Field | Purpose | Controls |
+|---|---|---|
+| `classificationLevel` | Discovery level | Who sees the document in their list (registry query) |
+| Content level | Highest paragraph style in DOCX | Who may write/update the document |
+
+**Example**: A document with `classificationLevel: CONFIDENTIAL` (visible to CONFIDENTIAL+ employees) can contain TOP_SECRET-styled paragraphs. An editor with only CONFIDENTIAL clearance would be able to discover and read their redacted view of the document, but would be **blocked from submitting edits** because the content level exceeds their clearance.
+
+### Document Update Endpoint Changes (2026-04-29)
+
+**`POST /api/document-update/request-edit`**:
+- Now calls `resolveDocumentHighestLevel()` before issuing an edit token.
+- Edit token issuance is blocked if the requesting editor's clearance is below the true content level.
+
+**`POST /api/document-update/submit`**:
+- Independently re-validates clearance via `resolveDocumentHighestLevel()` at submission time.
+- Defence-in-depth: prevents bypass via edit token replay or race conditions.
+
+### Audit Log: `DOCUMENT_EDITED` Entry Format
+
+The `DOCUMENT_EDITED` audit log entry now includes a `previousFileId` field recording the Iagon file ID that was replaced. This enables data recovery if the newly uploaded file is later found to be corrupt.
+
+```json
+{
+  "timestamp": "ISO8601",
+  "viewerName": "editor@company.test",
+  "documentDID": "did:prism:...",
+  "documentTitle": "...",
+  "companyDID": "did:prism:...",
+  "accessGranted": true,
+  "action": "DOCUMENT_EDITED",
+  "previousFileId": "iagon-file-id-before-update",
+  "newFileId": "iagon-file-id-after-update",
+  "versionId": "v1",
+  "contentHash": "sha256:...",
+  "clientIp": "..."
+}
+```
 
 ---
 

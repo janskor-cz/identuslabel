@@ -1,6 +1,7 @@
 import React from "react";
 import '../app/index.css';
 import { SecurityClearanceKeyManager } from "@/components/SecurityClearanceKeyManager";
+import { BackupRestore } from "@/components/BackupRestore";
 
 export default function KeyManagementPage() {
   return (
@@ -13,7 +14,9 @@ export default function KeyManagementPage() {
 
       <SecurityClearanceKeyManager />
 
-      <br /> <br /> <br /> <br /> <br /> <br />
+      <div className="mt-8">
+        <BackupRestore />
+      </div>
     </div>
   );
 }

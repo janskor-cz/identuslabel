@@ -85,16 +85,17 @@ class DocumentService {
       throw _serviceError('Iagon storage not configured — set IAGON_ACCESS_TOKEN and IAGON_NODE_ID');
     }
 
-    // Step 2: Encrypt file content
-    const { content: encryptedBuffer, encryptionInfo } = this.iagon.encryptContent(fileBuffer, level);
-
-    // Step 3: Upload encrypted file to Iagon
+    // Step 2+3: Encrypt and upload to Iagon in one call.
+    // uploadFile handles encryption internally — do NOT pre-encrypt separately, as that would
+    // double-encrypt: uploadFile always generates its own DEK for storage encryption.
     const ext      = ((originalFilename || '').split('.').pop() || 'dat').toLowerCase();
     const tempId   = crypto.randomUUID();
     const filename = `doc-${tempId}.${ext}`;
     console.log(`[DocumentService] Uploading file to Iagon: ${filename}`);
-    const iagonResult = await this.iagon.uploadFile(encryptedBuffer, filename);
+    const iagonResult = await this.iagon.uploadFile(fileBuffer, filename);
     console.log(`[DocumentService] Iagon file uploaded: fileId=${iagonResult.fileId}`);
+    // encryptionInfo holds the DEK for later decryption (stored in key manifest on Iagon)
+    const encryptionInfo = iagonResult.encryptionInfo;
 
     // Step 4: Upload key manifest (only if AES encryption was applied)
     let iagonEncManifestId = null;
@@ -322,9 +323,11 @@ class DocumentService {
         type: 'DocumentMetadata',
         serviceEndpoint: {
           iagonFileId,
-          clearanceLevel
+          clearanceLevel,
+          // Filename stored for MIME-type detection on access (extension preserved).
           // releasableTo and iagonEncManifestId omitted — stored in KeyManifest VC (VCKeyStore)
           // to keep service endpoint under PRISM's 300-char limit
+          ...(originalFilename ? { originalFilename } : {})
         }
       }
     ];

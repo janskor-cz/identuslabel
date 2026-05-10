@@ -18,6 +18,30 @@
 'use strict';
 
 const crypto = require('crypto');
+const zlib   = require('zlib');
+
+/**
+ * Check a single bit in a StatusList2021 credential bitstring.
+ * Fetches the credential URL (public, no API key) and checks the bit at `index`.
+ * Returns true if the credential is revoked, false otherwise (fail-open on error).
+ */
+async function checkStatusListBit(statusListCredentialUrl, index) {
+  try {
+    const res  = await fetch(statusListCredentialUrl, { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    const encoded = data.vc?.credentialSubject?.encodedList
+                 || data.credentialSubject?.encodedList
+                 || data.encodedList;
+    if (!encoded) return false;
+    const bitstring = zlib.gunzipSync(Buffer.from(encoded, 'base64'));
+    const byteIndex = Math.floor(index / 8);
+    const bitIndex  = 7 - (index % 8);
+    return byteIndex < bitstring.length && !!(bitstring[byteIndex] & (1 << bitIndex));
+  } catch (err) {
+    console.warn('[ReEncryptionService] checkStatusListBit failed (fail-open):', err.message);
+    return false;
+  }
+}
 const nacl   = require('tweetnacl');
 const fetch  = require('node-fetch');
 
@@ -275,6 +299,7 @@ async function processAccessRequest(opts) {
     clearanceLevelNum, clearanceLevelStr,
     ephemeralPublicKey,
     signature, ephemeralDID, timestamp, nonce,
+    credentialStatuses,
     docMeta,
     clientIp
   } = opts;
@@ -313,23 +338,16 @@ async function processAccessRequest(opts) {
     };
   }
 
-  // Step 5: Revocation check (best-effort — never blocks access on failure)
+  // Step 5: Revocation check via StatusList2021 bitstring (best-effort — fail-open on error).
+  // Uses the statusListCredential URL embedded in each VC — no agent API key needed.
   try {
-    const statusListUrl = `${config.ENTERPRISE_CLOUD_AGENT_URL}/credential-status/registry`;
-    const headers       = { 'Content-Type': 'application/json' };
-    if (config.ENTERPRISE_CLOUD_AGENT_API_KEY) headers['apikey'] = config.ENTERPRISE_CLOUD_AGENT_API_KEY;
-
-    // Search for any revoked credentials held by this requestor issued by issuerDID
-    const searchRes = await fetch(`${config.ENTERPRISE_CLOUD_AGENT_URL}/issued-credentials?subject=${encodeURIComponent(requestorDID)}`, {
-      method: 'GET', headers, timeout: 8000
-    });
-
-    if (searchRes.ok) {
-      const searchData = await searchRes.json();
-      const credentials = searchData.contents || searchData.items || searchData || [];
-      const revoked = Array.isArray(credentials) && credentials.some(c => c.protocolState === 'CredentialRevoked');
-      if (revoked) {
-        return { success: false, error: 'CREDENTIAL_REVOKED', message: 'Your security clearance credential has been revoked' };
+    for (const cs of (credentialStatuses || [])) {
+      if (cs?.statusListCredential && cs?.statusListIndex != null) {
+        const revoked = await checkStatusListBit(cs.statusListCredential, Number(cs.statusListIndex));
+        if (revoked) {
+          console.warn(`[ReEncryptionService] Credential revoked at statusListIndex=${cs.statusListIndex}`);
+          return { success: false, error: 'CREDENTIAL_REVOKED', message: 'Your security clearance credential has been revoked' };
+        }
       }
     }
   } catch (revErr) {
@@ -337,11 +355,12 @@ async function processAccessRequest(opts) {
   }
 
   // Step 6: Load DocumentKeyManifest VC from local store, verify, unwrap DEK.
-  // The VC is the authoritative source for the wrapped DEK and releasableTo.
-  // Fallback: if no VC is found but the DID still has iagonEncManifestId (legacy
-  // document not yet migrated), use the old Iagon manifest path.
-  let encryptionInfo = { algorithm: 'none' };
-  let vcContentHash  = null; // content hash from VC claims (authoritative for new docs)
+  // SSI-ALIGNED: server unwraps DEK for re-encryption to client only (32 bytes).
+  // The server NEVER decrypts the file — encryptedBlob is returned raw to the wallet.
+  let fileEncMeta  = { algorithm: 'AES-256-GCM', iv: null, authTag: null }; // file encryption params (no key — client decrypts)
+  let vcContentHash  = null;
+  let rawDEKForClient = null; // will be nacl.box'd for client, then zeroed immediately
+
   const vcRecord = vcStore.get(documentDID);
 
   if (vcRecord) {
@@ -359,7 +378,6 @@ async function processAccessRequest(opts) {
     const claims = verification.claims;
 
     // Releasability enforced from VC — single authoritative source.
-    // Empty array = no restriction (shouldn't happen for new docs, treated as open).
     if (companyDID !== null &&
         Array.isArray(claims.releasableTo) && claims.releasableTo.length > 0 &&
         !claims.releasableTo.includes(issuerDID)) {
@@ -371,22 +389,21 @@ async function processAccessRequest(opts) {
       };
     }
 
-    // CMK-unwrap the DEK
-    const rawDEK = cmkStore.unwrapDEK({
-      wrappedKey:       claims.wrappedKey,
-      iv:               claims.iv,
-      authTag:          claims.authTag,
+    // CMK-unwrap DEK — kept in scope only for nacl.box re-encryption below
+    rawDEKForClient = cmkStore.unwrapDEK({
+      wrappedKey:        claims.wrappedKey,
+      iv:                claims.iv,
+      authTag:           claims.authTag,
       wrappingAlgorithm: claims.wrappingAlgorithm
     }, claims.classificationLevel);
 
-    encryptionInfo = {
+    // File encryption metadata — client uses these to decrypt encryptedBlob
+    fileEncMeta = {
       algorithm: claims.fileAlgorithm || 'AES-256-GCM',
-      key:       rawDEK.toString('base64'),
       iv:        claims.fileIv,
       authTag:   claims.fileAuthTag
     };
-    rawDEK.fill(0); // zero DEK immediately
-    vcContentHash = claims.contentHash || null; // VC is authoritative for new docs
+    vcContentHash = claims.contentHash || null;
     console.log(`[ReEncryptionService] Key manifest loaded from VC store (level=${claims.classificationLevel})`);
 
   } else if (docMeta.iagonEncManifestId) {
@@ -396,10 +413,8 @@ async function processAccessRequest(opts) {
       const manifestBytes = await iagonClient.downloadFile(docMeta.iagonEncManifestId, { algorithm: 'none' });
       const manifest      = JSON.parse(manifestBytes.toString('utf8'));
 
-      // Deferred releasability: manifest carries releasableTo when DID omits it
       const manifestReleasableTo = Array.isArray(manifest.releasableTo) && manifest.releasableTo.length > 0
-        ? manifest.releasableTo
-        : null;
+        ? manifest.releasableTo : null;
 
       if (companyDID !== null && docMeta.releasableTo.length === 0 && manifestReleasableTo) {
         if (!manifestReleasableTo.includes(issuerDID)) {
@@ -409,18 +424,22 @@ async function processAccessRequest(opts) {
       }
 
       if (manifest.wrappingAlgorithm) {
-        const level  = docMeta.clearanceLevel || 'INTERNAL';
-        const rawDEK = cmkStore.unwrapDEK(manifest, level);
-        encryptionInfo = {
+        const level = docMeta.clearanceLevel || 'INTERNAL';
+        rawDEKForClient = cmkStore.unwrapDEK(manifest, level);
+        fileEncMeta = {
           algorithm: manifest.fileAlgorithm || 'AES-256-GCM',
-          key:       rawDEK.toString('base64'),
           iv:        manifest.fileIv,
           authTag:   manifest.fileAuthTag
         };
-        rawDEK.fill(0);
         console.log(`[ReEncryptionService] Legacy key manifest loaded (CMK-wrapped, level=${level})`);
       } else {
-        encryptionInfo = manifest;
+        // Plain legacy — DEK stored directly in manifest (oldest docs)
+        rawDEKForClient = Buffer.from(manifest.key, 'base64');
+        fileEncMeta = {
+          algorithm: manifest.algorithm || 'AES-256-GCM',
+          iv:        manifest.iv,
+          authTag:   manifest.authTag
+        };
         console.log(`[ReEncryptionService] Legacy key manifest loaded (plain)`);
       }
     } catch (manifestErr) {
@@ -429,46 +448,34 @@ async function processAccessRequest(opts) {
     }
   }
 
-  let content;
+  // Step 7: Re-encrypt DEK (32 bytes) for client's ephemeral X25519 key.
+  // SSI principle: server re-encrypts the KEY, never the file content.
+  let encrypted = null;
+  if (rawDEKForClient) {
+    encrypted = encryptForEphemeralKey(rawDEKForClient, ephemeralPublicKey);
+    rawDEKForClient.fill(0); // zero DEK immediately after nacl.box
+    rawDEKForClient = null;
+  }
+
+  // Step 8: Download raw encrypted blob from Iagon — NO decryption.
+  // The wallet decrypts this using the DEK it received above.
+  let encryptedBlob;
   try {
-    content = await iagonClient.downloadFile(docMeta.iagonFileId, encryptionInfo);
+    encryptedBlob = await iagonClient.downloadFile(docMeta.iagonFileId, { algorithm: 'none' });
   } catch (dlErr) {
     console.error('[ReEncryptionService] Iagon download failed:', dlErr.message);
     return { success: false, error: 'STORAGE_ERROR', message: 'Failed to retrieve document from storage' };
-  } finally {
-    // Task 4: Zero the DEK from memory after document is decrypted
-    if (encryptionInfo.key && encryptionInfo.key !== 'none') {
-      try { Buffer.from(encryptionInfo.key, 'base64').fill(0); } catch (_) {}
-    }
   }
 
-  // Task 6: Content integrity check
-  // Priority: VC claims hash (authoritative for new docs) > DID metadata hash (legacy)
-  const expectedHash = vcContentHash || docMeta.contentHash || null;
-  if (expectedHash) {
-    const actualHash = 'sha256:' + crypto.createHash('sha256').update(content).digest('hex');
-    if (actualHash !== expectedHash) {
-      console.error(`[ReEncryptionService] CONTENT_INTEGRITY_FAILED for ${documentDID.substring(0, 40)}...`);
-      console.error(`  Expected: ${expectedHash}`);
-      console.error(`  Actual:   ${actualHash}`);
-      return {
-        success: false,
-        error:   'CONTENT_INTEGRITY_FAILED',
-        message: 'Document content does not match on-chain hash — possible tampering detected'
-      };
-    }
-    console.log('[ReEncryptionService] ✅ Content integrity verified');
-  }
-
-  // Step 7: Generate copy ID for accountability
+  // Step 9: Generate copy ID for accountability audit trail
   const copyId   = crypto.randomUUID();
-  const copyHash = crypto.createHash('sha256').update(content).update(copyId).digest('hex');
-
-  // Step 8: Re-encrypt for client's ephemeral X25519 key
-  const encrypted = encryptForEphemeralKey(content, ephemeralPublicKey);
+  const copyHash = crypto.createHash('sha256').update(encryptedBlob).update(copyId).digest('hex');
 
   console.log(`[ReEncryptionService] Access GRANTED for ${documentDID.substring(0, 40)}... copyId=${copyId}`);
+  console.log(`[ReEncryptionService] Returning encrypted DEK + raw blob (${encryptedBlob.length} bytes) — wallet decrypts`);
 
+  // Content integrity check is performed CLIENT-SIDE after decryption.
+  // Server passes contentHash so wallet can verify: sha256(plaintext) === contentHash.
   return {
     success:          true,
     documentDID,
@@ -477,9 +484,17 @@ async function processAccessRequest(opts) {
     filename:         docMeta.originalFilename || docMeta.iagonFilename || 'document',
     mimeType:         getMimeType(docMeta),
     clearanceLevel:   docMeta.clearanceLevel,
-    ciphertext:       encrypted.ciphertext,
-    nonce:            encrypted.nonce,
-    serverPublicKey:  encrypted.serverPublicKey,
+    // DEK re-encrypted for client's ephemeral X25519 key (nacl.box)
+    ciphertext:       encrypted?.ciphertext      || null,
+    nonce:            encrypted?.nonce           || null,
+    serverPublicKey:  encrypted?.serverPublicKey || null,
+    // Raw encrypted file blob — client decrypts with DEK + fileIv + fileAuthTag
+    encryptedBlob:    encryptedBlob.toString('base64'),
+    fileIv:           fileEncMeta.iv,
+    fileAuthTag:      fileEncMeta.authTag,
+    fileAlgorithm:    fileEncMeta.algorithm,
+    // Hash for client-side integrity check after decryption
+    contentHash:      vcContentHash || docMeta.contentHash || null,
     accessedAt:       new Date().toISOString()
   };
 }

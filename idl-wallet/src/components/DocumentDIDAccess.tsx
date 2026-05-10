@@ -21,8 +21,10 @@ import { DocumentIcon, LockClosedIcon, UserCircleIcon, XIcon, CheckIcon, ShieldC
 import { getItem, setItem } from '@/utils/prefixedStorage';
 import { storeDocument, StoredDocument } from '@/utils/documentStorage';
 import { getCredentialType, getCredentialSubject } from '@/utils/credentialTypeDetector';
-import { requestDocumentAccess } from '@/utils/KeyAuthorityClient';
+import { requestVPGatedAccess, requestDocumentAccess, requestDocumentAccessDIDComm } from '@/utils/KeyAuthorityClient';
 import { SectionRenderer } from '@/components/SectionRenderer';
+
+const DOCUMENT_SERVICE_BASE = 'https://identuslabel.cz/document-service';
 
 interface DocumentDIDAccessProps {
   credentials: any[];
@@ -60,7 +62,7 @@ const IDENTITY_TYPES = new Set([
 ]);
 
 // Credential types eligible for VP presentation
-const PRESENTABLE_TYPES = new Set(['EmployeeRole', 'SecurityClearance']);
+const PRESENTABLE_TYPES = new Set(['EmployeeRole', 'SecurityClearance', 'SecurityClearanceGrant']);
 
 /** Build a label for a credential in the picker */
 function credentialPickerLabel(cred: any): { type: string; detail: string } {
@@ -69,7 +71,7 @@ function credentialPickerLabel(cred: any): { type: string; detail: string } {
   let detail = '';
   if (type === 'EmployeeRole') {
     detail = subject?.email || subject?.employeeId || subject?.role || '';
-  } else if (type === 'SecurityClearance') {
+  } else if (type === 'SecurityClearance' || type === 'SecurityClearanceGrant') {
     detail = subject?.clearanceLevel || subject?.holderName || '';
   }
   return { type, detail };
@@ -220,147 +222,9 @@ function extractIdentityFromCredential(
   return null;
 }
 
-/** Identity picker modal */
-function IdentityPickerModal({
-  credentials,
-  enterpriseDIDs,
-  storedDID,
-  onSelect,
-  onClose,
-}: {
-  credentials: any[];
-  enterpriseDIDs: string[];
-  storedDID: string | null;
-  onSelect: (id: string) => void;
-  onClose: () => void;
-}) {
-  const [selected, setSelected] = useState<string>(storedDID || '');
-  const [manual, setManual] = useState('');
-
-  // Build list of identity options
-  const options: { label: string; value: string; type: string }[] = [];
-
-  // Enterprise agent DIDs (highest priority — directly usable as employeeId)
-  for (const did of enterpriseDIDs) {
-    if (options.some(o => o.value === did)) continue;
-    const short = did.length > 50 ? `${did.slice(0, 22)}…${did.slice(-16)}` : did;
-    options.push({ label: short, value: did, type: 'Enterprise PRISM DID' });
-  }
-
-  // Stored personal wallet PRISM DID
-  if (storedDID && !options.some(o => o.value === storedDID)) {
-    const short = storedDID.length > 50
-      ? `${storedDID.slice(0, 22)}…${storedDID.slice(-16)}`
-      : storedDID;
-    options.push({ label: short, value: storedDID, type: 'Personal PRISM DID' });
-  }
-
-  // DIDs extracted from credential subjects (pass storedDID as personal fallback)
-  for (const cred of credentials) {
-    const type = getCredentialType(cred);
-    if (!IDENTITY_TYPES.has(type)) continue;
-    const identity = extractIdentityFromCredential(cred, storedDID);
-    if (!identity || options.some(o => o.value === identity.value)) continue;
-    options.push({ label: identity.label, value: identity.value, type });
-  }
-
-  const handleConfirm = () => {
-    const val = selected || manual.trim();
-    if (val) onSelect(val);
-  };
-
-  return (
-    <div
-      className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[10000] flex items-center justify-center"
-      onClick={onClose}
-    >
-      <div
-        className="bg-slate-900 border border-slate-700/50 rounded-2xl p-5 max-w-md w-full mx-4 shadow-2xl"
-        onClick={e => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <UserCircleIcon className="w-5 h-5 text-cyan-400" />
-            <h2 className="text-base font-semibold text-white">Select Your Identity</h2>
-          </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white">
-            <XIcon className="w-4 h-4" />
-          </button>
-        </div>
-
-        <p className="text-xs text-slate-400 mb-4">
-          Your identity is used to find your enterprise wallet connection for credential verification.
-        </p>
-
-        {/* Credential options */}
-        {options.length > 0 ? (
-          <div className="space-y-2 mb-4">
-            {options.map(opt => (
-              <button
-                key={opt.value}
-                onClick={() => setSelected(opt.value)}
-                className={`w-full text-left p-3 rounded-xl border transition-all ${
-                  selected === opt.value
-                    ? 'bg-cyan-500/20 border-cyan-500/50'
-                    : 'bg-slate-800/50 border-slate-700/50 hover:border-slate-500/50'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="min-w-0">
-                    <div className="text-xs text-cyan-400 font-medium mb-0.5">{opt.type}</div>
-                    <div className="text-xs font-mono text-slate-300 truncate">{opt.label}</div>
-                  </div>
-                  {selected === opt.value && (
-                    <CheckIcon className="w-4 h-4 text-cyan-400 flex-shrink-0 ml-2" />
-                  )}
-                </div>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 mb-4">
-            <p className="text-xs text-amber-300">No identity credentials detected in wallet.</p>
-          </div>
-        )}
-
-        {/* Manual fallback */}
-        <div className="mb-4">
-          <div className="text-xs text-slate-500 mb-1.5">Or enter manually:</div>
-          <input
-            type="text"
-            value={manual}
-            onChange={e => { setManual(e.target.value); setSelected(''); }}
-            placeholder="enterprise email or did:prism:…"
-            className="w-full text-xs font-mono bg-slate-800/50 border border-slate-600 rounded-lg px-3 py-2 text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
-          />
-        </div>
-
-        {/* Actions */}
-        <div className="flex gap-2">
-          <button
-            onClick={onClose}
-            className="flex-1 px-4 py-2 bg-slate-700/50 border border-slate-600 text-slate-300 text-sm rounded-xl hover:bg-slate-600/50 transition-all"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleConfirm}
-            disabled={!selected && !manual.trim()}
-            className="flex-1 px-4 py-2 bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-sm font-medium rounded-xl hover:bg-cyan-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-          >
-            Use this identity
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID, autoTrigger, onDocumentSaved }: DocumentDIDAccessProps) {
   const [did, setDid]                         = useState(initialDID || '');
   const [employeeId, setEmployeeId]           = useState<string | null>(null);
-  const [showPicker, setShowPicker]           = useState(false);
   const [showCredPicker, setShowCredPicker]   = useState(false);
   const [phase, setPhase]                     = useState<Phase>('idle');
   const [status, setStatus]                   = useState('');
@@ -465,23 +329,40 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
           }
 
           setPhase('decrypting');
-          setStatus('Decrypting…');
+          setStatus('Decrypting document…');
 
-          const { ciphertext, nonce: encNonce, senderPublicKey } = completeJson.encryptedDocument;
-          const decrypted = nacl.box.open(
-            new Uint8Array(Buffer.from(ciphertext,      'base64')),
-            new Uint8Array(Buffer.from(encNonce,        'base64')),
-            new Uint8Array(Buffer.from(senderPublicKey, 'base64')),
+          // ── SSI-aligned two-step decrypt (same as VP-gated path) ─────────────
+          // Step 1: nacl.box.open → raw DEK (32 bytes)
+          const { ciphertext: dekCT, nonce: dekNonce, senderPublicKey } = completeJson.encryptedDEK;
+          const rawDEK = nacl.box.open(
+            new Uint8Array(Buffer.from(dekCT,          'base64')),
+            new Uint8Array(Buffer.from(dekNonce,       'base64')),
+            new Uint8Array(Buffer.from(senderPublicKey,'base64')),
             kp.secretKey
           );
-          kp.secretKey.fill(0); // PFS
+          kp.secretKey.fill(0);
           ephemeralKpRef.current = null;
+          if (!rawDEK) throw new Error('DEK decryption failed');
 
-          if (!decrypted) throw new Error('Decryption failed');
+          // Step 2: AES-256-GCM decrypt the Iagon blob
+          const encBlobBytes  = new Uint8Array(Buffer.from(completeJson.encryptedBlob, 'base64'));
+          const fileAuthBytes = new Uint8Array(Buffer.from(completeJson.fileAuthTag,   'base64'));
+          const combined      = new Uint8Array(encBlobBytes.length + fileAuthBytes.length);
+          combined.set(encBlobBytes);
+          combined.set(fileAuthBytes, encBlobBytes.length);
+
+          const dekKey  = await window.crypto.subtle.importKey('raw', rawDEK, 'AES-GCM', false, ['decrypt']);
+          (rawDEK as Uint8Array).fill(0);
+          const plainBuf = await window.crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv: new Uint8Array(Buffer.from(completeJson.fileIv, 'base64')) },
+            dekKey,
+            combined
+          );
+          const decrypted = new Uint8Array(plainBuf);
 
           const filename = completeJson.filename || 'document';
           const mime     = completeJson.mimeType  || 'application/octet-stream';
-          const blob     = new Blob([decrypted as unknown as BlobPart], { type: mime });
+          const blob     = new Blob([decrypted], { type: mime });
           const url      = URL.createObjectURL(blob);
           const a        = document.createElement('a');
           a.href = url; a.download = filename;
@@ -517,9 +398,10 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
       return;
     }
 
-    // If no identity detected yet, open the identity picker
+    // If no identity detected yet, surface an error — automatic detection failed
     if (!empId) {
-      setShowPicker(true);
+      setStatus('No identity found in wallet. Ensure you have an EmployeeRole or SecurityClearance credential.');
+      setPhase('error');
       return;
     }
 
@@ -536,37 +418,92 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
 
     reset();
     setPhase('initiating');
-    setStatus('Requesting document access from Key Authority…');
+    setStatus('Resolving document DID…');
 
     try {
+      // ── Step 0: Resolve DID metadata to discover which access endpoint to use ──
+      // The DID may advertise a "document-access-gate" service (company-admin portal)
+      // that applies clearance-based redaction before delivery.  If present, we
+      // MUST use it.  Falling back to the raw document-service /access endpoint
+      // skips redaction and would expose content above the holder's clearance.
+      const metaRes = await fetch(
+        `${DOCUMENT_SERVICE_BASE}/documents/${encodeURIComponent(documentDID)}`
+      );
+      if (!metaRes.ok) {
+        const metaErr = await metaRes.json().catch(() => ({}));
+        throw new Error(metaErr.error || `DID resolution failed (${metaRes.status})`);
+      }
+      const docMeta = await metaRes.json();
+      // challengeEndpoint is present when the DID has a "document-access-gate" service
+      // (company-admin portal, applies DocxRedactionService)
+      const challengeEndpoint: string | undefined = docMeta.challengeEndpoint;
+
       const kp = nacl.box.keyPair();
       ephemeralKpRef.current = kp;
 
-      // ── Access-gate flow: challenge → VP presentation ─────────────────────────
-      const accessResponse = await requestDocumentAccess(documentDID, overrideCreds, kp);
+      let decrypted: Uint8Array;
+      let filename: string;
+      let mimeType: string;
+      let userClearance: string;
 
-      setPhase('decrypting');
-      const { ciphertext, nonce, serverPublicKey, filename, mimeType } = accessResponse.encryptedDocument;
-      setStatus(`Decrypting document…`);
+      if (challengeEndpoint) {
+        // ── Company-admin access gate: DIDComm present-proof (holder-binding enforced) ─
+        // Server sends a DIDComm RequestPresentation to the wallet via the established
+        // employee connection. The UnifiedProofRequestModal will pop up for the user to
+        // approve. Once approved the server verifies the cryptographically-bound VP and
+        // returns the redacted document encrypted with our ephemeral key.
+        setPhase('awaiting_wallet');
+        setStatus(
+          enterpriseDIDs.length > 0
+            ? '⚠ Check your enterprise wallet — approve the incoming credential request there.'
+            : '⚠ Waiting for DIDComm proof request — please approve in the credential modal…'
+        );
 
-      const decrypted = nacl.box.open(
-        new Uint8Array(Buffer.from(ciphertext,      'base64')),
-        new Uint8Array(Buffer.from(nonce,           'base64')),
-        new Uint8Array(Buffer.from(serverPublicKey, 'base64')),
-        kp.secretKey
-      );
+        const accessBase = challengeEndpoint.replace(/\/challenge(\?.*)?$/, '').replace(/\/api\/access-gate$/, '');
+        const response = await requestDocumentAccessDIDComm(
+          documentDID,
+          overrideCreds,
+          kp,
+          { baseUrl: accessBase }
+        );
 
-      // PFS
-      kp.secretKey.fill(0);
-      ephemeralKpRef.current = null;
+        // Decrypt nacl.box: nacl.box.open(ct, nonce, serverPubKey, walletSecretKey)
+        const ct      = new Uint8Array(Buffer.from(response.encryptedDocument.ciphertext,    'base64'));
+        const nonce   = new Uint8Array(Buffer.from(response.encryptedDocument.nonce,          'base64'));
+        const pubKey  = new Uint8Array(Buffer.from(response.encryptedDocument.serverPublicKey, 'base64'));
+        const plain   = nacl.box.open(ct, nonce, pubKey, kp.secretKey);
+        kp.secretKey.fill(0);
+        ephemeralKpRef.current = null;
+        if (!plain) throw new Error('Document decryption failed');
 
-      if (!decrypted) throw new Error('Decryption failed — wrong key or corrupted data');
+        decrypted    = plain;
+        filename     = response.encryptedDocument.filename;
+        mimeType     = response.encryptedDocument.mimeType;
+        userClearance = response.clearanceLevel;
 
-      const isDocx = mimeType.includes('wordprocessingml') || filename?.endsWith('.docx');
-      const docTitle = accessResponse.documentMetadata?.title || filename || 'Document';
-      const docClassification = accessResponse.documentMetadata?.overallClassification ||
-        accessResponse.encryptedDocument.classificationLevel || 'UNCLASSIFIED';
-      const userClearance = accessResponse.clearanceLevel || 'INTERNAL';
+      } else {
+        // ── Fallback: document-service VP-gated access (unredacted) ──────────────
+        setPhase('decrypting');
+        setStatus('Decrypting document…');
+
+        const result = await requestVPGatedAccess(
+          documentDID,
+          docMeta.accessEndpoint || `${DOCUMENT_SERVICE_BASE}/access`,
+          overrideCreds,
+          kp
+        );
+        kp.secretKey.fill(0);
+        ephemeralKpRef.current = null;
+
+        decrypted    = result.plaintext;
+        filename     = result.filename;
+        mimeType     = result.mimeType;
+        userClearance = result.clearanceLevel;
+      }
+
+      const isDocx = mimeType?.includes('wordprocessingml') || filename?.endsWith('.docx');
+      const docTitle = filename || documentDID.split(':').pop() || 'Document';
+      const docClassification = userClearance || 'INTERNAL';
 
       // ── Store in "My Documents" ───────────────────────────────────────────────
       try {
@@ -625,14 +562,7 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
       setPhase('error');
       setStatus(err.message || 'Unknown error');
     }
-  }, [did, employeeId, reset, startPolling]);
-
-  const handleIdentitySelected = useCallback((id: string) => {
-    setEmployeeId(id);
-    setShowPicker(false);
-    // After identity picked, show credential picker next
-    setShowCredPicker(true);
-  }, []);
+  }, [did, employeeId, enterpriseDIDs, reset, startPolling]);
 
   const handleCredsSelected = useCallback((selected: any[]) => {
     selectedCredsRef.current = selected;
@@ -660,15 +590,6 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
 
   return (
     <>
-      {showPicker && (
-        <IdentityPickerModal
-          credentials={credentials}
-          enterpriseDIDs={enterpriseDIDs}
-          storedDID={storedDIDRef.current}
-          onSelect={handleIdentitySelected}
-          onClose={() => setShowPicker(false)}
-        />
-      )}
       {showCredPicker && (
         <CredentialPickerModal
           credentials={credentials}
@@ -713,36 +634,13 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
         </div>
 
         {/* Identity pill */}
-        <div className="flex items-center gap-2">
-          <UserCircleIcon className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-          {identityDisplay ? (
+        {identityDisplay && (
+          <div className="flex items-center gap-2">
+            <UserCircleIcon className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
             <span className="text-xs text-slate-400">
               Identity:{' '}
               <span className="font-mono text-slate-300">{identityDisplay}</span>
-              {!busy && (
-                <button
-                  onClick={() => setShowPicker(true)}
-                  className="ml-2 text-cyan-500 hover:text-cyan-300 underline"
-                >
-                  change
-                </button>
-              )}
             </span>
-          ) : (
-            <button
-              onClick={() => setShowPicker(true)}
-              className="text-xs text-amber-400 hover:text-amber-300 underline"
-            >
-              Select identity…
-            </button>
-          )}
-        </div>
-
-        {phase === 'awaiting_wallet' && (
-          <div className="mt-2 p-2 bg-amber-500/10 border border-amber-500/30 rounded-lg">
-            <p className="text-xs text-amber-300 font-medium">
-              ⚠ Check your enterprise wallet — approve the incoming credential request there.
-            </p>
           </div>
         )}
 

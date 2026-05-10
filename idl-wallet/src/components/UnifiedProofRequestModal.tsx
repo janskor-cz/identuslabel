@@ -44,7 +44,7 @@ import { useMountedApp, useAppSelector } from '@/reducers/store';
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { sendVerifiablePresentation, declinePresentation } from '@/actions';
 import { approveProofRequest, rejectProofRequest } from '@/actions/enterpriseAgentActions';
-import { verifyCredentialStatus, CredentialStatus } from '@/utils/credentialStatus';
+import { verifyCredentialStatus, fetchStatusList, decompressBitstring, checkBitAtIndex, CredentialStatus } from '@/utils/credentialStatus';
 import { extractCredentialDisplayName } from '@/utils/credentialNaming';
 import { getSchemaDisplayName, matchesSchema } from '@/utils/schemaMapping';
 import { getCredentialType } from '@/utils/credentialTypeDetector';
@@ -143,12 +143,19 @@ export const UnifiedProofRequestModal: React.FC = () => {
     state => state.enterpriseAgent?.activeConfiguration?.enterpriseAgentUrl
   );
 
+  // Enterprise client for presentation status polling
+  const enterpriseClient = useAppSelector(
+    state => state.enterpriseAgent?.client
+  );
+
   // Component state
   const [selectedCredentialIds, setSelectedCredentialIds] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revocationWarning, setRevocationWarning] = useState<string>('');
   const [validCredentials, setValidCredentials] = useState<UnifiedCredential[]>([]);
+  // Tracks a submitted enterprise presentation so we can poll its result and show errors
+  const [pendingVerificationId, setPendingVerificationId] = useState<string | null>(null);
 
   /**
    * Merge proof requests from both sources into unified queue
@@ -328,7 +335,29 @@ export const UnifiedProofRequestModal: React.FC = () => {
               };
             }
           } else {
-            // Enterprise credentials - trust Cloud Agent state
+            // Enterprise credentials - check actual revocation via status list bitstring
+            try {
+              const cred = unifiedCred.credential; // EnterpriseCredential object
+              if (cred.credential) {
+                const jwtStr = atob(cred.credential);
+                const parts = jwtStr.split('.');
+                if (parts.length >= 2) {
+                  const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+                  const cs = payload.vc?.credentialStatus;
+                  if (cs?.statusListCredential && cs?.statusListIndex != null) {
+                    const slData = await fetchStatusList(cs.statusListCredential);
+                    const bits = decompressBitstring(slData.credentialSubject?.encodedList || '');
+                    const revoked = checkBitAtIndex(bits, Number(cs.statusListIndex)) === 1;
+                    return {
+                      unifiedCred,
+                      status: { revoked, suspended: false, statusPurpose: revoked ? 'revocation' : 'valid', checkedAt: new Date().toISOString() } as CredentialStatus
+                    };
+                  }
+                }
+              }
+            } catch {
+              // If check fails, fall through to trust Cloud Agent state
+            }
             return {
               unifiedCred,
               status: { revoked: false, suspended: false, statusPurpose: 'valid', checkedAt: new Date().toISOString() } as CredentialStatus
@@ -364,12 +393,12 @@ export const UnifiedProofRequestModal: React.FC = () => {
         const filteredPersonalCreds = filterCredentialsForProofRequest(personalCreds, requestPurpose);
         console.log(`🎯 [UNIFIED] Purpose filtering: ${personalCreds.length} -> ${filteredPersonalCreds.length} personal credentials`);
 
-        // Rebuild unified credentials list with filtered personal credentials
+        // Rebuild unified credentials list with filtered personal credentials only
         filteredCreds = validCreds.filter(unifiedCred => {
           if (unifiedCred.source === 'personal') {
             return filteredPersonalCreds.some(fc => fc.id === unifiedCred.credential.id);
           }
-          return true; // Keep enterprise credentials
+          return false; // Personal request — exclude enterprise credentials
         });
 
         // Then apply schema filtering if schema ID specified
@@ -390,7 +419,12 @@ export const UnifiedProofRequestModal: React.FC = () => {
         });
       }
 
-      setValidCredentials(filteredCreds);
+      // Deduplicate credentials by content: same issuer + displayName means the same logical
+      // credential even when re-issued with a different jti (credential.id differs per issuance)
+      const dedupeKey = (c: UnifiedCredential) =>
+        `${c.source}|${c.issuer}|${c.displayName}`;
+      const uniqueCreds = Array.from(new Map(filteredCreds.map(c => [dedupeKey(c), c])).values());
+      setValidCredentials(uniqueCreds);
 
       // Set warning if credentials were filtered
       const totalFiltered = unifiedCredentials.length - filteredCreds.length;
@@ -421,8 +455,75 @@ export const UnifiedProofRequestModal: React.FC = () => {
     filterCredentials();
   }, [unifiedRequests.length, unifiedCredentials.length]);
 
-  // Don't render if no pending requests
-  if (unifiedRequests.length === 0) return null;
+  // Poll the submitted enterprise presentation to detect PresentationFailed/Rejected
+  useEffect(() => {
+    if (!pendingVerificationId || !enterpriseClient) return;
+    const TERMINAL_FAILED = ['PresentationFailed', 'PresentationRejected', 'RequestRejected'];
+    const TERMINAL_OK = ['PresentationVerified'];
+    let attempts = 0;
+    const MAX_ATTEMPTS = 6; // ~12 seconds total
+    const interval = setInterval(async () => {
+      attempts++;
+      try {
+        const res = await (enterpriseClient as any).getPresentation(pendingVerificationId);
+        if (res.success && res.data) {
+          const status = res.data.status;
+          if (TERMINAL_FAILED.includes(status)) {
+            clearInterval(interval);
+            setPendingVerificationId(null);
+            setError(`Credential verification failed (${status}). The selected credential may be revoked or invalid.`);
+            return;
+          }
+          if (TERMINAL_OK.includes(status) || attempts >= MAX_ATTEMPTS) {
+            clearInterval(interval);
+            setPendingVerificationId(null);
+          }
+        } else if (attempts >= MAX_ATTEMPTS) {
+          clearInterval(interval);
+          setPendingVerificationId(null);
+        }
+      } catch {
+        if (attempts >= MAX_ATTEMPTS) {
+          clearInterval(interval);
+          setPendingVerificationId(null);
+        }
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [pendingVerificationId, enterpriseClient]);
+
+  // Don't render if no pending requests AND not awaiting verification result
+  if (unifiedRequests.length === 0 && !pendingVerificationId && !error) return null;
+
+  // Show a minimal overlay while polling for verification result or displaying post-submit error
+  if (unifiedRequests.length === 0) {
+    return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[10001] flex items-center justify-center">
+        <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 max-w-sm w-full mx-4 text-center">
+          {pendingVerificationId && !error && (
+            <>
+              <div className="text-blue-400 text-4xl mb-3">⏳</div>
+              <p className="text-white font-medium">Verifying credentials...</p>
+              <p className="text-gray-400 text-sm mt-1">Waiting for the verifier to confirm your presentation.</p>
+            </>
+          )}
+          {error && (
+            <>
+              <div className="text-red-400 text-4xl mb-3">✗</div>
+              <p className="text-white font-medium mb-2">Verification Failed</p>
+              <p className="text-red-300 text-sm mb-4">{error}</p>
+              <button
+                onClick={() => setError(null)}
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm"
+              >
+                Dismiss
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   const currentRequest = unifiedRequests[0];
   const connectionName = getConnectionName(currentRequest);
@@ -468,9 +569,11 @@ export const UnifiedProofRequestModal: React.FC = () => {
           presentationId: currentRequest.id,
           proofId: credentialRecordIds
         }));
+        // Poll for verification result so we can show an error if the VP is rejected
+        setPendingVerificationId(currentRequest.id);
       }
 
-      // Modal auto-closes when request removed from queue
+      // Modal auto-closes when request removed from queue (or pendingVerificationId clears)
       setSelectedCredentialIds([]);
     } catch (err) {
       console.error(`❌ [UnifiedModal] Failed to approve proof request:`, err);

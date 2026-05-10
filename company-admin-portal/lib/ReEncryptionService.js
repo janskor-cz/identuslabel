@@ -33,6 +33,7 @@ const DocumentRegistry = require('./DocumentRegistry');
 const StatusListService = require('./StatusListService');
 const { IagonStorageClient } = require('./IagonStorageClient');
 const cmk = require('./ClassificationKeyManager');
+const DocxRedactionService = require('./DocxRedactionService');
 
 // Nonce cache for replay attack prevention (in production, use Redis)
 const nonceCache = new Map();
@@ -267,6 +268,31 @@ class ReEncryptionService {
                     error: 'STORAGE_ERROR',
                     message: 'Failed to retrieve document from storage'
                 };
+            }
+
+            // Step 7.5: Apply clearance-based redaction for DOCX documents
+            // Mirrors the same logic used in /api/access-gate/present so that
+            // employees who access documents via the wallet bridge (DOCUMENT_ACCESS_REQUEST)
+            // get the same redacted content as employees who go through the VP challenge flow.
+            const clearanceLevelLabel = this.getLevelLabel(clearanceLevel);
+            const isDocx = document.metadata?.sourceFormat === 'docx' ||
+                           !!document.iagonStorage.originalDocxFileId ||
+                           (document.iagonStorage.filename || '').toLowerCase().endsWith('.docx');
+            if (isDocx) {
+                try {
+                    const redacted = await DocxRedactionService.applyRedactions(
+                        content,
+                        clearanceLevelLabel,
+                        document.metadata?.sectionMetadata || []
+                    );
+                    // applyRedactions returns Buffer or string; normalise to Buffer
+                    content = Buffer.isBuffer(redacted) ? redacted : Buffer.from(redacted, 'utf8');
+                    console.log(`[ReEncryptionService] DOCX redaction applied for clearance: ${clearanceLevelLabel}`);
+                } catch (redactErr) {
+                    // Non-fatal: log and continue with unredacted content so access
+                    // is not completely broken, but warn loudly.
+                    console.error(`[ReEncryptionService] ⚠ DOCX redaction failed — serving unredacted: ${redactErr.message}`);
+                }
             }
 
             // Step 8: Generate unique copy ID for accountability
@@ -663,8 +689,10 @@ class ReEncryptionService {
         return {
             documentDID,
             filename: document.iagonStorage?.filename || 'document',
+            title: document.title || document.iagonStorage?.filename || null,
             classificationLevel: document.classificationLevel,
             releasableTo: document.releasableTo || [],
+            createdBy: document.createdBy || null,
             createdAt: document.createdAt,
             updatedAt: document.updatedAt,
             hasIagonStorage: !!document.iagonStorage?.fileId,

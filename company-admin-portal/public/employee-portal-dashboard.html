@@ -169,16 +169,6 @@
             background: #48bb78;
         }
 
-        /* Wallet Selector */
-        .wallet-option.active {
-            background: #667eea !important;
-            color: white !important;
-        }
-
-        .wallet-option:hover {
-            background: #edf2f7;
-        }
-
         /* Training Status */
         .training-status {
             display: flex;
@@ -268,46 +258,6 @@
 
         .expiry-value.expired {
             color: #e53e3e;
-        }
-
-        /* Credentials Section */
-        .credentials-placeholder {
-            text-align: center;
-            padding: 30px;
-            background: #f7fafc;
-            border-radius: 8px;
-        }
-
-        .credentials-placeholder-icon {
-            font-size: 48px;
-            margin-bottom: 15px;
-        }
-
-        .credentials-placeholder-text {
-            font-size: 14px;
-            color: #718096;
-            margin-bottom: 20px;
-        }
-
-        .view-credentials-btn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: transform 0.2s;
-        }
-
-        .view-credentials-btn:hover {
-            transform: translateY(-2px);
-        }
-
-        .view-credentials-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
         }
 
         /* Loading State */
@@ -568,6 +518,17 @@
         .doc-classification.SECRET      { background: #e9d5ff; color: #4c1d95; }
         .doc-classification.TOP-SECRET  { background: #fee2e2; color: #991b1b; }
         .doc-classification.UNCLASSIFIED { background: #e2e8f0; color: #4a5568; }
+
+        /* Drag-and-drop */
+        .doc-icon-card[draggable="true"] { cursor: grab; }
+        .doc-icon-card[draggable="true"]:active { cursor: grabbing; }
+        .doc-icon-card.dragging { opacity: 0.4; transform: scale(0.96); }
+        .doc-icon-card.folder-drag-over {
+            border-color: #4299e1;
+            background: #ebf8ff;
+            box-shadow: 0 0 0 3px rgba(66,153,225,0.35);
+            transform: scale(1.08);
+        }
 
         /* Keep old .documents-list styles for any legacy references */
         .documents-list { display: grid; gap: 15px; }
@@ -846,31 +807,21 @@
                     <div class="profile-label">Security Clearance</div>
                     <div class="profile-value" id="clearanceContainer">
                         <span id="clearanceLevel">Loading...</span>
-                        <button id="verifyClearanceBtn" class="copy-btn" onclick="openClearanceModal()" style="display: none; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+                        <button id="verifyClearanceBtn" class="copy-btn" onclick="openClearanceModal()" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
                             Verify Clearance
                         </button>
                     </div>
                 </div>
 
                 <!-- Clearance Verification Modal - DIDComm Flow -->
-                <div id="clearanceVerificationModal" class="hidden" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;">
+                <div id="clearanceVerificationModal" class="hidden" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 1000;">
                     <div class="modal-content" style="background: white; padding: 30px; border-radius: 12px; max-width: 500px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.2);">
                         <h3 style="margin: 0 0 20px; color: #2d3748; font-size: 20px;">Verify Security Clearance via DIDComm</h3>
 
                         <div id="clearanceVerificationContent">
                             <p style="color: #718096; margin-bottom: 20px;">
-                                TechCorp will send a proof request directly to your personal wallet via DIDComm to verify your Security Clearance.
+                                A proof request will be sent to your wallet via DIDComm to verify your Security Clearance.
                             </p>
-
-                            <div style="background: #edf2f7; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
-                                <strong style="color: #2d3748; display: block; margin-bottom: 10px;">How it works:</strong>
-                                <ol style="color: #718096; font-size: 14px; margin: 0; padding-left: 20px; line-height: 1.8;">
-                                    <li>Click "Start Verification" below</li>
-                                    <li>A proof request will be sent to your Alice Wallet</li>
-                                    <li>Open <a href="https://identuslabel.cz/alice" target="_blank" style="color: #667eea;">Alice Wallet</a> and approve the request</li>
-                                    <li>Your clearance level will be verified automatically</li>
-                                </ol>
-                            </div>
 
                             <div style="background: #f0fff4; border: 1px solid #9ae6b4; border-radius: 8px; padding: 12px; margin-bottom: 15px;">
                                 <div style="display: flex; align-items: center; gap: 8px;">
@@ -885,7 +836,7 @@
                         <div id="clearanceVerificationLoading" class="hidden" style="text-align: center; padding: 20px;">
                             <div class="spinner" style="margin: 0 auto 15px;"></div>
                             <p style="color: #718096;" id="clearanceLoadingMessage">Sending proof request to your wallet...</p>
-                            <p style="color: #a0aec0; font-size: 13px; margin-top: 10px;" id="clearanceLoadingHint">Please check your Alice Wallet for incoming proof request</p>
+                            <p style="color: #a0aec0; font-size: 13px; margin-top: 10px;" id="clearanceLoadingHint">Please check your wallet for the incoming proof request</p>
                         </div>
 
                         <div id="clearanceVerificationSuccess" class="hidden" style="text-align: center; padding: 20px;">
@@ -937,24 +888,6 @@
                         <div class="expiry-value" id="daysUntilExpiry">-</div>
                     </div>
                 </div>
-            </div>
-        </div>
-
-        <!-- Credentials Card (Full Width) -->
-        <div class="dashboard-card">
-            <div class="card-header">
-                <div class="card-icon credentials">🎫</div>
-                <h2 class="card-title">My Credentials</h2>
-            </div>
-
-            <div class="credentials-placeholder">
-                <div class="credentials-placeholder-icon">🔐</div>
-                <div class="credentials-placeholder-text">
-                    View all your verifiable credentials including training certificates, security clearances, and more.
-                </div>
-                <button class="view-credentials-btn" onclick="viewCredentials()" disabled>
-                    View All Credentials (Coming Soon)
-                </button>
             </div>
         </div>
 
@@ -1334,45 +1267,6 @@
             </div>
         </div>
 
-        <!-- Wallet Settings Card -->
-        <div class="dashboard-card" style="margin-top: 20px; background: #f7fafc;">
-            <div class="card-header">
-                <div class="card-icon" style="background: linear-gradient(135deg, #718096 0%, #4a5568 100%);">&#9881;</div>
-                <h2 class="card-title">Wallet Settings</h2>
-            </div>
-
-            <div style="padding: 10px 0;">
-                <label style="display: block; font-size: 13px; font-weight: 600; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">
-                    Select Wallet for Document Access
-                </label>
-
-                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 15px;">
-                    <button type="button" class="wallet-option" data-path="/wallet"
-                            onclick="setWalletPath('/wallet')"
-                            style="padding: 10px 20px; border: 2px solid #667eea; border-radius: 8px; background: white; cursor: pointer; font-size: 14px; transition: all 0.2s;">
-                        IDL Wallet (/wallet)
-                    </button>
-                    <button type="button" class="wallet-option" data-path="/alice"
-                            onclick="setWalletPath('/alice')"
-                            style="padding: 10px 20px; border: 2px solid #667eea; border-radius: 8px; background: white; cursor: pointer; font-size: 14px; transition: all 0.2s;">
-                        Alice Wallet (/alice)
-                    </button>
-                </div>
-
-                <div style="display: flex; gap: 10px; align-items: center;">
-                    <input type="text" id="customWalletPath" placeholder="/custom-wallet"
-                           style="flex: 1; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;">
-                    <button type="button" onclick="setWalletPath(document.getElementById('customWalletPath').value)"
-                            style="background: #667eea; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; font-size: 14px;">
-                        Use Custom
-                    </button>
-                </div>
-
-                <p style="margin-top: 10px; font-size: 12px; color: #718096;">
-                    Current: <strong id="currentWalletDisplay"></strong>
-                </p>
-            </div>
-        </div>
     </div>
 
     <!-- Add Document Modal (unified: classification level + section-encrypted upload) -->
@@ -1485,6 +1379,22 @@
 
     <!-- Right-click context menu -->
     <div id="ctxMenu" style="display:none;position:fixed;z-index:9999;background:white;border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.15);min-width:170px;overflow:hidden;font-size:13px;"></div>
+
+    <!-- Document Details Modal -->
+    <div id="docDetailsModal" onclick="if(event.target===this)this.style.display='none'"
+         style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:10000;align-items:center;justify-content:center">
+        <div style="background:white;border-radius:14px;padding:24px;max-width:480px;width:90%;box-shadow:0 8px 40px rgba(0,0,0,0.25);max-height:90vh;overflow-y:auto">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+                <div style="display:flex;align-items:center;gap:10px">
+                    <span style="font-size:22px">📄</span>
+                    <span style="font-size:16px;font-weight:700;color:#1a202c">Document Details</span>
+                </div>
+                <button onclick="document.getElementById('docDetailsModal').style.display='none'"
+                        style="background:none;border:none;font-size:22px;cursor:pointer;color:#718096;line-height:1">&times;</button>
+            </div>
+            <div id="docDetailsContent"></div>
+        </div>
+    </div>
 
     <!-- PDF.js Library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>

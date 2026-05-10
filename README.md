@@ -80,9 +80,10 @@ A complete, production-ready implementation of Self-Sovereign Identity infrastru
 
 | Service | URL | Purpose | Status |
 |---------|-----|---------|--------|
+| **IDL Wallet** | `https://identuslabel.cz/wallet` | Primary wallet (Browser, Credentials, Documents) | ✅ Operational |
 | **CA Portal** | `https://identuslabel.cz/ca` | Certification Authority admin interface | ✅ Operational |
-| **Alice Wallet** | `https://identuslabel.cz/alice` | Primary development wallet | ✅ Operational |
 | **Secure Portal** | `https://identuslabel.cz/ca/dashboard` | VC-authenticated content portal | ✅ Operational |
+| **Alice Wallet** | `https://identuslabel.cz/alice` | Legacy development wallet | ❌ Obsolete |
 | **Cloud Agent API** | `https://identuslabel.cz/cloud-agent` | Main CA Cloud Agent REST API | ✅ Operational |
 | **Enterprise Agent** | `https://identuslabel.cz/enterprise` | Enterprise multitenancy Cloud Agent | ✅ Operational |
 | **Company Admin Portal** | `https://identuslabel.cz/company-admin` | Company DID and employee management | ✅ Operational |
@@ -90,7 +91,7 @@ A complete, production-ready implementation of Self-Sovereign Identity infrastru
 | **Multitenancy Agent** | Internal: `http://91.99.4.54:8200` (not proxied) | Inter-company multitenancy | ✅ Operational |
 | **PRISM Node** | `91.99.4.54:50053` | VDR/blockchain layer (gRPC) | ✅ Operational |
 
-**Note**: Bob Wallet decommissioned November 9, 2025. All development and testing should use Alice Wallet only.
+**Note**: Bob Wallet decommissioned November 9, 2025. Alice Wallet (port 3001) deprecated — all development uses **IDL Wallet** (port 3002) at `/wallet`.
 
 ---
 
@@ -102,7 +103,7 @@ A complete, production-ready implementation of Self-Sovereign Identity infrastru
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Client Layer                              │
 │                     ┌──────────────┐                             │
-│                     │ Alice Wallet │                             │
+│                     │  IDL Wallet  │                             │
 │                     │   (Browser)  │                             │
 │                     └──────┬───────┘                             │
 └────────────────────────────┼──────────────────────────────────────┘

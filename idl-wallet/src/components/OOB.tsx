@@ -1152,22 +1152,21 @@ export const OOB: React.FC<OOBProps> = (props) => {
                         console.log('✅ [METADATA] Saved cloud wallet metadata for accepted connection (peer-DID path)');
                     }
 
-                    // ✅ PEER VC PERSISTENCE: Store peer RealPersonIdentity VC to Pluto (peer-DID path)
+                    // PEER VC: Store in localStorage under a 'peer_vc_' prefix so it is
+                    // visible in a contacts/identity view but NOT added to the Pluto
+                    // credential store. Credentials in Pluto are selectable for proof
+                    // requests — storing a peer's VC there would let the holder present
+                    // someone else's credential as their own (holder-binding violation).
                     if (inviterIdentity?.vcProof) {
                         try {
                             const vcString = typeof inviterIdentity.vcProof === 'string'
                                 ? inviterIdentity.vcProof
                                 : JSON.stringify(inviterIdentity.vcProof);
-                            const credData = Uint8Array.from(Buffer.from(vcString));
-                            const parsedCredential = await agent.pollux.parseCredential(credData, {
-                                type: SDK.Domain.CredentialType.JWT
-                            });
-                            const existingCreds = await agent.pluto.getAllCredentials();
-                            const alreadyExists = existingCreds.some((c) => c.id === parsedCredential.id);
-                            if (!alreadyExists) {
-                                await agent.pluto.storeCredential(parsedCredential);
-                                app.dispatch(refreshCredentials());
-                            }
+                            // Use a stable key derived from the inviter DID so duplicate
+                            // connections don't create duplicate localStorage entries.
+                            const peerKey = `peer_vc_${from?.toString() ?? Date.now()}`;
+                            setItem(peerKey, vcString);
+                            console.log('✅ [PEER VC] Stored peer VC in localStorage (not Pluto) to prevent holder-binding bypass');
                         } catch (e) {
                             console.error('❌ [PEER VC] Failed to store peer VC (peer-DID path):', e);
                             // Non-fatal — connection continues
@@ -1316,22 +1315,16 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                 }
                             }
 
-                            // ✅ PEER VC PERSISTENCE: Store peer RealPersonIdentity VC to Pluto (cloud-agent path)
+                            // PEER VC: Store in localStorage only — not in Pluto.
+                            // See comment in peer-DID path above for security rationale.
                             if (inviterIdentity?.vcProof) {
                                 try {
                                     const vcString = typeof inviterIdentity.vcProof === 'string'
                                         ? inviterIdentity.vcProof
                                         : JSON.stringify(inviterIdentity.vcProof);
-                                    const credData = Uint8Array.from(Buffer.from(vcString));
-                                    const parsedCredential = await agent.pollux.parseCredential(credData, {
-                                        type: SDK.Domain.CredentialType.JWT
-                                    });
-                                    const existingCreds = await agent.pluto.getAllCredentials();
-                                    const alreadyExists = existingCreds.some((c) => c.id === parsedCredential.id);
-                                    if (!alreadyExists) {
-                                        await agent.pluto.storeCredential(parsedCredential);
-                                        app.dispatch(refreshCredentials());
-                                    }
+                                    const peerKey = `peer_vc_${connection?.host?.toString() ?? Date.now()}`;
+                                    setItem(peerKey, vcString);
+                                    console.log('✅ [PEER VC] Stored peer VC in localStorage (not Pluto) to prevent holder-binding bypass');
                                 } catch (e) {
                                     console.error('❌ [PEER VC] Failed to store peer VC (cloud-agent path):', e);
                                     // Non-fatal — connection continues
@@ -1429,11 +1422,16 @@ export const OOB: React.FC<OOBProps> = (props) => {
                 // ✅ FIX: Manual connection request with VC attachment
                 try {
                     // Create invitee's peer DID for this connection (true = update mediator keylist for message routing)
+                    // NOTE: This DID is only used in the VC-proof branch. In the no-VC branch, acceptInvitation()
+                    // creates its own internal peer DID — we must NOT also call addConnection() with this DID.
                     const inviteePeerDID = await agent.createNewPeerDID([], true);
                     const inviterDID = SDK.Domain.DID.fromString(rfc0434Invitation.from);
 
                     console.log("🔑 [RFC 0434] Invitee's DID:", inviteePeerDID.toString());
                     console.log("🔑 [RFC 0434] Inviter's DID:", inviterDID.toString());
+
+                    // Track whether the SDK handled connection storage internally
+                    let sdkHandledStorage = false;
 
                     // ✅ NEW: Create connection request with VC proof attachment if selected
                     if (vcProofData) {
@@ -1468,22 +1466,32 @@ export const OOB: React.FC<OOBProps> = (props) => {
                         console.log('✅ [RESPONSE] Connection request with VC proof sent successfully');
                     } else {
                         console.log('ℹ️ [RESPONSE] No VC selected - using standard SDK acceptance');
-                        // No VC proof - use standard SDK method
-                        const parsedInvitation = await agent.parseOOBInvitation(new URL(oob));
-                        await agent.acceptDIDCommInvitation(parsedInvitation, connectionLabel);
-                        console.log("✅ [RFC 0434] Standard connection request sent");
+                        // No VC proof - use standard SDK method.
+                        // acceptInvitation() creates its own internal peer DID and calls addConnection() internally.
+                        // We must NOT call addConnection() again after this — it would create a duplicate connection
+                        // with the orphaned inviteePeerDID that was created above but never used in this path.
+                        const parsedInvitation = await agent.parseInvitation(oob);
+                        await agent.acceptInvitation(parsedInvitation, connectionLabel);
+                        console.log("✅ [RFC 0434] Standard connection request sent (SDK handles storage)");
+                        sdkHandledStorage = true;
                     }
 
-                    // Store the connection locally
-                    const didPair = new SDK.Domain.DIDPair(inviteePeerDID, inviterDID, connectionLabel);
+                    if (!sdkHandledStorage) {
+                        // VC-proof path: SDK did NOT store the connection — we must do it manually
+                        const didPair = new SDK.Domain.DIDPair(inviteePeerDID, inviterDID, connectionLabel);
 
-                    // LAYER 1: Database Write
-                    await agent.connectionManager.addConnection(didPair);
-                    console.log('✅ [LAYER 1] Connection stored to IndexedDB:', didPair.name);
+                        // LAYER 1: Database Write
+                        await agent.connectionManager.addConnection(didPair);
+                        console.log('✅ [LAYER 1] Connection stored to IndexedDB:', didPair.name);
 
-                    // LAYER 2: State Update
-                    app.dispatch({ type: 'Connection/success', payload: didPair });
-                    console.log('✅ [LAYER 2] Connection added to Redux state:', didPair.name);
+                        // LAYER 2: State Update
+                        // Note: addConnection() already emits ListenerKey.CONNECTION which updates Redux via event listener.
+                        // The explicit dispatch here is a belt-and-suspenders redundancy for the VC-proof path.
+                        app.dispatch({ type: 'Connection/success', payload: didPair });
+                        console.log('✅ [LAYER 2] Connection added to Redux state:', didPair.name);
+                    } else {
+                        console.log('✅ [SDK PATH] SDK handled connection storage and Redux event internally - skipping manual addConnection');
+                    }
 
                     // ✅ PHASE 3: Mark connection as established
                     if (invitationId) {
@@ -1897,29 +1905,6 @@ export const OOB: React.FC<OOBProps> = (props) => {
                 {!showingInvitation ? (
                     /* Accept Invitation Tab */
                     <div className="space-y-6">
-                        {/* Inviter Verification Display */}
-                        {inviterIdentity && (
-                            <>
-                                {inviterIdentity.isVerified ? (
-                                    <InviterVerification
-                                        inviterIdentity={inviterIdentity}
-                                        className="bg-slate-800/30 rounded-2xl border border-slate-700/50 backdrop-blur-sm"
-                                    />
-                                ) : (
-                                    <SecurityAlert
-                                        type={inviterIdentity.validationResult.errors.includes('Invalid or corrupted VC proof') ? 'invalid-proof' : 'no-proof'}
-                                        onAcceptRisk={() => console.log('User accepted security risk')}
-                                        onReject={() => {
-                                            setOOB('');
-                                            setInviterIdentity(null);
-                                        }}
-                                        errors={inviterIdentity.validationResult.errors}
-                                        className="bg-slate-800/30 rounded-2xl border border-slate-700/50 backdrop-blur-sm"
-                                    />
-                                )}
-                            </>
-                        )}
-
                         {/* Connection Acceptance Form */}
                         <div className="bg-slate-800/30 rounded-2xl border border-slate-700/50 backdrop-blur-sm p-6">
                             <div className="space-y-6">

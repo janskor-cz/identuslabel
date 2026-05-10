@@ -55,6 +55,24 @@ class DocumentRegistry {
                 this.documentVersions = loaded.documentVersions || new Map();
                 console.log(`[DocumentRegistry] ✅ Loaded ${this.documents.size} documents from persistent storage`);
                 console.log(`[DocumentRegistry] ✅ Loaded version history for ${this.documentVersions.size} documents`);
+
+                // Migration: recover createdBy/title from encrypted metadata for older documents
+                let migrated = 0;
+                for (const [, doc] of this.documents) {
+                    if (doc.createdBy && doc.title) continue;
+                    if (!doc.encryptedMetadata || doc.encryptedMetadata.size === 0) continue;
+                    const candidateDID = doc.releasableTo?.[0] || doc.ownerCompanyDID;
+                    if (!candidateDID) continue;
+                    try {
+                        const decrypted = await this.decryptMetadataForCompany(doc.encryptedMetadata, candidateDID);
+                        if (!doc.createdBy && decrypted.createdBy) { doc.createdBy = decrypted.createdBy; migrated++; }
+                        if (!doc.title && decrypted.title) { doc.title = decrypted.title; }
+                    } catch (_) { /* best-effort */ }
+                }
+                if (migrated > 0) {
+                    console.log(`[DocumentRegistry] Migration: recovered createdBy for ${migrated} documents`);
+                    await this.persistence.saveRegistry(this.documents, this.documentVersions);
+                }
             } else {
                 console.log('[DocumentRegistry] No saved registry found (fresh start)');
             }
@@ -137,6 +155,8 @@ class DocumentRegistry {
             encryptedMetadata, // Map of companyDID -> encrypted metadata
             releasableTo, // Array of authorized company DIDs
             classificationLevel, // Stored in plaintext for access control (can be encrypted later)
+            title: title || null, // Plaintext title for display (non-sensitive)
+            createdBy: metadata.createdBy || null, // Email of uploader — non-sensitive display field
             metadataVCRecordId, // (SSI) Cloud Agent record ID for crash recovery
             iagonStorage, // Iagon decentralized storage metadata (nodeId, filename, encryptionManifestId — no raw key)
             ownerCompanyDID, // Company that uploaded/owns this document
@@ -903,7 +923,7 @@ class DocumentRegistry {
      * @param {string} opts.clearanceLevel
      * @returns {Promise<Object>} newVersion record
      */
-    async addDocumentVersion(documentDID, { newDocxFileId, encryptionInfo, contentHash, editorDID, clearanceLevel }) {
+    async addDocumentVersion(documentDID, { newDocxFileId, encryptionManifestId, encryptionInfo, contentHash, editorDID, clearanceLevel, manifestVcId }) {
         const record = this.documents.get(documentDID);
         if (!record) throw new Error(`Document not found: ${documentDID}`);
 
@@ -915,6 +935,7 @@ class DocumentRegistry {
             contentHash,
             editorDID,
             clearanceLevel,
+            manifestVcId:   manifestVcId || null,
             createdAt:      new Date().toISOString(),
             isCurrent:      true
         };
@@ -926,6 +947,7 @@ class DocumentRegistry {
 
         // Update live document record's active fileId pointer + decryption key
         record.iagonStorage.originalDocxFileId = newDocxFileId;
+        if (encryptionManifestId) record.iagonStorage.originalDocxManifestId = encryptionManifestId;
         if (encryptionInfo) record.iagonStorage.originalDocxEncryptionInfo = encryptionInfo;
         record.updatedAt = new Date().toISOString();
 

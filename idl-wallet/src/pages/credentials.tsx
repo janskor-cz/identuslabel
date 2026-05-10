@@ -55,7 +55,7 @@ const CACHE_TTL_MS = 30000; // 30 seconds (matches auto-refresh interval)
  * Get cached status or verify credential if cache miss/expired
  */
 async function getCachedCredentialStatus(credential: any): Promise<any> {
-    const cacheKey = credential.id;
+    const cacheKey = credential.id ?? credential.thid ?? `anon-${JSON.stringify(credential).slice(0, 40)}`;
     const cached = statusCheckCache.get(cacheKey);
     const now = Date.now();
 
@@ -159,6 +159,9 @@ export default function App() {
     // Sub-tabs for personal wallet
     const [activeTab, setActiveTab] = useState<'active' | 'old' | 'others'>('active');
 
+    // Enterprise credential revocation status: recordId → boolean
+    const [enterpriseRevocationStatus, setEnterpriseRevocationStatus] = useState<Map<string, boolean>>(new Map());
+
     // Grouped credentials (Personal Wallet)
     const [activeCredentials, setActiveCredentials] = useState<any[]>([]);
     const [oldCredentials, setOldCredentials] = useState<any[]>([]);
@@ -254,6 +257,42 @@ export default function App() {
 
         checkAndGroupCredentials();
     }, [app.credentials, refreshKey]);
+
+    // Check revocation status for enterprise credentials
+    useEffect(() => {
+        if (!enterpriseCredentials.length) return;
+        const checkEnterprise = async () => {
+            const pako = (await import('pako')).default;
+            const statusMap = new Map<string, boolean>();
+            for (const cred of enterpriseCredentials) {
+                const recordId = cred.recordId;
+                if (!recordId || !cred.credential) continue;
+                try {
+                    // credential field is base64-encoded JWT string
+                    const jwtStr = atob(cred.credential);
+                    const parts = jwtStr.split('.');
+                    if (parts.length < 2) continue;
+                    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+                    const cs = payload.vc?.credentialStatus;
+                    if (!cs?.statusListCredential || cs?.statusListIndex == null) continue;
+                    const res = await fetch(cs.statusListCredential);
+                    if (!res.ok) continue;
+                    const slData = await res.json();
+                    const encoded = slData.credentialSubject?.encodedList;
+                    if (!encoded) continue;
+                    // base64 → Uint8Array → inflate (gzip)
+                    const b64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+                    const compressed = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                    const bits = pako.inflate(compressed);
+                    const idx = Number(cs.statusListIndex);
+                    const revoked = !!((bits[Math.floor(idx / 8)] >> (7 - (idx % 8))) & 1);
+                    statusMap.set(recordId, revoked);
+                } catch { /* skip */ }
+            }
+            setEnterpriseRevocationStatus(statusMap);
+        };
+        checkEnterprise();
+    }, [enterpriseCredentials, refreshKey]);
 
     // Periodic revocation status check every 30 seconds
     useEffect(() => {
@@ -605,34 +644,31 @@ export default function App() {
                                 )}
 
                                 {/* Old Tab */}
-                                {activeTab === 'old' && (
-                                    oldCredentials.length === 0 ? (
-                                        <div className="text-center py-8 text-slate-400">No expired or revoked credentials.</div>
+                                {activeTab === 'old' && (() => {
+                                    const expiredOnly = oldCredentials.filter(c => {
+                                        const st = credentialStatuses.get(c.id);
+                                        return !st?.revoked && !st?.suspended;
+                                    });
+                                    return expiredOnly.length === 0 ? (
+                                        <div className="text-center py-8 text-slate-400">No expired credentials.</div>
                                     ) : (
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            {oldCredentials.map((credential, i) => {
-                                                const st = credentialStatuses.get(credential.id);
-                                                const isRevoked = st?.revoked || st?.suspended;
-                                                return (
-                                                    <ErrorBoundary key={`old-${refreshKey}-${credential.id}-${i}`} componentName={`CredentialCard-Old-${i}`}>
-                                                        <div className="relative opacity-70">
-                                                            <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
-                                                                {isRevoked
-                                                                    ? <span className="px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-400 border border-red-500/30 rounded-full">✗ Revoked</span>
-                                                                    : <span className="px-2 py-0.5 text-xs font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full">⏱ Expired</span>
-                                                                }
-                                                                <button onClick={() => handleDeleteCredential(credential)} className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
-                                                                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
-                                                                </button>
-                                                            </div>
-                                                            {getCredentialLayout(credential)}
+                                            {expiredOnly.map((credential, i) => (
+                                                <ErrorBoundary key={`old-${refreshKey}-${credential.id}-${i}`} componentName={`CredentialCard-Old-${i}`}>
+                                                    <div className="relative opacity-70">
+                                                        <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+                                                            <span className="px-2 py-0.5 text-xs font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full">⏱ Expired</span>
+                                                            <button onClick={() => handleDeleteCredential(credential)} className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
+                                                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
+                                                            </button>
                                                         </div>
-                                                    </ErrorBoundary>
-                                                );
-                                            })}
+                                                        {getCredentialLayout(credential)}
+                                                    </div>
+                                                </ErrorBoundary>
+                                            ))}
                                         </div>
-                                    )
-                                )}
+                                    );
+                                })()}
 
                                 {/* Others Tab */}
                                 {activeTab === 'others' && (
@@ -680,7 +716,9 @@ export default function App() {
                                 )}
                                 {!isLoadingEnterpriseCredentials && enterpriseCredentials.length > 0 && (
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        {enterpriseCredentials.map((rawCredential, i) => {
+                                        {enterpriseCredentials
+                                            .filter(rawCredential => enterpriseRevocationStatus.get(rawCredential.recordId) !== true)
+                                            .map((rawCredential, i) => {
                                             const adapted = buildEnterpriseCredentialAdapter(rawCredential);
                                             return (
                                                 <ErrorBoundary
@@ -688,11 +726,13 @@ export default function App() {
                                                     componentName={`EnterpriseCredential-${i}`}
                                                 >
                                                     <div className="relative">
-                                                        {rawCredential.protocolState && (
-                                                            <span className="absolute top-3 right-3 z-10 px-2 py-0.5 text-xs font-medium border rounded-full bg-slate-700/50 text-slate-400 border-slate-600/30">
-                                                                {rawCredential.protocolState}
-                                                            </span>
-                                                        )}
+                                                        <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
+                                                            {rawCredential.protocolState && (
+                                                                <span className="px-2 py-0.5 text-xs font-medium border rounded-full bg-slate-700/50 text-slate-400 border-slate-600/30">
+                                                                    {rawCredential.protocolState}
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                         {getCredentialLayout(adapted)}
                                                     </div>
                                                 </ErrorBoundary>

@@ -68,19 +68,9 @@ class IagonStorageClient {
    * Encrypt content using AES-256-GCM
    * Returns encrypted buffer and encryption metadata
    */
-  encryptContent(content, classificationLevel) {
-    // UNCLASSIFIED documents don't need pre-encryption
-    if (classificationLevel === 'UNCLASSIFIED') {
-      return {
-        content: content,
-        encryptionInfo: {
-          algorithm: 'none',
-          keyId: null,
-          iv: null,
-          authTag: null
-        }
-      };
-    }
+  encryptContent(content) {
+    // All documents are encrypted at rest regardless of classification level.
+    // Classification level governs ACCESS CONTROL (clearance checks), not storage encryption.
 
     // Generate encryption key and IV
     const key = crypto.randomBytes(32); // 256 bits
@@ -122,6 +112,10 @@ class IagonStorageClient {
       return encryptedContent;
     }
 
+    if (!encryptionInfo.key) {
+      throw new Error('DocumentKeyUnavailable: encryption key missing from registry — document must be re-uploaded');
+    }
+
     const key = Buffer.from(encryptionInfo.key, 'base64');
     const iv = Buffer.from(encryptionInfo.iv, 'base64');
     const authTag = Buffer.from(encryptionInfo.authTag, 'base64');
@@ -149,7 +143,10 @@ class IagonStorageClient {
       throw new Error('Iagon storage not configured. Set IAGON_ACCESS_TOKEN and IAGON_NODE_ID.');
     }
 
-    const { classificationLevel = 'UNCLASSIFIED' } = options;
+    // preEncrypted: true — caller has already encrypted the content (e.g. browser AES-GCM).
+    // Server must NOT add another encryption layer; store the bytes as-is.
+    // This is distinct from classificationLevel, which only governs access-control checks.
+    const { preEncrypted = false } = options;
 
     // Check file size
     if (fileContent.length > this.maxFileSize) {
@@ -159,11 +156,15 @@ class IagonStorageClient {
     // Calculate content hash before encryption
     const contentHash = this.calculateContentHash(fileContent);
 
-    // Encrypt content if needed
-    const { content: encryptedContent, encryptionInfo, rawKey } = this.encryptContent(
-      fileContent,
-      classificationLevel
-    );
+    // Encrypt content — skip only when caller asserts it is already encrypted
+    let encryptedContent, encryptionInfo, rawKey;
+    if (preEncrypted) {
+      encryptedContent = fileContent;
+      rawKey = null;
+      encryptionInfo = { algorithm: 'none', keyId: null, iv: null, authTag: null };
+    } else {
+      ({ content: encryptedContent, encryptionInfo, rawKey } = this.encryptContent(fileContent));
+    }
 
     // Retry logic
     let lastError;
@@ -188,7 +189,7 @@ class IagonStorageClient {
             iv: encryptionInfo.iv,
             authTag: encryptionInfo.authTag
           },
-          rawDEK: rawKey || null,  // Buffer (32 bytes) — CALLER MUST zero with rawDEK.fill(0) after wrapping; null for UNCLASSIFIED
+          rawDEK: rawKey || null,  // Buffer (32 bytes) — CALLER MUST zero with rawDEK.fill(0) after wrapping; null when preEncrypted=true
           iagonUrl: this.getFileUrl(result.fileId, filename),
           uploadedAt: new Date().toISOString(),
           fileSize: encryptedContent.length,
@@ -196,7 +197,7 @@ class IagonStorageClient {
         };
       } catch (error) {
         lastError = error;
-        console.error(`[IagonStorageClient] Upload attempt ${attempt} failed:`, error.message);
+        console.error(`[IagonStorageClient] Upload attempt ${attempt} failed:`, error.message, error.response?.data ? JSON.stringify(error.response.data).substring(0,200) : '');
 
         if (attempt < this.maxRetries) {
           const delay = this.retryDelay * Math.pow(2, attempt - 1); // Exponential backoff

@@ -44,17 +44,38 @@ export interface TrustedIssuer {
  */
 const TRUSTED_ISSUERS: Record<string, TrustedIssuer> = {
   /**
-   * Primary Certification Authority
-   * Trusted to issue all credential types in this ecosystem
+   * Certification Authority — current DID (active after DID rotation)
+   * Used for credentials issued to ACME, TechCorp, etc. after rotation
    */
-  'did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c': {
+  'did:prism:462a7196585b9737497d1959880439f09c68d8f534691a0eaed7d64fe22d866d': {
     name: 'Certification Authority',
     authorizedCredentialTypes: [
       'SecurityClearance',
       'CompanyIdentity',
       'RealPerson',
       'EmployeeIdentity',
-      'OrganizationCredential'
+      'OrganizationCredential',
+      'CertificationAuthorityIdentity'
+    ],
+    organizationType: 'Certification Authority',
+    jurisdiction: 'Hyperledger Identus Ecosystem',
+    trustedSince: '2025-01-01'
+  },
+
+  /**
+   * Certification Authority — legacy DID (before DID rotation)
+   * Used for credentials issued before Cloud Agent DID was re-published
+   * Covers: CA's own CertificationAuthorityIdentity credential (Nov 2025)
+   */
+  'did:prism:a7244aad36ab32de81da6f275d515508de5b29dbc1f753a5bda62e4455a6e4cd': {
+    name: 'Certification Authority (legacy DID)',
+    authorizedCredentialTypes: [
+      'SecurityClearance',
+      'CompanyIdentity',
+      'RealPerson',
+      'EmployeeIdentity',
+      'OrganizationCredential',
+      'CertificationAuthorityIdentity'
     ],
     organizationType: 'Certification Authority',
     jurisdiction: 'Hyperledger Identus Ecosystem',

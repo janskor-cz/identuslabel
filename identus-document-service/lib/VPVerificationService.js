@@ -187,6 +187,9 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
 
   let employeeRoleCred      = null;
   let securityClearanceCred = null;
+  // Track credential subject DID for holder binding consistency check
+  let sharedSubjectDID      = null;
+  let credentialStatuses    = [];
 
   for (let i = 0; i < vp.verifiableCredential.length; i++) {
     const decoded = decodeJWT(vp.verifiableCredential[i]);
@@ -198,6 +201,31 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
     const { payload } = decoded;
     const claims      = payload.vc?.credentialSubject || {};
     const issuerDID   = payload.iss;
+
+    // Subject consistency check: all VCs must belong to the same credential subject
+    const vcSubject = payload.sub || payload.vc?.credentialSubject?.id || null;
+    if (vcSubject) {
+      if (sharedSubjectDID === null) {
+        sharedSubjectDID = vcSubject;
+      } else if (vcSubject !== sharedSubjectDID) {
+        console.error(`[VPVerificationService] HOLDER BINDING: Mixed credential subjects — index ${i} subject=${vcSubject} differs from ${sharedSubjectDID}`);
+        return {
+          success: false,
+          error:   'MixedCredentialSubjects',
+          message: 'All credentials in a presentation must belong to the same subject'
+        };
+      }
+    }
+
+    // Extract StatusList2021 revocation pointer for direct bitstring check by callers
+    const cs = payload.vc?.credentialStatus || payload.credentialStatus || null;
+    if (cs?.statusListCredential && cs?.statusListIndex != null) {
+      credentialStatuses.push({
+        statusListCredential: cs.statusListCredential,
+        statusListIndex:      Number(cs.statusListIndex),
+        statusPurpose:        cs.statusPurpose || 'revocation'
+      });
+    }
 
     // ── Verify signature ───────────────────────────────────────────────────
     if (decoded.header.alg !== 'ES256K') {
@@ -253,12 +281,14 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
     console.log(`[VPVerificationService] Enterprise path — issuer=${issuerDID} clearance=${clearanceLevel}`);
 
     return {
-      success: true,
+      success:              true,
       companyDID,
       clearanceLevel,
       issuerDID,
-      viewerName:         employeeRoleCred.claims.email || employeeRoleCred.claims.employeeId || null,
-      employeeRoleClaims: employeeRoleCred.claims
+      viewerName:           employeeRoleCred.claims.email || employeeRoleCred.claims.employeeId || null,
+      employeeRoleClaims:   employeeRoleCred.claims,
+      credentialSubjectDID: sharedSubjectDID,
+      credentialStatuses
     };
   }
 
@@ -267,12 +297,14 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
   console.log(`[VPVerificationService] Personal wallet path — clearance=${clearanceLevel}`);
 
   return {
-    success:            true,
-    companyDID:         null,
+    success:              true,
+    companyDID:           null,
     clearanceLevel,
-    issuerDID:          securityClearanceCred.issuer,
-    viewerName:         securityClearanceCred.claims.holderName || null,
-    employeeRoleClaims: null
+    issuerDID:            securityClearanceCred.issuer,
+    viewerName:           securityClearanceCred.claims.holderName || null,
+    employeeRoleClaims:   null,
+    credentialSubjectDID: sharedSubjectDID,
+    credentialStatuses
   };
 }
 

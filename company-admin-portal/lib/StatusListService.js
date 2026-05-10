@@ -204,6 +204,18 @@ class StatusListService {
     }
 
     /**
+     * Check revocation status from a credentialStatus object extracted from a VC JWT.
+     * This is the preferred revocation check path — it uses the live StatusList2021
+     * bitstring URL embedded in the credential itself, bypassing any agent API.
+     *
+     * @param {{ statusListCredential: string, statusListIndex: number }} cs
+     * @returns {Promise<{isRevoked: boolean, status: string}>}
+     */
+    static async checkByCredentialStatus(cs) {
+        return this.checkStatusListCredential(cs.statusListCredential, cs.statusListIndex);
+    }
+
+    /**
      * Check revocation status directly from a StatusList2021 credential URL
      * @param {string} statusListCredentialUrl - URL to the status list credential
      * @param {number} statusListIndex - Index in the status list

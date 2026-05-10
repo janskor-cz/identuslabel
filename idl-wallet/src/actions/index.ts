@@ -1505,12 +1505,7 @@ export const sendMessage = createAsyncThunk<
 
                         console.log('✅ [sendMessage] VC handshake completed - recipient clearance verified');
                         console.log('✅ [sendMessage] Captured connection DID for lookup:', recipientConnectionDID.substring(0, 50) + '...');
-
-                        // SDK already stored credential during VC handshake - no need to store again
-                        // Update credentials in Redux state so it's available for future messages
-                        api.dispatch(
-                            reduxActions.credentialSuccess(recipientVC)
-                        );
+                        // recipientVC is used locally for this send only — NOT stored in own wallet credentials
                     } catch (handshakeError: any) {
                         throw new Error(
                             `❌ Cannot send ${SECURITY_LEVEL_NAMES[securityLevel]} message: Recipient does not have the required Security Clearance credential. ` +

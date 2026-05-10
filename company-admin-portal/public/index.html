@@ -159,8 +159,12 @@
                         <button class="btn btn-secondary btn-sm" onclick="app.loadEmployees()">
                             Refresh
                         </button>
+                        <button class="btn btn-warning btn-sm" id="sync-clearance-btn" onclick="app.syncClearance()" title="Check if employees' CA personal clearance VCs were revoked and revoke stale enterprise grants">
+                            🔄 Sync Clearance
+                        </button>
                     </div>
                 </div>
+                <div id="sync-clearance-result" style="display:none; margin: 0.5rem 1rem; padding: 0.75rem 1rem; border-radius: 6px;"></div>
                 <div class="section-body">
                     <div class="employee-stats">
                         <div class="stat-card">

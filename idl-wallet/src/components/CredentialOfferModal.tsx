@@ -243,7 +243,7 @@ export const CredentialOfferModal: React.FC = () => {
 
     return (
         <div
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[9999] flex items-center justify-center"
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[10001] flex items-center justify-center"
         >
             <div
                 className="bg-slate-900 border border-slate-700/50 rounded-2xl p-6 max-w-2xl w-full mx-4 shadow-2xl max-h-[90vh] overflow-y-auto"

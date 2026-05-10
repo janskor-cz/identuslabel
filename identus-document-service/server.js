@@ -254,6 +254,42 @@ app.post('/vc/key-manifest', requireAdminKey, async (req, res) => {
   return res.status(201).json({ success: true, documentDID });
 });
 
+// ---------------------------------------------------------------------------
+// GET /vc/key-manifest/:documentDID — fetch current VC for a document
+// ---------------------------------------------------------------------------
+app.get('/vc/key-manifest/:documentDID', requireAdminKey, (req, res) => {
+  const documentDID = decodeURIComponent(req.params.documentDID);
+
+  if (!documentDID.startsWith('did:')) {
+    return res.status(400).json({ error: 'INVALID_DID', message: 'documentDID must start with did:' });
+  }
+
+  const record = vcStore.get(documentDID);
+  if (!record) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'No VC found for this documentDID' });
+  }
+
+  return res.json(record);
+});
+
+// ---------------------------------------------------------------------------
+// GET /vc/key-manifest/:documentDID/history — full version chain for a document
+// ---------------------------------------------------------------------------
+app.get('/vc/key-manifest/:documentDID/history', requireAdminKey, (req, res) => {
+  const documentDID = decodeURIComponent(req.params.documentDID);
+
+  if (!documentDID.startsWith('did:')) {
+    return res.status(400).json({ error: 'INVALID_DID', message: 'documentDID must start with did:' });
+  }
+
+  const full = vcStore.getHistory(documentDID);
+  if (!full) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'No VC found for this documentDID' });
+  }
+
+  return res.json({ documentDID, current: full.current, history: full.history });
+});
+
 app.delete('/vc/key-manifest/:documentDID', requireAdminKey, async (req, res) => {
   const documentDID = decodeURIComponent(req.params.documentDID);
 
@@ -270,6 +306,31 @@ app.delete('/vc/key-manifest/:documentDID', requireAdminKey, async (req, res) =>
   console.log(`[VCKeyStore] Deleted DocumentKeyManifest VC for ${documentDID.substring(0, 50)}...`);
 
   return res.json({ success: true, documentDID });
+});
+
+// ---------------------------------------------------------------------------
+// GET /vc/key-manifests — list all stored VCs or find one by vcId
+// ---------------------------------------------------------------------------
+app.get('/vc/key-manifests', requireAdminKey, (req, res) => {
+  const { vcId } = req.query;
+  const all = vcStore.list();
+
+  if (vcId) {
+    const match = all.find(r => r.vcId === vcId);
+    if (!match) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'No VC found with that vcId' });
+    }
+    return res.json(match);
+  }
+
+  // Return summary list (without sensitive JWT payload)
+  return res.json(all.map(r => ({
+    documentDID:    r.documentDID,
+    vcId:           r.vcId,
+    issuedAt:       r.issuedAt,
+    iagonFileId:    r.claims?.iagonFileId,
+    classification: r.claims?.classificationLevel
+  })));
 });
 
 // ---------------------------------------------------------------------------
@@ -387,16 +448,17 @@ async function _handleAccess(req, res) {
 
     const result = await processAccessRequest({
       documentDID,
-      requestorDID:      vpResult.companyDID || issuerDID,
+      requestorDID:       vpResult.companyDID || issuerDID,
       issuerDID,
-      companyDID:        vpResult.companyDID,
+      companyDID:         vpResult.companyDID,
       clearanceLevelNum,
-      clearanceLevelStr: clearanceLevelStr || getLevelLabel(clearanceLevelNum),
+      clearanceLevelStr:  clearanceLevelStr || getLevelLabel(clearanceLevelNum),
       ephemeralPublicKey,
-      signature:         signature    || _generateNullSig(),
-      ephemeralDID:      ephemeralDID || `did:key:${crypto.randomUUID()}`,
-      timestamp:         timestamp    || new Date().toISOString(),
-      nonce:             reqNonce     || crypto.randomUUID(),
+      signature:          signature    || _generateNullSig(),
+      ephemeralDID:       ephemeralDID || `did:key:${crypto.randomUUID()}`,
+      timestamp:          timestamp    || new Date().toISOString(),
+      nonce:              reqNonce     || crypto.randomUUID(),
+      credentialStatuses: vpResult.credentialStatuses || [],
       docMeta,
       clientIp
     });
@@ -415,18 +477,25 @@ async function _handleAccess(req, res) {
     }
 
     return res.json({
-      success:         true,
-      copyId:          result.copyId,
-      copyHash:        result.copyHash,
-      filename:        result.filename,
-      mimeType:        result.mimeType,
-      clearanceLevel:  result.clearanceLevel,
-      encryptedDocument: {
+      success:        true,
+      copyId:         result.copyId,
+      copyHash:       result.copyHash,
+      filename:       result.filename,
+      mimeType:       result.mimeType,
+      clearanceLevel: result.clearanceLevel,
+      accessedAt:     result.accessedAt,
+      // SSI-aligned: DEK re-encrypted for client's ephemeral X25519 key (nacl.box, 32 bytes only)
+      encryptedDEK: {
         ciphertext:      result.ciphertext,
         nonce:           result.nonce,
         senderPublicKey: result.serverPublicKey
       },
-      accessedAt: result.accessedAt
+      // Raw encrypted file from Iagon — wallet decrypts using DEK above
+      encryptedBlob: result.encryptedBlob,
+      fileIv:        result.fileIv,
+      fileAuthTag:   result.fileAuthTag,
+      fileAlgorithm: result.fileAlgorithm,
+      contentHash:   result.contentHash   // wallet verifies sha256(plaintext) after decrypt
     });
 
   } catch (err) {
@@ -609,17 +678,23 @@ app.post('/documents/:did/access-complete', async (req, res) => {
   }
 
   return res.json({
-    success:  true,
-    copyId:   result.copyId,
-    copyHash: result.copyHash,
-    filename: result.filename,
-    mimeType: result.mimeType,
-    encryptedDocument: {
+    success:        true,
+    copyId:         result.copyId,
+    copyHash:       result.copyHash,
+    filename:       result.filename,
+    mimeType:       result.mimeType,
+    clearanceLevel: result.clearanceLevel,
+    accessedAt:     result.accessedAt,
+    encryptedDEK: {
       ciphertext:      result.ciphertext,
       nonce:           result.nonce,
       senderPublicKey: result.serverPublicKey
     },
-    accessedAt: result.accessedAt
+    encryptedBlob: result.encryptedBlob,
+    fileIv:        result.fileIv,
+    fileAuthTag:   result.fileAuthTag,
+    fileAlgorithm: result.fileAlgorithm,
+    contentHash:   result.contentHash
   });
 });
 
@@ -634,6 +709,43 @@ function _fireAudit(url, event) {
  *  verifySignature will fall back to format-only validation in this case. */
 function _generateNullSig() {
   return Buffer.alloc(64).toString('base64');
+}
+
+// ---------------------------------------------------------------------------
+// Test Helpers (only active when TEST_BYPASS_KEY env var is set)
+// ---------------------------------------------------------------------------
+
+if (process.env.TEST_BYPASS_KEY) {
+  /**
+   * POST /test/inject-vc-key
+   * Inject a VCKeyStore entry for automated testing.
+   * Body: { documentDID, claims }  (claims = KeyManifest fields)
+   * Requires X-Test-Key header matching TEST_BYPASS_KEY.
+   */
+  app.post('/test/inject-vc-key', (req, res) => {
+    if (req.headers['x-test-key'] !== process.env.TEST_BYPASS_KEY) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const { documentDID, claims } = req.body;
+    if (!documentDID || !claims) {
+      return res.status(400).json({ error: 'documentDID and claims required' });
+    }
+    // Build a legacy HS256 JWT so KeyManifestVCVerifier.verify() passes
+    const hmacKey = process.env.ADMIN_API_KEY || process.env.DOCUMENT_SERVICE_ADMIN_KEY || 'test-key';
+    const header  = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({
+      iss: 'test-injector',
+      sub: documentDID,
+      iat: Math.floor(Date.now() / 1000),
+      vc:  { credentialSubject: claims }
+    })).toString('base64url');
+    const sig = crypto.createHmac('sha256', hmacKey).update(`${header}.${payload}`).digest('base64url');
+    const vcJwt = `${header}.${payload}.${sig}`;
+    vcStore.put(documentDID, { documentDID, vcId: 'test-vc-' + Date.now(), vcJwt, claims, issuedAt: new Date().toISOString() });
+    console.log(`[TEST] Injected VCKeyStore entry for ${documentDID.substring(0,40)}`);
+    return res.json({ success: true });
+  });
+  console.log('[TEST] Doc-service test injection endpoint active at POST /test/inject-vc-key');
 }
 
 // ---------------------------------------------------------------------------

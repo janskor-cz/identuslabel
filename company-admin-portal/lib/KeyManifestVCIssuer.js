@@ -67,6 +67,9 @@ class KeyManifestVCIssuer {
    * @param {string}   params.fileAlgorithm        - e.g. 'AES-256-GCM'
    * @param {string[]} params.releasableTo         - Issuer DIDs allowed to access
    * @param {string}   [params.contentHash]        - sha256:hex digest
+   * @param {number}   [params.versionNumber]      - Monotonically increasing version (1-based)
+   * @param {string}   [params.updatedBy]          - DID of the editor who created this version
+   * @param {string}   [params.predecessorHash]    - 'sha256:<hex>' of the previous version's vcJwt
    * @returns {Promise<{ vcId: string, vcJwt: string }>}
    */
   async issue(params) {
@@ -74,7 +77,8 @@ class KeyManifestVCIssuer {
       issuerDID, documentDID, iagonFileId,
       wrappedKey, iv, authTag, wrappingAlgorithm, classificationLevel,
       fileIv, fileAuthTag, fileAlgorithm,
-      releasableTo, contentHash
+      releasableTo, contentHash,
+      versionNumber, updatedBy, predecessorHash
     } = params;
 
     if (!documentDID) throw new Error('[KeyManifestVCIssuer] documentDID is required');
@@ -98,6 +102,17 @@ class KeyManifestVCIssuer {
       releasableTo:        Array.isArray(releasableTo) ? releasableTo : [],
       contentHash:         contentHash || null
     };
+
+    // Versioning fields — only included when provided
+    if (versionNumber !== undefined && versionNumber !== null) {
+      claims.versionNumber = versionNumber;
+    }
+    if (updatedBy) {
+      claims.updatedBy = updatedBy;
+    }
+    if (predecessorHash) {
+      claims.predecessorHash = predecessorHash;
+    }
 
     const payload = {
       jti: vcId,
@@ -213,6 +228,17 @@ class KeyManifestVCIssuer {
       'Content-Type': 'application/json',
       'x-admin-key':  this._adminKey
     };
+  }
+
+  /**
+   * Compute the predecessorHash for a given vcJwt.
+   * Returns 'sha256:<hex-digest>' — store this in the next VC's predecessorHash field.
+   *
+   * @param {string} vcJwt - The compact JWT string of the predecessor VC
+   * @returns {string}
+   */
+  static computePredecessorHash(vcJwt) {
+    return 'sha256:' + crypto.createHash('sha256').update(vcJwt).digest('hex');
   }
 }
 

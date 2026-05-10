@@ -12,6 +12,7 @@
 import React from 'react';
 import { ShieldCheckIcon, CameraIcon } from '@heroicons/react/solid';
 import { getClearanceBadgeClasses, getCredentialType, getCredentialSubject, getEnterpriseAttr } from '@/utils/credentialTypeDetector';
+import { useCAPortal } from '@/utils/CAPortalContext';
 
 interface CredentialLayoutProps {
   credential: any;
@@ -25,6 +26,7 @@ interface CredentialLayoutProps {
  * - Right: Personal details (name, DOB, gender, unique ID, dates)
  */
 export function IDCardLayout({ credential }: CredentialLayoutProps) {
+  const { openCAPortal } = useCAPortal();
   // Use helper to handle all credential formats (including SDK JWTCredential with properties Map)
   const subject = getCredentialSubject(credential);
 
@@ -83,14 +85,12 @@ export function IDCardLayout({ credential }: CredentialLayoutProps) {
 
           {uniqueId !== 'N/A' && (
             <div className="mt-1">
-              <a
-                href={`https://identuslabel.cz/ca/login?uid=${encodeURIComponent(uniqueId)}`}
-                target="_blank"
-                rel="noopener noreferrer"
+              <button
+                onClick={() => openCAPortal(`https://identuslabel.cz/ca/login?uid=${encodeURIComponent(uniqueId)}`)}
                 className="inline-flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300 underline underline-offset-2"
               >
                 🔐 CA Portal
-              </a>
+              </button>
             </div>
           )}
         </div>
@@ -189,12 +189,20 @@ export function CertificateLayout({ credential }: CredentialLayoutProps) {
 }
 
 function EnterpriseIDLayout({ credential }: { credential: any }) {
-  const role = getEnterpriseAttr(credential, 'role');
-  const company = getEnterpriseAttr(credential, 'companyName');
-  const department = getEnterpriseAttr(credential, 'department');
-  const email = getEnterpriseAttr(credential, 'email');
-  const employeeId = getEnterpriseAttr(credential, 'employeeId');
-  const issued = credential.issuedAt ? new Date(credential.issuedAt).toLocaleDateString() : '—';
+  const { openCAPortal } = useCAPortal();
+  // Support both enterprise (claims/credentialAttributes) and personal wallet (credentialSubject via SDK) shapes
+  const subject = getCredentialSubject(credential);
+  const attr = (name: string) => getEnterpriseAttr(credential, name) || subject?.[name] || '';
+  const role = attr('role');
+  const company = attr('companyName');
+  const department = attr('department');
+  const email = attr('email');
+  const employeeId = attr('employeeId');
+  const portalUrl = attr('portalUrl') || (email
+    ? `https://identuslabel.cz/company-admin/employee-portal-login.html?email=${encodeURIComponent(email)}`
+    : null);
+  const issuedRaw = credential.issuedAt || attr('effectiveDate') || attr('hireDate');
+  const issued = issuedRaw ? new Date(issuedRaw).toLocaleDateString() : '—';
 
   return (
     <div className="bg-gradient-to-r from-indigo-500/20 to-blue-500/20 rounded-xl p-4 border border-indigo-500/30">
@@ -210,6 +218,16 @@ function EnterpriseIDLayout({ credential }: { credential: any }) {
           <div><div className="text-xs text-slate-400">Email</div><div className="text-slate-200 truncate">{email || '—'}</div></div>
           <div><div className="text-xs text-slate-400">Employee ID</div><div className="text-slate-300 font-mono text-xs">{employeeId || '—'}</div></div>
           <div><div className="text-xs text-slate-400">Issued</div><div className="text-slate-200">{issued}</div></div>
+          {portalUrl && (
+            <div className="col-span-2 mt-1">
+              <button
+                onClick={() => openCAPortal(portalUrl)}
+                className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 underline"
+              >
+                🏢 Employee Portal
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

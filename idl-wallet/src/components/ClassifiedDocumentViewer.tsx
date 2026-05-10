@@ -30,9 +30,16 @@ import {
   LockClosedIcon,
   EyeIcon,
   CloudDownloadIcon,
-  RefreshIcon
+  RefreshIcon,
+  CollectionIcon
 } from '@heroicons/react/solid';
 import { getSecurityClearanceKeys } from '@/utils/securityKeyStorage';
+import {
+  fetchManifestHistory,
+  verifyManifestChain,
+  type ManifestHistoryResponse,
+  type ChainVerificationResult
+} from '@/utils/KeyAuthorityClient';
 
 /**
  * Classification badge configuration
@@ -109,6 +116,12 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
 
   const isDocx = document.sourceInfo?.format?.toLowerCase() === 'docx';
 
+  // Version history state
+  const [activeTab, setActiveTab] = useState<'document' | 'history'>('document');
+  const [manifestHistory, setManifestHistory] = useState<ManifestHistoryResponse | null>(null);
+  const [chainVerificationResult, setChainVerificationResult] = useState<ChainVerificationResult | null>(null);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
   // Get MIME type based on document format
   const getMimeType = (format: string | undefined): string => {
     switch (format?.toLowerCase()) {
@@ -142,7 +155,13 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
     const format = document.sourceInfo?.format;
     const mimeType = getMimeType(format);
     const extension = getFileExtension(format);
-    const filename = (document.title || 'document').replace(/[^a-zA-Z0-9-_]/g, '_') + extension;
+    // Use original filename from sourceInfo if available; otherwise derive from title.
+    // Strip any existing extension from the base name before appending the canonical one
+    // to avoid doubling (e.g. "ACME_Test (1).docx" → base "ACME_Test (1)" → "ACME_Test (1).docx").
+    const rawBase = document.sourceInfo?.filename || document.title || 'document';
+    const baseName = rawBase.replace(/\.[^.]+$/, ''); // strip extension if present
+    // Replace only characters illegal in filenames on common platforms (/ \ : * ? " < > |)
+    const filename = baseName.replace(/[/\\:*?"<>|]/g, '_') + extension;
 
     const blob = new Blob([decryptedBytes], { type: mimeType });
     const url = URL.createObjectURL(blob);
@@ -157,6 +176,22 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
 
     console.log('[ClassifiedDocumentViewer] Downloaded:', filename);
   }, [decryptedBytes, document.title, document.sourceInfo?.format]);
+
+  // Load version history from document-service via company-admin proxy
+  const loadHistory = useCallback(async () => {
+    const did = document.originalDocumentDID;
+    if (!did) return;
+    setIsLoadingHistory(true);
+    setChainVerificationResult(null);
+    try {
+      const data = await fetchManifestHistory(did);
+      setManifestHistory(data);
+    } catch (err: any) {
+      console.error('[ClassifiedDocumentViewer] Failed to load history:', err);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, [document.originalDocumentDID]);
 
   // Update countdown every minute
   useEffect(() => {
@@ -201,6 +236,16 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
 
             if (decrypted) {
               console.log('[ClassifiedDocumentViewer] Ephemeral key decryption successful!');
+              // Notify server for audit log (fire-and-forget, never blocks decryption)
+              fetch('/company-admin/api/access-gate/notify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  documentDID: document.originalDocumentDID,
+                  ephemeralDID: document.ephemeralDID,
+                  clearanceLevel: document.overallClassification,
+                }),
+              }).catch(() => {});
             }
           } catch (ephemeralErr) {
             console.warn('[ClassifiedDocumentViewer] Ephemeral key decryption failed:', ephemeralErr);
@@ -466,6 +511,26 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
             </button>
           )}
 
+          {/* Version History Button */}
+          {document.originalDocumentDID && (
+            <button
+              onClick={() => {
+                const next = activeTab === 'history' ? 'document' : 'history';
+                setActiveTab(next);
+                if (next === 'history' && !manifestHistory) loadHistory();
+              }}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+                activeTab === 'history'
+                  ? 'bg-white bg-opacity-40 ring-2 ring-white ring-opacity-60'
+                  : 'bg-white bg-opacity-20 hover:bg-opacity-30'
+              }`}
+              title="Version history"
+            >
+              <CollectionIcon className="w-5 h-5" />
+              <span className="text-sm font-medium">History</span>
+            </button>
+          )}
+
           {/* Close Button */}
           <button
             onClick={onClose}
@@ -526,6 +591,156 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
 
       {/* Content Area */}
       <div className="flex-1 overflow-auto bg-gray-100 relative">
+
+        {/* ── History Panel ──────────────────────────────────────────── */}
+        {activeTab === 'history' && (
+          <div className="max-w-4xl mx-auto my-6 px-4">
+            <div className="bg-white rounded-xl shadow-lg overflow-hidden">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+                <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+                  <CollectionIcon className="w-5 h-5 text-gray-500" />
+                  Version History
+                </h2>
+                <div className="flex items-center gap-3">
+                  {manifestHistory && (
+                    <button
+                      onClick={async () => {
+                        const result = await verifyManifestChain(manifestHistory);
+                        setChainVerificationResult(result);
+                      }}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 transition-colors"
+                    >
+                      <ShieldCheckIcon className="w-4 h-4" />
+                      Verify Chain
+                    </button>
+                  )}
+                  <button
+                    onClick={loadHistory}
+                    disabled={isLoadingHistory}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshIcon className={`w-4 h-4 ${isLoadingHistory ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                </div>
+              </div>
+
+              {/* Chain verification result */}
+              {chainVerificationResult && (
+                <div className={`px-6 py-3 flex items-center gap-3 text-sm border-b ${
+                  chainVerificationResult.valid
+                    ? 'bg-green-50 border-green-200 text-green-800'
+                    : 'bg-red-50 border-red-200 text-red-800'
+                }`}>
+                  {chainVerificationResult.valid ? (
+                    <ShieldCheckIcon className="w-5 h-5 text-green-600 flex-shrink-0" />
+                  ) : (
+                    <ExclamationIcon className="w-5 h-5 text-red-500 flex-shrink-0" />
+                  )}
+                  <span className="font-medium">
+                    {chainVerificationResult.valid
+                      ? `Chain intact — all predecessor hashes verified`
+                      : `Chain broken: ${chainVerificationResult.reason}`}
+                  </span>
+                </div>
+              )}
+
+              {/* Loading state */}
+              {isLoadingHistory && (
+                <div className="flex items-center justify-center py-16">
+                  <div className="animate-spin w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full" />
+                </div>
+              )}
+
+              {/* Empty state */}
+              {!isLoadingHistory && !manifestHistory && (
+                <div className="text-center py-16 text-gray-500">
+                  <CollectionIcon className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                  <p>No history loaded. Click Refresh to load.</p>
+                </div>
+              )}
+
+              {/* History table */}
+              {!isLoadingHistory && manifestHistory && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 text-gray-600 uppercase text-xs">
+                      <tr>
+                        <th className="px-6 py-3 text-left">Version</th>
+                        <th className="px-6 py-3 text-left">Updated By</th>
+                        <th className="px-6 py-3 text-left">Issued At</th>
+                        <th className="px-6 py-3 text-left">Classification</th>
+                        <th className="px-6 py-3 text-left">Chain</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {/* Current version row */}
+                      {manifestHistory.current && (() => {
+                        const c = manifestHistory.current;
+                        const payload = c.vcJwt
+                          ? (() => { try { return JSON.parse(atob(c.vcJwt.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))); } catch { return null; } })()
+                          : null;
+                        const cs = payload?.vc?.credentialSubject || {};
+                        return (
+                          <tr key={c.vcId} className="bg-indigo-50">
+                            <td className="px-6 py-4 font-mono font-semibold text-indigo-700">
+                              v{cs.versionNumber ?? '—'}
+                              <span className="ml-2 text-xs bg-indigo-200 text-indigo-800 px-1.5 py-0.5 rounded">current</span>
+                            </td>
+                            <td className="px-6 py-4 text-gray-700">{cs.updatedBy || '—'}</td>
+                            <td className="px-6 py-4 text-gray-600 font-mono text-xs">
+                              {c.issuedAt ? new Date(c.issuedAt).toLocaleString() : '—'}
+                            </td>
+                            <td className="px-6 py-4">{cs.classificationLevel || '—'}</td>
+                            <td className="px-6 py-4">
+                              {chainVerificationResult
+                                ? <ShieldCheckIcon className="w-4 h-4 text-green-500" />
+                                : <span className="text-gray-400">—</span>}
+                            </td>
+                          </tr>
+                        );
+                      })()}
+
+                      {/* History rows (newest-first) */}
+                      {manifestHistory.history.map((entry, idx) => {
+                        const payload = entry.vcJwt
+                          ? (() => { try { return JSON.parse(atob(entry.vcJwt.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))); } catch { return null; } })()
+                          : null;
+                        const cs = payload?.vc?.credentialSubject || {};
+                        const linkIdx = idx; // link 0 = between current and history[0], etc.
+                        const linkOk = chainVerificationResult?.valid ||
+                          (chainVerificationResult?.brokenAt !== undefined && linkIdx < chainVerificationResult.brokenAt);
+                        return (
+                          <tr key={entry.vcId} className="hover:bg-gray-50">
+                            <td className="px-6 py-4 font-mono text-gray-600">v{cs.versionNumber ?? '—'}</td>
+                            <td className="px-6 py-4 text-gray-600">{cs.updatedBy || '—'}</td>
+                            <td className="px-6 py-4 text-gray-500 font-mono text-xs">
+                              {entry.issuedAt ? new Date(entry.issuedAt).toLocaleString() : '—'}
+                            </td>
+                            <td className="px-6 py-4 text-gray-500">{cs.classificationLevel || '—'}</td>
+                            <td className="px-6 py-4">
+                              {chainVerificationResult
+                                ? (linkOk
+                                  ? <ShieldCheckIcon className="w-4 h-4 text-green-500" />
+                                  : <ExclamationIcon className="w-4 h-4 text-red-500" />)
+                                : <span className="text-gray-400">—</span>}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {manifestHistory.history.length === 0 && (
+                    <p className="text-center text-gray-400 text-sm py-6">No previous versions — this is the first version.</p>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Document view (hidden when history tab active) ──────── */}
+        <div className={activeTab === 'history' ? 'hidden' : ''}>
         {/* Loading State */}
         {isDecrypting && (
           <div className="absolute inset-0 flex items-center justify-center bg-white">
@@ -616,7 +831,8 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
             )}
           </div>
         )}
-      </div>
+        </div>{/* end document-view wrapper */}
+      </div>{/* end Content Area */}
 
       {/* Footer */}
       <div className="bg-gray-800 text-gray-400 px-6 py-3 text-sm flex items-center justify-between">

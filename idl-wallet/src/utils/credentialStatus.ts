@@ -28,6 +28,14 @@ function rewriteStatusUrl(url: string): string {
     return `https://identuslabel.cz/enterprise/credential-status/${enterpriseMatch[1]}`;
   }
 
+  // Rewrite http://91.99.4.54:8200/cloud-agent/credential-status/xxx to https://identuslabel.cz/techcorp/credential-status/xxx
+  // Multitenancy agent (TechCorp) — Caddy's handle_path /techcorp* strips /techcorp before proxying to port 8200
+  const multitenancyPattern = /^http:\/\/91\.99\.4\.54:8200\/cloud-agent\/credential-status\/(.+)$/;
+  const multitenancyMatch = url.match(multitenancyPattern);
+  if (multitenancyMatch) {
+    return `https://identuslabel.cz/techcorp/credential-status/${multitenancyMatch[1]}`;
+  }
+
   return url;
 }
 

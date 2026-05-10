@@ -4,6 +4,42 @@ This file contains historical updates and fixes that have been archived from the
 
 ---
 
+## [2026-05-10] — Browser Tab, serviceUrl VC Standard, My Documents Removed
+
+### Added
+- **Browser tab in IDL Wallet** (`idl-wallet/src/pages/browser.tsx`): new page that auto-discovers services from the user's credentials. Any VC with a `serviceUrl` field in `credentialSubject` appears as a service card with a "Launch" button that opens the existing fullscreen iframe modal.
+- **Nav card "Browser"** added to IDL Wallet home page (`idl-wallet/src/pages/index.tsx`).
+- **`serviceUrl` / `serviceName` / `serviceIcon` VC standard**: convention for service-linked VCs. Any issuer adding these three fields to `credentialSubject` will have their service auto-appear in the wallet Browser tab — no wallet code changes needed per new service type.
+- **Backwards-compatible shims** in Browser page: existing `RealPersonIdentity` credentials (detected via `uniqueId` prefix `CA-`) and `EmployeeRole` credentials (detected via `email` + `employeeId`) construct the `serviceUrl` at runtime so already-held credentials appear without re-issuance.
+- Enterprise credential format support: Browser page checks `cred.claims` (flat object from cloud agent API) before falling back to SDK `getCredentialSubject()`, so enterprise credentials (EmployeeRole) are detected correctly.
+
+### Changed
+- **`RealPersonIdentity` VC issuance** (`certification-authority/server.js`): `enrichedClaims` now includes `serviceUrl` (full CA login URL with `uid` param), `serviceName: 'Certification Authority'`, `serviceIcon: '🔐'` baked in at issuance time.
+- **`EmployeeRole` VC issuance** (`company-admin-portal/lib/EmployeeWalletManager.js`): `credentialSubject` now includes `serviceUrl` (full employee portal URL with `email` param), `serviceName: 'Employee Portal'`, `serviceIcon: '🏢'` baked in at issuance time.
+
+### Removed
+- **"My Documents" nav card** removed from IDL Wallet home page (`idl-wallet/src/pages/index.tsx`). The `/my-documents` page still exists but is no longer reachable from the home dashboard.
+
+---
+
+## [2026-04-29] — Security Fix: Document Update Clearance Enforcement
+
+### Fixed
+- **SECURITY**: `POST /api/document-update/request-edit` compared editor clearance against `classificationLevel` (discovery level) instead of the highest paragraph style present in the DOCX. A CONFIDENTIAL user could obtain an edit token for a document containing SECRET paragraphs.
+- **SECURITY**: `POST /api/document-update/submit` had no independent clearance check — it trusted the editToken's embedded clearance level without re-validation.
+- Audit log for `DOCUMENT_EDITED` events now records `previousFileId` so prior Iagon file IDs are recoverable.
+
+### Added
+- `resolveDocumentHighestLevel(document, documentDID)` helper in `company-admin-portal/server.js` — resolves the true highest clearance level in a DOCX by: (1) checking stored `sectionMetadata`, (2) downloading and parsing the original DOCX from Iagon via `DocxClearanceParser` when metadata is absent, (3) falling back to `classificationLevel`.
+
+### Root Cause
+`classificationLevel` is a discovery-level field (controls who sees the document in their list). For DOCX files the actual highest content level is only determinable by parsing paragraph styles. The `request-edit` endpoint used the wrong field for its clearance gate.
+
+### Impact
+Documents where a lower-clearance editor uploaded a redacted DOCX before this fix was deployed have `[REDACTED]` placeholder text baked into `originalDocxFileId` as plain content. Recovery requires re-uploading from the local source file.
+
+---
+
 ## April 2026
 
 ### Document Viewer Fix + Update Button — IDL Wallet (April 12, 2026)

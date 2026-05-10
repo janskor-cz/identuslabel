@@ -27,6 +27,14 @@ const employeeLogin = {
     init() {
         console.log('Employee Portal Login initialized');
 
+        // Pre-populate email from URL param (set by EmployeeRole VC portalUrl)
+        const params = new URLSearchParams(window.location.search);
+        const emailParam = params.get('email');
+        if (emailParam) {
+            const emailField = document.getElementById('employee-email');
+            if (emailField) emailField.value = emailParam;
+        }
+
         // Check if already authenticated
         const token = localStorage.getItem('employee_session_token');
         if (token) {
@@ -214,6 +222,14 @@ const employeeLogin = {
             localStorage.setItem('employee_session_token', data.sessionToken);
             localStorage.setItem('employeeEmail', this.state.email);
 
+            // Flag for dashboard: auto-open clearance modal if clearance was not provided at login
+            const loginHasClearance = data.clearance?.hasClearanceVC || false;
+            if (!loginHasClearance) {
+                sessionStorage.setItem('clearance_prompt_pending', '1');
+            } else {
+                sessionStorage.removeItem('clearance_prompt_pending');
+            }
+
             // Show success notification
             this.showNotification('Authentication successful! Redirecting...', 'success');
 
@@ -221,10 +237,10 @@ const employeeLogin = {
             setTimeout(() => {
                 if (!data.training.hasValidTraining) {
                     // Redirect to training page
-                    window.location.href = '/company-admin/employee-training.html';
+                    window.location.replace('/company-admin/employee-training.html');
                 } else {
                     // Redirect to dashboard
-                    window.location.href = '/company-admin/employee-portal-dashboard.html';
+                    window.location.replace('/company-admin/employee-portal-dashboard.html');
                 }
             }, 1500);
 
@@ -239,9 +255,9 @@ const employeeLogin = {
      */
     async verifyExistingSession(token) {
         try {
-            const response = await fetch(`${this.config.apiBasePath}/auth/session`, {
+            const response = await fetch(`${this.config.apiBasePath}/profile`, {
                 headers: {
-                    'Authorization': `Bearer ${token}`
+                    'x-session-token': token
                 }
             });
 
@@ -250,9 +266,9 @@ const employeeLogin = {
 
                 // Session is valid, redirect to appropriate page
                 if (!data.training.hasValidTraining) {
-                    window.location.href = '/company-admin/employee-training.html';
+                    window.location.replace('/company-admin/employee-training.html');
                 } else {
-                    window.location.href = '/company-admin/employee-portal-dashboard.html';
+                    window.location.replace('/company-admin/employee-portal-dashboard.html');
                 }
             } else {
                 // Invalid session, clear token

@@ -501,31 +501,41 @@ const app = {
     async issueCredential(connectionId, employeeName) {
         console.log('[SERVICE-CONFIG] Issuing Service Configuration VC to:', connectionId);
 
-        // Extract name, role, department from label
-        // Format: "Name (Role) - Department" or "Name - Department" or just "Name"
+        // Extract name, role, department from label as fallback
         let name = employeeName;
         let role = '';
         let department = '';
 
-        // Parse label: "Jan Novak (Accountant) - Finance"
         const roleMatch = employeeName.match(/^([^(]+)\(([^)]+)\)(.*)$/);
         if (roleMatch) {
             name = roleMatch[1].trim();
             role = roleMatch[2].trim();
             const remainder = roleMatch[3].trim();
-            if (remainder.startsWith('- ')) {
-                department = remainder.substring(2).trim();
-            }
+            if (remainder.startsWith('- ')) department = remainder.substring(2).trim();
         } else {
-            // Try "Name - Department" format
             const deptMatch = employeeName.match(/^([^-]+)-(.+)$/);
-            if (deptMatch) {
-                name = deptMatch[1].trim();
-                department = deptMatch[2].trim();
-            }
+            if (deptMatch) { name = deptMatch[1].trim(); department = deptMatch[2].trim(); }
         }
 
-        // Show modal to collect email and confirm details
+        // Try to fetch stored invitation data to pre-fill email
+        let storedEmail = '';
+        let storedDept = department;
+        try {
+            const inv = await fetch(`/company-admin/api/company/connections/${connectionId}/invitation-data`, { credentials: 'include' });
+            const invData = await inv.json();
+            if (invData.success && invData.data) {
+                storedEmail = invData.data.email || '';
+                name = invData.data.name || name;
+                storedDept = invData.data.department || department;
+            }
+        } catch (e) { /* non-fatal, fall through */ }
+
+        const emailReadOnly = storedEmail ? 'readonly' : '';
+        const emailHint = storedEmail
+            ? '<small class="form-text text-success">✓ Auto-generated from invitation</small>'
+            : '<small class="form-text text-muted">Required for Enterprise Cloud Agent access</small>';
+
+        // Show modal
         const modal = document.createElement('div');
         modal.className = 'modal fade show';
         modal.style.display = 'block';
@@ -548,18 +558,8 @@ const app = {
                         </div>
                         <div class="form-group">
                             <label>Email Address *</label>
-                            <input type="email" class="form-control" id="employeeEmail" placeholder="employee@techcorp.com" required>
-                            <small class="form-text text-muted">Required for Enterprise Cloud Agent access</small>
-                        </div>
-                        <div class="form-group">
-                            <label>Department *</label>
-                            <select class="form-control" id="employeeDept" required>
-                                <option value="">-- Select Department --</option>
-                                <option value="HR" ${department === 'HR' ? 'selected' : ''}>HR</option>
-                                <option value="IT" ${department === 'IT' ? 'selected' : ''}>IT</option>
-                                <option value="Security" ${department === 'Security' ? 'selected' : ''}>Security</option>
-                            </select>
-                            <small class="form-text text-muted">Determines Enterprise Cloud Agent access level</small>
+                            <input type="email" class="form-control" id="employeeEmail" value="${storedEmail}" placeholder="employee@company.test" ${emailReadOnly} required>
+                            ${emailHint}
                         </div>
                         <div class="alert alert-info">
                             <strong>ℹ️ Service Configuration VC</strong><br>
@@ -567,7 +567,7 @@ const app = {
                             <ul class="mb-0 mt-2">
                                 <li>Enterprise Cloud Agent (port 8300)</li>
                                 <li>Department-specific API access</li>
-                                <li>Internal company services</li>
+                                <li>Employee portal accessible from wallet</li>
                             </ul>
                         </div>
                     </div>
@@ -585,10 +585,9 @@ const app = {
         document.getElementById('confirmIssueBtn').onclick = async () => {
             const employeeNameInput = document.getElementById('employeeName').value.trim();
             const employeeEmail = document.getElementById('employeeEmail').value.trim();
-            const employeeDept = document.getElementById('employeeDept').value;
 
-            if (!employeeNameInput || !employeeEmail || !employeeDept) {
-                this.showNotification('Name, Email, and Department are required', 'error');
+            if (!employeeNameInput || !employeeEmail) {
+                this.showNotification('Name and Email are required', 'error');
                 return;
             }
 
@@ -604,8 +603,7 @@ const app = {
                     credentials: 'include',  // Include session cookie
                     body: JSON.stringify({
                         name: employeeNameInput,
-                        email: employeeEmail,
-                        department: employeeDept
+                        email: employeeEmail
                     })
                 });
 
@@ -694,6 +692,70 @@ const app = {
         setTimeout(() => {
             toast.classList.add('hidden');
         }, 3000);
+    },
+
+    /**
+     * Sync enterprise SecurityClearanceGrant VCs against personal CA clearance status.
+     * Revokes enterprise grants whose personal CA VCs have been revoked.
+     */
+    async syncClearance() {
+        const btn = document.getElementById('sync-clearance-btn');
+        const resultEl = document.getElementById('sync-clearance-result');
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing…'; }
+        if (resultEl) resultEl.style.display = 'none';
+
+        try {
+            const res = await fetch('/company-admin/api/company/sync-clearance', { method: 'POST' });
+            const data = await res.json();
+
+            if (data.success) {
+                const r = data.report;
+                const color = r.revoked > 0 ? '#fff3cd' : '#d4edda';
+                const border = r.revoked > 0 ? '#ffc107' : '#28a745';
+                const msg = [
+                    `Checked: <strong>${r.synced}</strong> active grants`,
+                    `Revoked now: <strong>${r.revoked}</strong>`,
+                    r.alreadyRevoked > 0 ? `Already revoked: ${r.alreadyRevoked}` : null,
+                    r.personalNotFound > 0 ? `Personal VC not found: ${r.personalNotFound}` : null,
+                    r.noStatusList > 0 ? `<strong>${r.noStatusList} old-format VC(s) need manual wallet deletion</strong>` : null,
+                    r.errors.length > 0 ? `Errors: ${r.errors.length}` : null
+                ].filter(Boolean).join(' &bull; ');
+
+                if (resultEl) {
+                    resultEl.style.cssText = `display:block; background:${color}; border:1px solid ${border}; padding:.75rem 1rem; border-radius:6px; margin:.5rem 1rem;`;
+                    resultEl.innerHTML = `✅ Sync complete — ${msg}`;
+                    if (r.noStatusList > 0) {
+                        const details = r.noStatusListDetails.map(d =>
+                            `${d.holderName || d.holderDID} (${d.credentialType} ${d.clearanceLevel})`
+                        ).join(', ');
+                        resultEl.innerHTML += `<br><small>⚠️ These old-format VCs have no revocation status list and cannot be server-revoked. Have the employee delete them from their wallet: ${details}</small>`;
+                    }
+                    if (r.errors.length > 0) {
+                        resultEl.innerHTML += `<br><small>Errors: ${r.errors.map(e => e.error).join('; ')}</small>`;
+                    }
+                }
+
+                if (r.revoked > 0) {
+                    this.showNotification(`Revoked ${r.revoked} stale enterprise clearance grant(s)`, 'warning');
+                } else {
+                    this.showNotification('Clearance sync complete — no revocations needed', 'success');
+                }
+            } else {
+                if (resultEl) {
+                    resultEl.style.cssText = 'display:block; background:#f8d7da; border:1px solid #dc3545; padding:.75rem 1rem; border-radius:6px; margin:.5rem 1rem;';
+                    resultEl.innerHTML = `❌ Sync failed: ${data.error}`;
+                }
+                this.showNotification('Clearance sync failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            if (resultEl) {
+                resultEl.style.cssText = 'display:block; background:#f8d7da; border:1px solid #dc3545; padding:.75rem 1rem; border-radius:6px; margin:.5rem 1rem;';
+                resultEl.innerHTML = `❌ Network error: ${err.message}`;
+            }
+            this.showNotification('Sync error: ' + err.message, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = '🔄 Sync Clearance'; }
+        }
     },
 
     async loadAccessLogs() {

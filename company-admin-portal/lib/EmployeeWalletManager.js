@@ -193,6 +193,9 @@ async function createEmployeeWallet(employeeData, companyDID = null) {
       issuerDID: companyDID || TECHCORP_PRISM_DID, // DID of the credential issuer (company-specific) - enables document releasability filtering
       role: employeeData.role || "Engineer",
       department: employeeData.department || department || "Engineering",
+      serviceUrl: `https://identuslabel.cz/company-admin/employee-portal-login.html?email=${encodeURIComponent(email)}`,
+      serviceName: 'Employee Portal',
+      serviceIcon: '🏢',
       hireDate: new Date().toISOString(),
       effectiveDate: new Date().toISOString(),
       expiryDate: new Date(Date.now() + 365*24*60*60*1000).toISOString() // 1 year from now
