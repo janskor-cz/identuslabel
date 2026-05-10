@@ -282,6 +282,18 @@ identuslabel.cz {
         }
     }
 
+    # MCP Bridge (/mcp -> port 3031 via mcp-proxy)
+    # Claude Code MCP server bridge for remote claude.ai connector
+    # Routes through mcp-proxy (3031) which handles MCP header requirements
+    handle_path /mcp* {
+        reverse_proxy 127.0.0.1:3031 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
     # Document Service (/document-service -> port 3020)
     # Stateless VP-gated document access microservice (identus-document-service)
     handle_path /document-service* {
