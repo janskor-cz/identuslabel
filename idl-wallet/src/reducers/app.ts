@@ -102,6 +102,8 @@ const walletConfig = getWalletConfig();
 export const initialState: RootState = {
     errors: [],
     wallet: walletConfig,
+    username: null,
+    iagonBackup: { status: 'idle' },
     db: {
         instance: null,
         connected: false,
@@ -177,9 +179,16 @@ export type PresentationRequest = {
     status: PresentationRequestStatus;
 };
 
+export type IagonBackupStatus = 'idle' | 'checking' | 'downloading' | 'restoring' | 'uploading' | 'synced' | 'error';
+
 export type RootState = {
     errors: TraceableError[];
     wallet: WalletConfig;
+    username: string | null;
+    iagonBackup: {
+        status: IagonBackupStatus;
+        error?: string;
+    };
     db: {
         instance: SDK.Domain.Pluto | null,
         connected: boolean
@@ -395,6 +404,24 @@ const appSlice = createSlice({
         ) => {
             state.prismDIDs = [...state.prismDIDs, action.payload];
             state.isCreatingPrismDID = false;
+        },
+        setUsername: (
+            state,
+            action: PayloadAction<string>
+        ) => {
+            state.username = action.payload;
+        },
+        setDefaultSeed: (
+            state,
+            action: PayloadAction<SDK.Domain.Seed>
+        ) => {
+            state.defaultSeed = action.payload;
+        },
+        setIagonBackupStatus: (
+            state,
+            action: PayloadAction<{ status: IagonBackupStatus; error?: string }>
+        ) => {
+            state.iagonBackup = action.payload;
         },
     },
     extraReducers: (builder) => {

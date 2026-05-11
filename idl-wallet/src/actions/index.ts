@@ -1839,6 +1839,7 @@ export const connectDatabase = createAsyncThunk<
     },
     {
         encryptionKey: Uint8Array,
+        username?: string,
     },
     { state: { app: RootState } }
 >("connectDatabase", async (options, api) => {
@@ -1846,9 +1847,18 @@ export const connectDatabase = createAsyncThunk<
         const state = api.getState().app;
         const hashedPassword = sha512(options.encryptionKey)
 
+        // Use username-specific DB name when provided for per-user isolation
+        const dbName = options.username
+            ? `identus-wallet-idl-${options.username.toLowerCase()}`
+            : state.wallet.dbName;
+
+        if (options.username) {
+            api.dispatch(reduxActions.setUsername(options.username));
+        }
+
         const apollo = new SDK.Apollo();
         const store = new SDK.Store({
-            name: state.wallet.dbName, // Use wallet-specific database name
+            name: dbName,
             storage: IndexDB,
             password: Buffer.from(hashedPassword).toString("hex")
         });
@@ -2232,3 +2242,126 @@ export const declinePresentation = createAsyncThunk<
         console.log('✅ [PRESENTATION] Request marked as declined');
     }
 );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IAGON WALLET BACKUP / RESTORE
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { encryptBackup, decryptBackup, WalletBackupPayload } from '../utils/walletCrypto';
+
+/**
+ * backupToIagon
+ *
+ * 1. Calls agent.backup.createJWE() to get a full SDK backup token.
+ * 2. Encrypts the JWE + seed bytes client-side (PBKDF2 + AES-256-GCM).
+ * 3. POSTs the encrypted blob to /api/wallet/upload for server-side Iagon storage.
+ */
+export const backupToIagon = createAsyncThunk<
+    void,
+    { username: string; password: string },
+    { state: { app: RootState } }
+>('app/backupToIagon', async ({ username, password }, { getState, dispatch }) => {
+    dispatch(reduxActions.setIagonBackupStatus({ status: 'uploading' }));
+    try {
+        const state = getState().app;
+        const agent = state.agent.instance;
+        if (!agent) throw new Error('Agent not started');
+
+        const jwe: string = await (agent as any).backup.createJWE();
+
+        const payload: WalletBackupPayload = {
+            version: 2,
+            username,
+            createdAt: new Date().toISOString(),
+            seedValue: Array.from(state.defaultSeed.value),
+            jwe,
+        };
+
+        const encryptedBase64 = await encryptBackup(payload, password, username);
+
+        const response = await fetch('/api/wallet/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, data: encryptedBase64 }),
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error || 'Upload failed');
+        }
+
+        dispatch(reduxActions.setIagonBackupStatus({ status: 'synced' }));
+        console.log('✅ [backupToIagon] Wallet backed up to Iagon successfully');
+    } catch (err: any) {
+        console.error('❌ [backupToIagon] Failed:', err.message);
+        dispatch(reduxActions.setIagonBackupStatus({ status: 'error', error: err.message }));
+        throw err;
+    }
+});
+
+/**
+ * restoreFromIagon
+ *
+ * 1. Downloads encrypted backup from /api/wallet/download.
+ * 2. Decrypts client-side with password.
+ * 3. Stores the restored seed in Redux (initAgent will pick it up).
+ * 4. Calls agent.backup.restore(jwe) to re-populate IndexedDB.
+ * 5. Refreshes Redux state from the restored DB.
+ */
+export const restoreFromIagon = createAsyncThunk<
+    { restored: true },
+    { username: string; password: string },
+    { state: { app: RootState } }
+>('app/restoreFromIagon', async ({ username, password }, { getState, dispatch }) => {
+    dispatch(reduxActions.setIagonBackupStatus({ status: 'downloading' }));
+    try {
+        const downloadRes = await fetch('/api/wallet/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username }),
+        });
+
+        if (!downloadRes.ok) {
+            const err = await downloadRes.json();
+            throw new Error(err.error || 'Download failed');
+        }
+
+        const { data: encryptedBase64 } = await downloadRes.json();
+
+        dispatch(reduxActions.setIagonBackupStatus({ status: 'restoring' }));
+
+        const payload = await decryptBackup(encryptedBase64, password, username);
+
+        // Restore the seed so the next initAgent call uses the correct keys
+        const restoredSeed: SDK.Domain.Seed = {
+            value: new Uint8Array(payload.seedValue),
+            size: payload.seedValue.length,
+        };
+        dispatch(reduxActions.setDefaultSeed(restoredSeed));
+
+        // Restore wallet data via SDK JWE restore
+        const state = getState().app;
+        const agent = state.agent.instance;
+        if (!agent) throw new Error('Agent not available for restore');
+
+        await (agent as any).backup.restore(payload.jwe);
+
+        // Refresh Redux state from restored DB
+        const db = state.db.instance;
+        if (db) {
+            let messages: SDK.Domain.Message[] = [];
+            try { messages = await db.getAllMessages(); } catch { /* ignore */ }
+            const connections = await db.getAllDidPairs();
+            const credentials = await db.getAllCredentials();
+            dispatch(reduxActions.dbPreload({ messages, connections, credentials }));
+        }
+
+        dispatch(reduxActions.setIagonBackupStatus({ status: 'synced' }));
+        console.log('✅ [restoreFromIagon] Wallet restored from Iagon successfully');
+        return { restored: true };
+    } catch (err: any) {
+        console.error('❌ [restoreFromIagon] Failed:', err.message);
+        dispatch(reduxActions.setIagonBackupStatus({ status: 'error', error: err.message }));
+        throw err;
+    }
+});
