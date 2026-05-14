@@ -1,9 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/router';
 import { IDLLogo } from '../IDLLogo';
 import { NavItem } from '../NavItem';
-import { useMountedApp, useAppSelector } from '@/reducers/store';
+import { useMountedApp, useAppSelector, store } from '@/reducers/store';
+import { reduxActions } from '@/reducers/app';
 import { selectIsEnterpriseConfigured } from '@/reducers/enterpriseAgent';
+import { generateCredentialHash, decryptBackup } from '@/utils/walletCrypto';
+import { clearAllConfigurations } from '@/utils/configurationStorage';
 
 interface MainLayoutProps {
   children: React.ReactNode;
@@ -20,10 +23,15 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const app = useMountedApp();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [dbPassword, setDbPassword] = useState("elribonazo");
+  const [username, setUsername] = useState('');
+  const [dbPassword, setDbPassword] = useState('');
   const [isConnecting, setIsConnecting] = useState(false);
+  const [loginError, setLoginError] = useState('');
   const [showPasswordInput, setShowPasswordInput] = useState(false);
   const [logFilePath, setLogFilePath] = useState<string | null>(null);
+  const usernameRef = useRef('');
+  const passwordRef = useRef('');
+  const iagonStatus = app.iagonBackup?.status ?? 'idle';
 
   useEffect(() => {
     // Pick up path already stored (e.g. from a previous flush)
@@ -41,14 +49,110 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     app.agent?.hasStarted ? 'connected' : app.agent?.isStarting ? 'syncing' : 'disconnected';
   const sc = STATUS_CONFIG[agentStatus];
 
+  // Startup sync — runs once after agent boots
+  useEffect(() => {
+    if (!app.agent.hasStarted) return;
+    if (!passwordRef.current || !usernameRef.current) return;
+    if (iagonStatus === 'downloading' || iagonStatus === 'restoring' || iagonStatus === 'uploading') return;
+    const u = usernameRef.current;
+    const p = passwordRef.current;
+    app.syncWalletBackup({ username: u, password: p })
+      .catch((err: any) => console.error('[MainLayout] syncWalletBackup failed:', err));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [app.agent.hasStarted]);
+
+  // Restore effect — fires when agent is initialized (instance set) but NOT yet started.
+  // Restore MUST happen before agent.start() because agent.start() writes mediator data to
+  // Pluto, making the store non-empty and causing backup.restore() to throw.
+  // AutoStartAgent blocks startAgent while iagonStatus is 'checking'/'downloading'/'restoring',
+  // so the restore completes first, then startAgent is unblocked when status becomes 'synced'.
+  useEffect(() => {
+    if (!app.agent.instance) return;   // wait until agent is initialized
+    if (app.agent.hasStarted) return;  // already started — too late to restore
+    if (iagonStatus !== 'checking') return;
+    const storedUsername = usernameRef.current;
+    const storedPassword = passwordRef.current;
+    if (!storedUsername || !storedPassword) return;
+    app.restoreFromIagon({ username: storedUsername, password: storedPassword })
+      .catch((err: any) => console.error('[MainLayout] restoreFromIagon failed:', err));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [app.agent.instance, app.agent.hasStarted, iagonStatus]);
+
   const handleConnect = async () => {
-    if (!dbPassword) return;
+    if (!username.trim()) { setLoginError('Please enter a username'); return; }
+    if (!dbPassword) { setLoginError('Please enter a password'); return; }
+    setLoginError('');
     setIsConnecting(true);
     try {
-      await app.connectDatabase({ encryptionKey: Buffer.from(dbPassword) });
+      const trimmedUser = username.trim();
+      usernameRef.current = trimmedUser;
+      passwordRef.current = dbPassword;
+
+      // Clear any stale enterprise configuration from a previous session.
+      // Config will be re-derived from actual credentials after the agent starts.
+      clearAllConfigurations();
+
+      const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+      const credHash = await generateCredentialHash(trimmedUser, dbPassword);
+      const checkRes = await fetch(`${basePath}/api/wallet/check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credHash }),
+      });
+      const checkData = await checkRes.json();
+
+      if (checkData.exists) {
+        // Pre-load the correct seed BEFORE initAgent runs.
+        // The JWE backup is encrypted with keys derived from the original seed.
+        // If initAgent uses a wrong/random seed the subsequent backup.restore(jwe) will fail.
+        // The outer backup envelope is password-encrypted (not seed-encrypted), so we can
+        // decrypt it here to extract the seed without needing the agent at all.
+        try {
+          const dlRes = await fetch(`${basePath}/api/wallet/download`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credHash }),
+          });
+          if (dlRes.ok) {
+            const { data: encryptedBase64 } = await dlRes.json();
+            const payload = await decryptBackup(encryptedBase64, dbPassword, trimmedUser);
+            app.dispatch(reduxActions.setDefaultSeed({
+              value: new Uint8Array(payload.seedValue),
+              size: payload.seedValue.length,
+            }));
+            console.log('🌱 [MainLayout] Seed pre-loaded from backup — initAgent will use correct keys');
+          }
+        } catch (seedErr: any) {
+          console.warn('⚠️ [MainLayout] Could not pre-load seed from backup:', seedErr.message);
+        }
+      }
+
+      // Connect the DB (initAgent will fire once db.instance is available)
+      await app.connectDatabase({
+        encryptionKey: Buffer.from(dbPassword),
+        username: trimmedUser,
+      });
       setShowPasswordInput(false);
+
+      if (checkData.exists) {
+        // Check if the DB already has data (returning user) using the live Redux store.
+        const liveState = store.getState().app;
+        const dbHasData =
+          (liveState.credentials?.length ?? 0) > 0 ||
+          (liveState.connections?.length ?? 0) > 0;
+
+        if (!dbHasData) {
+          // Empty DB + Iagon backup found → trigger restore after agent starts
+          console.log('📦 [MainLayout] Empty DB + backup found — will restore after agent starts');
+          app.dispatch(reduxActions.setIagonBackupStatus({ status: 'checking' }));
+        } else {
+          // DB already has data — returning user, no restore needed
+          // syncWalletBackup will run at agent start (status stays 'idle')
+          console.log('ℹ️ [MainLayout] Existing wallet — skipping restore, will sync at agent start');
+        }
+      }
     } catch (error: any) {
-      alert(`Failed to connect: ${error.message || error}`);
+      setLoginError(`Failed to connect: ${error.message || error}`);
     } finally {
       setIsConnecting(false);
     }
@@ -111,15 +215,25 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                 showPasswordInput ? (
                   <div className="space-y-2">
                     <input
-                      type="password"
-                      value={dbPassword}
-                      onChange={(e) => setDbPassword(e.target.value)}
+                      type="text"
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
                       onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleConnect()}
-                      placeholder="Database password"
+                      placeholder="Username"
                       className="w-full px-3 py-2 text-sm rounded-xl bg-slate-800/50 border border-slate-700/50 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
                       disabled={isConnecting}
                       autoFocus
                     />
+                    <input
+                      type="password"
+                      value={dbPassword}
+                      onChange={(e) => setDbPassword(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleConnect()}
+                      placeholder="Password"
+                      className="w-full px-3 py-2 text-sm rounded-xl bg-slate-800/50 border border-slate-700/50 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+                      disabled={isConnecting}
+                    />
+                    {loginError && <p className="text-xs text-red-400">{loginError}</p>}
                     <div className="flex gap-2">
                       <button
                         onClick={handleConnect}
@@ -202,23 +316,35 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       <div className="fixed top-4 right-6 z-50 flex items-center gap-3">
         {/* Inline connect form when disconnected */}
         {!isDbConnected && (
-          <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-700/60 rounded-xl px-3 py-2 backdrop-blur-sm shadow-lg">
-            <input
-              type="password"
-              value={dbPassword}
-              onChange={(e) => setDbPassword(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleConnect()}
-              placeholder="Wallet password"
-              className="w-40 bg-transparent text-sm text-white placeholder-slate-500 focus:outline-none"
-              disabled={isConnecting}
-            />
-            <button
-              onClick={handleConnect}
-              disabled={isConnecting}
-              className="px-3 py-1 rounded-lg bg-gradient-to-r from-cyan-500 to-purple-500 text-white text-xs font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 whitespace-nowrap"
-            >
-              {isConnecting ? '...' : 'Connect'}
-            </button>
+          <div className="flex flex-col gap-1 bg-slate-900/90 border border-slate-700/60 rounded-xl px-3 py-2 backdrop-blur-sm shadow-lg">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleConnect()}
+                placeholder="Username"
+                className="w-32 bg-transparent text-sm text-white placeholder-slate-500 focus:outline-none border-b border-slate-700 pb-0.5"
+                disabled={isConnecting}
+              />
+              <input
+                type="password"
+                value={dbPassword}
+                onChange={(e) => setDbPassword(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleConnect()}
+                placeholder="Password"
+                className="w-32 bg-transparent text-sm text-white placeholder-slate-500 focus:outline-none border-b border-slate-700 pb-0.5"
+                disabled={isConnecting}
+              />
+              <button
+                onClick={handleConnect}
+                disabled={isConnecting}
+                className="px-3 py-1 rounded-lg bg-gradient-to-r from-cyan-500 to-purple-500 text-white text-xs font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 whitespace-nowrap"
+              >
+                {isConnecting ? '...' : 'Login'}
+              </button>
+            </div>
+            {loginError && <p className="text-xs text-red-400">{loginError}</p>}
           </div>
         )}
 

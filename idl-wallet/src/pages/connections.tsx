@@ -16,7 +16,6 @@ import { refreshConnections, deleteConnection } from "@/actions";
 import { filterConnectionMessages } from "@/utils/messageFilters";
 import { connectionRequestQueue, ConnectionRequestItem } from "@/utils/connectionRequestQueue";
 import { messageRejection } from "@/utils/rejectionManager";
-import { CAConnectionEnforcementModal } from "@/components/CAConnectionEnforcementModal";
 import { PendingRequestsModal } from "@/components/PendingRequestsModal";
 import { getConnectionNameWithFallback } from "@/utils/connectionNameResolver";
 import { getConnectionMetadata } from "@/utils/connectionMetadata";
@@ -46,10 +45,6 @@ export default function App() {
 
     // Processing flag to prevent race conditions
     const [isProcessingMessages, setIsProcessingMessages] = useState(false);
-
-    // CA connection enforcement modal state
-    const [hasCAConnection, setHasCAConnection] = useState<boolean | null>(null); // null = checking
-    const [showCAEnforcementModal, setShowCAEnforcementModal] = useState(false);
 
     // Pending requests modal state
     const [showPendingRequestsModal, setShowPendingRequestsModal] = useState(false);
@@ -138,30 +133,6 @@ export default function App() {
     useEffect(() => {
         setConnections(app.connections)
     }, [app.connections])
-
-    // Check for existing CA connection and show enforcement modal if missing
-    useEffect(() => {
-        const checkCAConnection = async () => {
-            if (!app.db.instance || !app.db.connected || !app.agent.instance) return;
-
-            try {
-                const allConnections = await app.agent.instance.pluto.getAllDidPairs();
-                const caConnection = allConnections.find(pair => {
-                    const pairName = pair.name?.toLowerCase() || '';
-                    return pairName === 'certification authority' || pairName.includes('certification');
-                });
-
-                setHasCAConnection(!!caConnection);
-                setShowCAEnforcementModal(!caConnection);
-            } catch (error) {
-                console.error('[CONNECTIONS] Error checking CA connection:', error);
-                setHasCAConnection(false);
-                setShowCAEnforcementModal(true);
-            }
-        };
-
-        checkCAConnection();
-    }, [app.db.instance, app.db.connected, app.agent.instance, connections])
 
     // Fetch enterprise connections when switching to enterprise mode
     useEffect(() => {
@@ -520,19 +491,6 @@ export default function App() {
             </header>
 
             <DBConnect>
-                {/* CA Connection Enforcement Modal */}
-                    <CAConnectionEnforcementModal
-                        visible={showCAEnforcementModal && hasCAConnection === false}
-                        onConnectionEstablished={() => {
-                            setHasCAConnection(true);
-                            setShowCAEnforcementModal(false);
-                            app.dispatch(refreshConnections());
-                        }}
-                        agent={app.agent.instance}
-                        dispatch={app.dispatch}
-                        defaultSeed={app.defaultSeed}
-                    />
-
                     {/* Pending Requests Modal */}
                     <PendingRequestsModal
                         visible={showPendingRequestsModal}

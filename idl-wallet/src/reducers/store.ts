@@ -76,6 +76,9 @@ export const store = configureStore({
                     'app/restoreFromIagon/pending',
                     'app/restoreFromIagon/fulfilled',
                     'app/restoreFromIagon/rejected',
+                    'app/syncWalletBackup/pending',
+                    'app/syncWalletBackup/fulfilled',
+                    'app/syncWalletBackup/rejected',
                 ],
                 // Ignore these field paths in all actions
                 ignoredActionsPaths: [

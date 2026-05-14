@@ -416,7 +416,10 @@ async function handleMessages(
     }
 
     // Process issued credentials
-    const issuedCredentials = externalMessages.filter((message) => message.piuri === "https://didcomm.org/issue-credential/3.0/issue-credential");
+    const issuedCredentials = externalMessages.filter((message) =>
+        message.piuri === "https://didcomm.org/issue-credential/3.0/issue-credential" ||
+        message.piuri === "https://didcomm.atalaprism.io/issue-credential/3.0/issue-credential"
+    );
     if (issuedCredentials.length) {
         for (const issuedCredential of issuedCredentials) {
             const issueCredential = IssueCredential.fromMessage(issuedCredential);
@@ -796,6 +799,8 @@ export const startAgent = createAsyncThunk<
                 // This was previously skipped because setSecureDashboardAgent is in the try block
                 setSecureDashboardAgent(agent);
                 console.log('✅ [startAgent] SecureDashboardBridge agent set for Pluto fallback (after DIDComm error recovery)');
+                await agent.startFetchingMessages(5000);
+                console.log('✅ [startAgent] Message polling started (after DIDComm error recovery)');
             } else {
                 // Re-throw other unexpected errors
                 throw startError;
@@ -2247,7 +2252,7 @@ export const declinePresentation = createAsyncThunk<
 // IAGON WALLET BACKUP / RESTORE
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { encryptBackup, decryptBackup, WalletBackupPayload } from '../utils/walletCrypto';
+import { encryptBackup, decryptBackup, generateCredentialHash, generateContentHash, WalletBackupPayload } from '../utils/walletCrypto';
 
 /**
  * backupToIagon
@@ -2267,7 +2272,9 @@ export const backupToIagon = createAsyncThunk<
         const agent = state.agent.instance;
         if (!agent) throw new Error('Agent not started');
 
+        const credHash = await generateCredentialHash(username, password);
         const jwe: string = await (agent as any).backup.createJWE();
+        const contentHash = await generateContentHash(jwe);
 
         const payload: WalletBackupPayload = {
             version: 2,
@@ -2279,10 +2286,11 @@ export const backupToIagon = createAsyncThunk<
 
         const encryptedBase64 = await encryptBackup(payload, password, username);
 
-        const response = await fetch('/api/wallet/upload', {
+        const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+        const response = await fetch(`${basePath}/api/wallet/upload`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, data: encryptedBase64 }),
+            body: JSON.stringify({ credHash, contentHash, data: encryptedBase64 }),
         });
 
         if (!response.ok) {
@@ -2315,10 +2323,13 @@ export const restoreFromIagon = createAsyncThunk<
 >('app/restoreFromIagon', async ({ username, password }, { getState, dispatch }) => {
     dispatch(reduxActions.setIagonBackupStatus({ status: 'downloading' }));
     try {
-        const downloadRes = await fetch('/api/wallet/download', {
+        const credHash = await generateCredentialHash(username, password);
+
+        const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+        const downloadRes = await fetch(`${basePath}/api/wallet/download`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username }),
+            body: JSON.stringify({ credHash }),
         });
 
         if (!downloadRes.ok) {
@@ -2344,10 +2355,44 @@ export const restoreFromIagon = createAsyncThunk<
         const agent = state.agent.instance;
         if (!agent) throw new Error('Agent not available for restore');
 
+        // Clear the RxDB/Dexie store before restore.
+        // agent.backup.restore() calls assertStoreIsEmpty() which fails if any data exists.
+        // pluto-encrypted uses RxDB+Dexie: each collection is a SEPARATE Dexie database
+        // named `rxdb-dexie-${dbName}--${schemaVersion}--${collectionName}`.
+        // Strategy: stop Pluto (destroys the running RxDB instance), then delete all matching
+        // per-collection Dexie IDB databases via indexedDB.deleteDatabase(), then restart Pluto.
+        // We know dbHasData was false so no user data is lost.
+        const db = state.db.instance;
+        if (db) {
+            try {
+                // 1. Stop Pluto — destroys the live RxDB instance cleanly
+                await (db as any).stop?.();
+
+                // 2. Drop all rxdb-dexie IDB databases for this user
+                if (typeof window !== 'undefined' && typeof (window.indexedDB as any).databases === 'function') {
+                    const allDbs: { name: string }[] = await (window.indexedDB as any).databases();
+                    const prefix = `rxdb-dexie-identus-wallet-idl-${username.toLowerCase()}`;
+                    const toDelete = allDbs.filter((d) => d.name?.startsWith(prefix));
+                    await Promise.all(toDelete.map((d) =>
+                        new Promise<void>((resolve) => {
+                            const req = window.indexedDB.deleteDatabase(d.name);
+                            req.onsuccess = () => resolve();
+                            req.onerror   = () => resolve();
+                        })
+                    ));
+                    console.log(`🧹 [restoreFromIagon] Deleted ${toDelete.length} Dexie IDB databases for clean restore`);
+                }
+
+                // 3. Restart Pluto — creates fresh empty RxDB + collections
+                await (db as any).start?.();
+            } catch (clearErr: any) {
+                console.warn('⚠️ [restoreFromIagon] DB clear failed, attempting restore anyway:', clearErr.message);
+            }
+        }
+
         await (agent as any).backup.restore(payload.jwe);
 
         // Refresh Redux state from restored DB
-        const db = state.db.instance;
         if (db) {
             let messages: SDK.Domain.Message[] = [];
             try { messages = await db.getAllMessages(); } catch { /* ignore */ }
@@ -2361,6 +2406,75 @@ export const restoreFromIagon = createAsyncThunk<
         return { restored: true };
     } catch (err: any) {
         console.error('❌ [restoreFromIagon] Failed:', err.message);
+        dispatch(reduxActions.setIagonBackupStatus({ status: 'error', error: err.message }));
+        throw err;
+    }
+});
+
+/**
+ * syncWalletBackup
+ *
+ * Called at startup for all wallets (new and returning).
+ * Computes SHA-256 of the current JWE and compares it to the stored contentHash.
+ * Uploads a new backup only when the wallet content has actually changed.
+ */
+export const syncWalletBackup = createAsyncThunk<
+    { skipped: boolean },
+    { username: string; password: string },
+    { state: { app: RootState } }
+>('app/syncWalletBackup', async ({ username, password }, { getState, dispatch }) => {
+    try {
+        const state = getState().app;
+        const agent = state.agent.instance;
+        if (!agent) return { skipped: true };
+
+        const credHash = await generateCredentialHash(username, password);
+        const jwe: string = await (agent as any).backup.createJWE();
+        const currentContentHash = await generateContentHash(jwe);
+
+        // Check what the server has stored
+        const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
+        const checkRes = await fetch(`${basePath}/api/wallet/check`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credHash }),
+        });
+        const checkData = await checkRes.json();
+
+        if (checkData.exists && checkData.contentHash === currentContentHash) {
+            console.log('✅ [syncWalletBackup] Backup up to date, skipping upload');
+            dispatch(reduxActions.setIagonBackupStatus({ status: 'synced' }));
+            return { skipped: true };
+        }
+
+        console.log('🔄 [syncWalletBackup] Content changed, uploading new backup...');
+        dispatch(reduxActions.setIagonBackupStatus({ status: 'uploading' }));
+
+        const payload: WalletBackupPayload = {
+            version: 2,
+            username,
+            createdAt: new Date().toISOString(),
+            seedValue: Array.from(state.defaultSeed.value),
+            jwe,
+        };
+        const encryptedBase64 = await encryptBackup(payload, password, username);
+
+        const uploadRes = await fetch(`${basePath}/api/wallet/upload`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credHash, contentHash: currentContentHash, data: encryptedBase64 }),
+        });
+
+        if (!uploadRes.ok) {
+            const err = await uploadRes.json();
+            throw new Error(err.error || 'Sync upload failed');
+        }
+
+        dispatch(reduxActions.setIagonBackupStatus({ status: 'synced' }));
+        console.log('✅ [syncWalletBackup] Sync backup uploaded successfully');
+        return { skipped: false };
+    } catch (err: any) {
+        console.error('❌ [syncWalletBackup] Failed:', err.message);
         dispatch(reduxActions.setIagonBackupStatus({ status: 'error', error: err.message }));
         throw err;
     }

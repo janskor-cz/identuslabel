@@ -9,14 +9,16 @@ import { useAppSelector } from '@/reducers/store';
 import { useMountedApp } from '@/reducers/store';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { MainLayout } from '@/components/layouts/MainLayout';
+import { CAConnectionEnforcementModal } from '@/components/CAConnectionEnforcementModal';
+import { refreshConnections } from '@/actions';
 import { useRouter } from 'next/router';
 import dynamic from 'next/dynamic';
+import { useEffect, useState } from 'react';
 
 const UnifiedProofRequestModal = dynamic(
   () => import('@/components/UnifiedProofRequestModal').then(mod => ({ default: mod.UnifiedProofRequestModal })),
   { ssr: false }
 );
-import { useEffect } from 'react';
 import { routeMemoryCleanup } from '@/utils/RouteMemoryCleanup';
 import { memoryMonitor } from '@/utils/MemoryMonitor';
 import { testEncryptionRoundtrip, testEncryptionWithStoredKeys } from '@/utils/messageEncryption';
@@ -25,6 +27,54 @@ import { initConsoleLogger, cleanupConsoleLogger } from '@/utils/ConsoleLogger';
 // Import cleanup utilities to auto-export to browser console
 import '@/utils/clearWalletData';
 import '@/utils/cleanupOrphanedPeerDIDs';
+
+function GlobalCAEnforcer() {
+    const app = useMountedApp();
+    const [hasCAConnection, setHasCAConnection] = useState<boolean | null>(null);
+    const [showModal, setShowModal] = useState(false);
+    const iagonStatus = app.iagonBackup?.status ?? 'idle';
+
+    useEffect(() => {
+        // Don't check while a restore is in progress — Pluto is being rebuilt.
+        if (iagonStatus === 'checking' || iagonStatus === 'downloading' || iagonStatus === 'restoring') return;
+        // After a restore (iagonStatus was 'checking'), wait until the agent has fully started
+        // before checking — startAgent writes mediator data to Pluto and signals the agent is ready.
+        // For normal logins (iagonStatus stays 'idle'), agent.hasStarted is still the right gate.
+        if (!app.agent.hasStarted) return;
+
+        const checkCAConnection = async () => {
+            try {
+                const allConnections = await app.agent.instance!.pluto.getAllDidPairs();
+                const caConnection = allConnections.find(pair => {
+                    const pairName = (pair.name ?? '').toLowerCase();
+                    return pairName === 'certification authority' || pairName.includes('certification');
+                });
+                setHasCAConnection(!!caConnection);
+                setShowModal(!caConnection);
+            } catch {
+                setHasCAConnection(false);
+                setShowModal(true);
+            }
+        };
+        checkCAConnection();
+    }, [app.agent.hasStarted, iagonStatus]);
+
+    if (!showModal || hasCAConnection !== false) return null;
+
+    return (
+        <CAConnectionEnforcementModal
+            visible={true}
+            onConnectionEstablished={() => {
+                setHasCAConnection(true);
+                setShowModal(false);
+                app.dispatch(refreshConnections());
+            }}
+            agent={app.agent.instance}
+            dispatch={app.dispatch}
+            defaultSeed={app.defaultSeed}
+        />
+    );
+}
 
 function CAPortalRenderer() {
     const { caPortalUrl, closeCAPortal, isMinimized, minimizeCAPortal, restoreCAPortal, setPendingDocumentDID } = useCAPortal();
@@ -182,6 +232,7 @@ function App({ Component, pageProps }) {
             <MountSDK>
                 <AutoStartAgent />
                 <WasmMemoryGuard />
+                <GlobalCAEnforcer />
                 <UnifiedProofRequestModal />
                 <CredentialOfferModal />
                 <EnterpriseCredentialOfferModal />

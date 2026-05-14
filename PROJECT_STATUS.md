@@ -28,6 +28,23 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ Multi-user Wallet, Hash-based Backup & Restore, Enterprise Config from VCs (May 14, 2026)
+
+**STATUS**: ✅ **PRODUCTION** — IDL Wallet at `identuslabel.cz/wallet`
+
+**What changed:**
+
+- **Multi-user login**: username + password fields; the username drives the wallet's IndexedDB namespace and Iagon backup key.
+- **Privacy-preserving backup**: Iagon backups are keyed by `SHA-256(username:password)` — the server never sees a plaintext username. Files named `wallets-<credHash16>-<contentHash16>.jwe`.
+- **Incremental sync** (`syncWalletBackup`): on every agent startup, a SHA-256 of the current JWE is compared to the stored `contentHash`. Upload is skipped if nothing changed.
+- **Cross-browser restore fixed**: before calling `agent.backup.restore()`, all `rxdb-dexie-identus-wallet-idl-${user}--*` Dexie databases are deleted (Pluto stop → IDB delete → Pluto restart), eliminating the "Pluto Store not empty" error.
+- **CA Modal race fixed**: `GlobalCAEnforcer` now gates on `agent.hasStarted` and Iagon status — no more undismissable modal after restore.
+- **Enterprise config from VCs**: `AutoStartAgent` scans actual credentials for a `ServiceConfiguration` VC on startup instead of blindly loading from localStorage. Stale configs from previous sessions are cleared on every login.
+
+**Files changed**: `actions/index.ts`, `components/AutoStartAgent.tsx`, `components/layouts/MainLayout.tsx`, `pages/_app.tsx`, `pages/index.tsx`, `pages/api/wallet/{check,upload,download}.ts`, `utils/walletCrypto.ts`, `reducers/store.ts`
+
+---
+
 ### ✅ Browser Tab — Credential-Driven Service Launcher (May 10, 2026)
 
 **STATUS**: ✅ **PRODUCTION READY** - Any VC with a `serviceUrl` field auto-appears in the wallet Browser tab

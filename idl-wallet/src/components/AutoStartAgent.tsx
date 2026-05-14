@@ -8,50 +8,70 @@
 import { useEffect, useState } from "react";
 import { useMountedApp, useAppSelector } from "@/reducers/store";
 import { useDispatch } from "react-redux";
-import { setConfiguration } from "@/reducers/enterpriseAgent";
-import { getActiveConfiguration } from "@/utils/configurationStorage";
+import { clearConfiguration } from "@/reducers/enterpriseAgent";
+import { clearActiveConfiguration } from "@/utils/configurationStorage";
+import { getCredentialType } from "@/utils/credentialTypeDetector";
+import { extractConfiguration, validateConfiguration } from "@/utils/serviceConfigManager";
 
 export function AutoStartAgent() {
   const app = useMountedApp();
   const { db, mediatorDID, initAgent, startAgent } = app;
   const dispatch = useDispatch();
   const enterpriseAgent = useAppSelector((state) => state.enterpriseAgent);
+  const iagonStatus = app.iagonBackup?.status ?? 'idle';
 
   // 🔧 FIX #8: Track error state for user-visible feedback
   const [initError, setInitError] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
 
-  // 🔧 RESTORED CONFIG LOADING: Load enterprise configuration from localStorage on startup
-  // This hydrates Redux state from persisted localStorage after page refresh
-  // User still must click "Apply" for first-time activation (user control preserved)
+  // CONFIG LOADING: Derive enterprise configuration from actual credentials in IndexedDB.
+  // This replaces the old localStorage-based approach which caused stale configs from
+  // previous sessions to bleed into new ones.
+  // Flow: agent starts → credentials loaded from IndexedDB into app.credentials →
+  //       scan for ServiceConfiguration VC → extract + validate → apply if found,
+  //       clear any stale localStorage entry if not found.
+  // TODO: add revocation check (StatusList2021) once a lightweight check utility exists.
   useEffect(() => {
-    // CRITICAL FIX: Do NOT run enterprise features until wallet has started
     if (!app.agent.hasStarted) return;
 
     try {
-      const activeConfig = getActiveConfiguration();
+      const serviceConfigCred = (app.credentials ?? []).find(
+        (cred: any) => getCredentialType(cred) === 'ServiceConfiguration'
+      );
 
-      if (activeConfig) {
-        // Restore configuration to Redux (hydrates state from localStorage)
-        // This does NOT apply/activate - just loads existing state
-        import('@/actions/enterpriseAgentActions').then(({ applyConfiguration }) => {
-          applyConfiguration(activeConfig)(app.dispatch, app.getState);
+      if (serviceConfigCred) {
+        const config = extractConfiguration(serviceConfigCred);
+        if (config) {
+          const validation = validateConfiguration(config);
+          if (validation.isValid) {
+            console.log('✅ [AutoStartAgent] ServiceConfiguration VC found — applying enterprise config');
+            import('@/actions/enterpriseAgentActions').then(({ applyConfiguration }) => {
+              applyConfiguration(config)(app.dispatch, app.getState);
 
-          // Auto-refresh enterprise data after Redux store is fully ready
-          // Delay ensures store initialization completes before refresh calls
-          setTimeout(() => {
-            import('@/actions/enterpriseAgentActions').then(({ refreshEnterpriseConnections, refreshEnterpriseCredentials }) => {
-              app.dispatch(refreshEnterpriseConnections());
-              app.dispatch(refreshEnterpriseCredentials());
-
-              // ⚠️ NOTE: Proof request polling is started AFTER agent connection (see agent start handler below)
-              // This ensures credentials are loaded before modal can appear
+              setTimeout(() => {
+                import('@/actions/enterpriseAgentActions').then(({ refreshEnterpriseConnections, refreshEnterpriseCredentials }) => {
+                  app.dispatch(refreshEnterpriseConnections());
+                  app.dispatch(refreshEnterpriseCredentials());
+                });
+              }, 200);
             });
-          }, 200);
-        });
+          } else {
+            console.warn('⚠️ [AutoStartAgent] ServiceConfiguration VC invalid:', validation.errors);
+            clearActiveConfiguration();
+            app.dispatch(clearConfiguration());
+          }
+        } else {
+          clearActiveConfiguration();
+          app.dispatch(clearConfiguration());
+        }
+      } else {
+        // No ServiceConfiguration VC in wallet — clear any stale localStorage entry
+        console.log('ℹ️ [AutoStartAgent] No ServiceConfiguration VC in wallet — clearing stale enterprise config');
+        clearActiveConfiguration();
+        app.dispatch(clearConfiguration());
       }
     } catch (error) {
-      console.error('⚠️ [AutoStartAgent] Error restoring configuration:', error);
+      console.error('⚠️ [AutoStartAgent] Error deriving enterprise configuration from credentials:', error);
     }
 
     // Cleanup polling intervals on unmount
@@ -60,7 +80,7 @@ export function AutoStartAgent() {
         clearInterval((window as any).__enterprisePollingInterval);
       }
     };
-  }, [app.agent.hasStarted]); // Run when wallet starts
+  }, [app.agent.hasStarted]); // Run once when wallet starts
 
   // Initialize agent when database connects
   useEffect(() => {
@@ -76,17 +96,26 @@ export function AutoStartAgent() {
     }
   }, [db.instance, app.agent.instance]);
 
-  // Auto-start agent when it becomes available
+  // Auto-start agent when it becomes available.
+  // Block while a backup restore is in progress — agent.start() writes mediator data
+  // to Pluto, which would cause backup.restore(jwe) to fail with "Pluto Store not empty".
+  // The restore runs first (triggered by MainLayout), then iagonStatus changes to 'synced'
+  // which unblocks this effect.
   useEffect(() => {
+    if (iagonStatus === 'checking' || iagonStatus === 'downloading' || iagonStatus === 'restoring') return;
     if (app.agent.instance && !app.agent.hasStarted && !app.agent.isStarting) {
       startAgent({ agent: app.agent.instance })
         .then(() => {
           setStartError(null); // Clear any previous errors
 
           // ✅ START ENTERPRISE POLLING: Now that agent is connected and credentials are loaded
-          // Check if enterprise configuration exists before starting polling
-          const activeConfig = getActiveConfiguration();
-          if (activeConfig) {
+          // Check credentials directly — config is derived from VCs, not localStorage.
+          // enterpriseAgent.activeConfiguration is not yet set at this point (config effect
+          // runs after hasStarted, which is the same tick), so check credentials instead.
+          const hasServiceConfig = (app.credentials ?? []).some(
+            (cred: any) => getCredentialType(cred) === 'ServiceConfiguration'
+          );
+          if (hasServiceConfig) {
             // Import all polling actions
             import('@/actions/enterpriseAgentActions').then(({
               pollPendingProofRequests,
@@ -119,7 +148,7 @@ export function AutoStartAgent() {
           setStartError(errorMessage);
         });
     }
-  }, [app.agent.instance, app.agent.hasStarted, app.agent.isStarting]);
+  }, [app.agent.instance, app.agent.hasStarted, app.agent.isStarting, iagonStatus]);
 
   // 🔧 FIX #8: Render user-visible error notification if agent fails
   if (initError || startError) {
