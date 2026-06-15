@@ -17,7 +17,8 @@ import { base64url } from 'jose';
 import { createEncryptedMessageBody, createPlaintextMessageBody } from '../types/StandardMessageBody';
 
 // Connection metadata for PRISM DID lookup and storage
-import { getConnectionMetadata, saveConnectionMetadata } from '../utils/connectionMetadata';
+import { getConnectionMetadata, saveConnectionMetadata, updateConnectionMetadata } from '../utils/connectionMetadata';
+import { getCredentialType } from '../utils/credentialTypeDetector';
 
 // SecureDashboardBridge agent setter for Pluto fallback
 import { setSecureDashboardAgent } from '../utils/SecureDashboardBridge';
@@ -433,6 +434,52 @@ async function handleMessages(
                     credential
                 )
             )
+
+            // Entity-agnostic service discovery: persist connection metadata from VC contents
+            const senderDID = issuedCredential.from?.toString();
+            const accessTargetKey   = (credential.claims?.['accessTarget']   as any)?.value as string | undefined;
+            const accessTargetLabel = (credential.claims?.['accessTargetLabel'] as any)?.value as string | undefined;
+            const accessTargetIcon  = (credential.claims?.['accessTargetIcon']  as any)?.value as string | undefined;
+            if (senderDID) {
+                const currentState = (getState() as { app: RootState }).app;
+                const matchingConn = currentState.connections?.find(
+                    (c: SDK.Domain.DIDPair) => c.receiver.toString() === senderDID
+                );
+                if (matchingConn) {
+                    const hostDID = matchingConn.host.toString();
+                    const meta = getConnectionMetadata(hostDID);
+                    const metaUpdates: Record<string, any> = {};
+
+                    // Save the peer DID used by the remote party (for future reference)
+                    if (!meta?.remotePartyDid) metaUpdates.remotePartyDid = senderDID;
+
+                    // Auto-flag CA connections by credential type (entity-agnostic: no name checks)
+                    const credType = getCredentialType(credential);
+                    const CA_TYPES = ['RealPersonIdentity', 'SecurityClearance', 'CertificationAuthorityIdentity'];
+                    if (CA_TYPES.includes(credType) && !meta?.isCAConnection) {
+                        metaUpdates.isCAConnection = true;
+                        console.log(`🔐 [IssueCredential] Marking connection as CA (credential type: ${credType})`);
+                    }
+
+                    // Persist explicit accessTarget if VC contains one
+                    if (accessTargetKey) {
+                        const newTarget = { key: accessTargetKey, label: accessTargetLabel ?? accessTargetKey, icon: accessTargetIcon ?? '🔗' };
+                        const existing = meta?.supportedTargets ?? [];
+                        if (!existing.some(t => t.key === newTarget.key)) {
+                            metaUpdates.supportedTargets = [...existing, newTarget];
+                            console.log(`🎯 [IssueCredential] Stored access target "${accessTargetKey}" for connection ${hostDID.substring(0, 40)}...`);
+                        }
+                    }
+
+                    if (Object.keys(metaUpdates).length > 0) {
+                        if (meta) {
+                            updateConnectionMetadata(hostDID, metaUpdates);
+                        } else {
+                            saveConnectionMetadata(hostDID, { walletType: 'local', ...metaUpdates });
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -444,17 +491,23 @@ async function handleMessages(
         console.log(`      direction=${msg.direction} (0=SENT, 1=RECEIVED)`);
     });
 
+    // HANDLE BASIC MESSAGES: Chat messages — store and dispatch, no protocol action needed
+    const BASIC_MESSAGE_PIURI = "https://didcomm.org/basicmessage/2.0/message";
+    const basicMessages = externalMessages.filter(msg => msg.piuri === BASIC_MESSAGE_PIURI);
+    if (basicMessages.length > 0) {
+        console.log(`💬 [handleMessages] Received ${basicMessages.length} basic message(s) — will be dispatched to Redux`);
+    }
+
     // AUTO-RESPOND: Security Clearance VC presentation requests
     // This enables automatic VC handshake without user approval (like TLS)
     console.log(`🔍 [AUTO-RESPONSE] Filtering for presentation requests...`);
+    const PRESENTATION_REQUEST_PIURIS = new Set([
+        "https://didcomm.atalaprism.io/present-proof/3.0/request-presentation",
+        "https://didcomm.org/present-proof/3.0/request-presentation",
+    ]);
     const presentationRequests = externalMessages.filter(
         (message) => {
-            // ✅ FIX: Handle multiple possible piuri formats
-            // Different SDK versions or configurations may use different piuris
-            const isMatch =
-                message.piuri === "https://didcomm.atalaprism.io/present-proof/3.0/request-presentation" ||
-                message.piuri === "https://didcomm.org/present-proof/3.0/request-presentation" ||
-                message.piuri.includes("request-presentation");
+            const isMatch = PRESENTATION_REQUEST_PIURIS.has(message.piuri);
             console.log(`  🔍 Message piuri="${message.piuri}" matches presentation request? ${isMatch}`);
             return isMatch;
         }
@@ -463,12 +516,13 @@ async function handleMessages(
 
     // HANDLE CONNECTION REQUESTS: Detect and log for visibility
     console.log(`🔍 [CONNECTION REQUEST] Filtering for connection requests...`);
+    const CONNECTION_REQUEST_PIURIS = new Set([
+        SDK.ProtocolType.DidcommconnectionRequest,
+        "https://didcomm.org/didexchange/1.0/request",
+    ]);
     const connectionRequests = externalMessages.filter(
         (message) => {
-            const isMatch =
-                message.piuri === SDK.ProtocolType.DidcommconnectionRequest ||
-                message.piuri === "https://didcomm.org/didexchange/1.0/request" ||
-                (message.piuri.includes("/connections/") && message.piuri.includes("/request"));
+            const isMatch = CONNECTION_REQUEST_PIURIS.has(message.piuri);
 
             if (isMatch) {
                 console.log(`🤝 [CONNECTION REQUEST] Found connection request: ${message.piuri}`);
@@ -526,6 +580,8 @@ async function handleMessages(
                                 schemaId = 'RealPerson';
                             } else if (goalCode === 'authentication.clearance') {
                                 schemaId = 'SecurityClearance';
+                            } else if (goalCode === 'schema:EmployeeRole') {
+                                schemaId = 'EmployeeRole';
                             }
                         }
 
@@ -541,7 +597,8 @@ async function handleMessages(
                                     // Map GUID to schema type
                                     const SCHEMA_MAP: Record<string, string> = {
                                         'e3ed8a7b-5866-3032-a06c-4c3ce7b7c73f': 'RealPerson',
-                                        'ba309a53-9661-33df-92a3-2023b4a56fd5': 'SecurityClearance'
+                                        'ba309a53-9661-33df-92a3-2023b4a56fd5': 'SecurityClearance',
+                                        '6c39cc8e-b292-30aa-bbef-98ca2fdc6abe': 'EmployeeRole'
                                     };
                                     schemaId = SCHEMA_MAP[guid];
                                 }
@@ -558,6 +615,10 @@ async function handleMessages(
                             // Check for SecurityClearance pattern (clearanceLevel)
                             else if (claims.clearanceLevel !== undefined) {
                                 schemaId = 'SecurityClearance';
+                            }
+                            // Check for EmployeeRole pattern (email, prismDid, role, department)
+                            else if (claims.email !== undefined && claims.prismDid !== undefined) {
+                                schemaId = 'EmployeeRole';
                             }
                         }
                     }
@@ -583,6 +644,16 @@ async function handleMessages(
                 console.log('📋 [VC-HANDSHAKE] Presentation request received');
                 console.log('📋 [VC-HANDSHAKE] Request from:', requestMessage.from?.toString());
                 console.log('📋 [VC-HANDSHAKE] Schema ID:', schemaId);
+
+                // EmployeeRole proof requests must never be handled by the personal wallet.
+                // They are an enterprise-domain operation: the enterprise wallet sends the
+                // access request via the enterprise DIDComm channel, and the proof request
+                // is answered entirely via EnterpriseAgentClient REST calls in connections.tsx.
+                // If one arrives here it means routing is wrong — log and skip silently.
+                if (schemaId === 'EmployeeRole') {
+                    console.warn('⚠️ [VC-HANDSHAKE] EmployeeRole proof request received on personal wallet channel — routing error, skipping. Portal login must use the enterprise DIDComm channel.');
+                    continue;
+                }
 
                 // ✅ SMART AUTO-SEND: Only auto-send if schema is confidently identified
                 if (!schemaId) {
@@ -612,7 +683,15 @@ async function handleMessages(
                                     if (firstClaim.clearanceLevel) return true;
                                 }
                             }
-                            // Add more schema matching logic here as needed
+                            // For EmployeeRole, match credentials with prismDid + email + role + department
+                            if (schemaId === 'EmployeeRole') {
+                                const cs = (cred as any).credentialSubject;
+                                if (cs?.prismDid && cs?.email && cs?.role && cs?.department) return true;
+                                if (cred.claims && cred.claims.length > 0) {
+                                    const c = cred.claims[0];
+                                    if (c.prismDid && c.email && c.role && c.department) return true;
+                                }
+                            }
                             return false;
                         } catch (err) {
                             return false;
@@ -776,11 +855,12 @@ export const startAgent = createAsyncThunk<
             // ✅ CRITICAL: Start continuous message fetching from mediator
             // This enables the wallet to receive connection responses and credentials
             // Per https://hyperledger-identus.github.io/docs/home/quick-start
-            await agent.startFetchingMessages(5000); // Poll every 5 seconds
+            await agent.startFetchingMessages(5); // Poll every 5 seconds (SDK takes seconds, multiplies by 1000 internally)
 
             // Set agent for SecureDashboardBridge Pluto fallback
             setSecureDashboardAgent(agent);
             console.log('✅ [startAgent] SecureDashboardBridge agent set for Pluto fallback');
+
         } catch (startError: any) {
             // ✅ Gracefully handle DIDComm secret errors (non-fatal)
             // These occur when encrypted messages arrive before peer DID keys are persisted
@@ -799,7 +879,7 @@ export const startAgent = createAsyncThunk<
                 // This was previously skipped because setSecureDashboardAgent is in the try block
                 setSecureDashboardAgent(agent);
                 console.log('✅ [startAgent] SecureDashboardBridge agent set for Pluto fallback (after DIDComm error recovery)');
-                await agent.startFetchingMessages(5000);
+                await agent.startFetchingMessages(5); // SDK takes seconds
                 console.log('✅ [startAgent] Message polling started (after DIDComm error recovery)');
             } else {
                 // Re-throw other unexpected errors
@@ -807,9 +887,26 @@ export const startAgent = createAsyncThunk<
             }
         }
 
-        // ✅ FIX: Don't update mediator during initial startup (mediator registration is async)
-        // The mediator handshake completes in the background, but isn't ready yet
-        // Peer DID will be registered with mediator automatically later when sending messages
+        // Register all connection peer DIDs with mediator keylist.
+        // This must run regardless of whether agent.start() took the happy path or the
+        // DIDComm-error recovery path — the error path previously skipped this block,
+        // leaving the receiver's peer DIDs unregistered and causing the mediator to drop
+        // inbound messages silently.
+        try {
+            if (agent.connectionManager?.mediationHandler) {
+                const allPairs = await agent.pluto.getAllDidPairs();
+                if (allPairs.length > 0) {
+                    const hostDIDs = allPairs.map((p: any) => p.host);
+                    await agent.connectionManager.mediationHandler.updateKeyListWithDIDs(hostDIDs);
+                    console.log(`✅ [startAgent] Registered ${hostDIDs.length} peer DID(s) with mediator keylist`);
+                }
+            } else {
+                console.warn('⚠️ [startAgent] mediationHandler not available — peer DIDs not registered with mediator');
+            }
+        } catch (mediatorError: any) {
+            console.warn('⚠️ [startAgent] Failed to register peer DIDs with mediator on startup:', mediatorError?.message);
+        }
+
         const selfDID = await agent.createNewPeerDID([], false);
 
         return api.fulfillWithValue({ agent, selfDID })
@@ -1707,6 +1804,44 @@ export const sendMessage = createAsyncThunk<
     }
 })
 
+/**
+ * Send a DIDComm access-request protocol message to a connection.
+ * The body is a JSON protocol envelope transported inside a BasicMessage,
+ * because the Cloud Agent only fires webhooks for BasicMessage piuri.
+ * Protocol: https://identuslabel.cz/protocols/access-request/1.0/request
+ */
+export const sendProtocolAccessRequest = createAsyncThunk<
+    void,
+    { agent: SDK.Agent; connection: SDK.Domain.DIDPair; target: string }
+>('sendProtocolAccessRequest', async ({ agent, connection, target }, api) => {
+    const requestId = `ar-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const protocolEnvelope = JSON.stringify({
+        type: 'https://identuslabel.cz/protocols/access-request/1.0/request',
+        id: requestId,
+        body: { target }
+    });
+
+    // Wrap in StandardMessageBody (matches the format the CA unwraps)
+    const standardBody = createPlaintextMessageBody(protocolEnvelope);
+    const basicMsgBody = { content: JSON.stringify(standardBody) };
+
+    const finalMessage = new BasicMessage(
+        basicMsgBody as any,
+        connection.host,
+        connection.receiver
+    ).makeMessage();
+
+    await agent.sendMessage(finalMessage);
+
+    try {
+        const existing = await agent.pluto.getMessage(finalMessage.id);
+        if (!existing) await agent.pluto.storeMessage(finalMessage);
+    } catch (_) { /* non-fatal */ }
+
+    api.dispatch(reduxActions.messageSuccess([finalMessage]));
+});
+
 export const initiatePresentationRequest = createAsyncThunk<
     any,
     {
@@ -1754,7 +1889,7 @@ class ShortFormDIDResolverSample implements SDK.Domain.DIDResolver {
     }
 
     async resolve(didString: string): Promise<SDK.Domain.DIDDocument> {
-        const url = "http://localhost:8000/cloud-agent/dids/" + didString;
+        const url = "https://identuslabel.cz/cloud-agent/dids/" + didString;
         const response = await fetch(url, {
             "headers": {
                 "accept": "*/*",

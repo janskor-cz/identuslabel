@@ -79,6 +79,7 @@ const DocumentRegistry = require('./lib/DocumentRegistry');
 const FolderRegistry = require('./lib/FolderRegistry');
 const EnterpriseDocumentManager = require('./lib/EnterpriseDocumentManager');
 const ReEncryptionService = require('./lib/ReEncryptionService');
+const DIDCommCommandService = require('./lib/DIDCommCommandService');
 
 // Task 1: Initialise Classification Master Key (CMK) store — server will not
 // start if any CMK env var is missing or has wrong length.
@@ -103,6 +104,9 @@ const COMPANY_ISSUER_DIDS = {
 
 // Enterprise Cloud Agent URL (for employee management)
 const ENTERPRISE_CLOUD_AGENT_URL = process.env.ENTERPRISE_CLOUD_AGENT_URL || 'http://91.99.4.54:8300';
+
+// Certification Authority base URL (for identity enrichment during login)
+const CA_BASE_URL = process.env.CA_BASE_URL || 'https://identuslabel.cz/ca';
 
 // Department API Keys (for issuing ServiceConfiguration VCs to employees)
 const DEPARTMENT_API_KEYS = {
@@ -256,6 +260,58 @@ function saveSoftDeletedConnections(softDeletedMap) {
   }
 }
 
+// Decode the service URI from a did:peer:2 DID's .S segment.
+// Returns the uri string or empty string if not decodable.
+function decodePeerDidServiceUri(did) {
+  if (!did || !did.startsWith('did:peer:')) return '';
+  const parts = did.split('.');
+  const sPart = parts.find(p => p.startsWith('S'));
+  if (!sPart) return '';
+  try {
+    const raw = sPart.slice(1).replace(/-/g, '+').replace(/_/g, '/');
+    const pad = (4 - (raw.length % 4)) % 4;
+    const decoded = JSON.parse(Buffer.from(raw + '='.repeat(pad), 'base64').toString());
+    return (decoded.s || {}).uri || decoded.uri || '';
+  } catch {
+    return '';
+  }
+}
+
+// Returns true if a connection's theirDid points directly to the enterprise agent (not mediator).
+// Enterprise wallet peer DIDs encode https://…/enterprise/didcomm as their service endpoint.
+// Personal wallet peer DIDs encode a routing did:peer: DID whose service endpoint is the mediator.
+function isEnterpriseAgentConnection(theirDid) {
+  const uri = decodePeerDidServiceUri(theirDid);
+  return uri.startsWith('https://') && uri.includes('enterprise');
+}
+
+// Shared helper to get enterprise DB instance (avoids per-function pool creation)
+function getEnterpriseDb() {
+  const { Pool } = require('pg');
+  const pool = new Pool({
+    host: process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
+    port: process.env.ENTERPRISE_DB_PORT || 5434,
+    database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
+    user: process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
+    password: process.env.ENTERPRISE_DB_PASSWORD,
+  });
+  return new EmployeePortalDatabase(pool);
+}
+
+// In-memory stores for colleague chat feature
+// Map: invitationId → { id, fromEmail, fromName, toEmail, oobBase64, createdAt }
+const colleagueInvitations = new Map();
+// Map: recipientEmail → [{ id, fromEmail, fromName, content, timestamp, connectionId }]
+const colleagueMessages = new Map();
+// Map: `${walletId}:${connectionId}` → { ownerEmail, colleagueEmail, colleagueName }
+const connectionColleagueMap = new Map();
+// Map: walletId → [{id, fromEmail, fromName, content, timestamp, connectionId}]
+// Stores messages sent from the company admin to an employee's enterprise wallet.
+const walletAdminMessages = new Map();
+// Map: walletId → per-wallet webhook API key (populated at startup from bulk webhook registration)
+// Used by the enterprise webhook handler to resolve connectionId from sender Peer DID.
+const enterpriseWalletKeyMap = new Map();
+
 // Initialize soft-deleted connections storage
 global.softDeletedConnections = loadSoftDeletedConnections();
 
@@ -264,7 +320,39 @@ global.employeeConnectionMappings = loadEmployeeMappings();
 
 // In-memory store of pending invitations: connectionId → { name, email, role, department, portalUrl }
 // Used so issue-service-config can auto-load data without the admin re-entering it.
+// Persisted to disk so it survives server restarts.
+const PENDING_INVITATIONS_FILE = path.join(__dirname, 'data', 'pending-invitations.json');
+
+function savePendingInvitations() {
+  try {
+    const obj = {};
+    for (const [k, v] of global.pendingInvitations) {
+      obj[k] = v;
+    }
+    fs.writeFileSync(PENDING_INVITATIONS_FILE, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.warn('[PendingInvitations] Failed to persist to disk:', e.message);
+  }
+}
+
+function loadPendingInvitations() {
+  try {
+    if (fs.existsSync(PENDING_INVITATIONS_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(PENDING_INVITATIONS_FILE, 'utf8'));
+      for (const [k, v] of Object.entries(raw)) {
+        global.pendingInvitations.set(k, v);
+      }
+      console.log(`[PendingInvitations] Loaded ${global.pendingInvitations.size} pending invitation(s) from disk`);
+    }
+  } catch (e) {
+    console.warn('[PendingInvitations] Failed to load from disk:', e.message);
+  }
+}
+
 global.pendingInvitations = new Map();
+loadPendingInvitations();
+// Auto-save every 10 seconds so the map survives server restarts
+setInterval(savePendingInvitations, 10_000);
 
 /**
  * Generate a unique employee email address from a full name and company slug.
@@ -794,6 +882,19 @@ app.get('/api/company/dids', requireCompany, async (req, res) => {
   }
 });
 
+function isEmployeeConnection(conn, softDeletedSet) {
+  if (softDeletedSet.has(conn.connectionId)) return false;
+  const label = (conn.label || '').toLowerCase();
+  const theirLabel = (conn.theirLabel || '').toLowerCase();
+  if (label.includes('ca ') || label.includes(' ca') ||
+      label.includes('certification') || label.includes('authority') ||
+      theirLabel.includes('certification') || theirLabel.includes('authority')) return false;
+  if (label.includes('↔') || label.includes('<->') ||
+      theirLabel.includes('↔') || theirLabel.includes('<->')) return false;
+  if (conn.state === 'InvitationGenerated') return false;
+  return true;
+}
+
 /**
  * GET /api/company/connections - List all connections (employees)
  */
@@ -806,55 +907,66 @@ app.get('/api/company/connections', requireCompany, async (req, res) => {
 
     const connections = result.data.contents || [];
 
-    // Get soft-deleted connections for this company
     const softDeleted = global.softDeletedConnections.get(req.company.id) || new Set();
 
-    // Filter out CA connections (only show employee connections)
-    // CA connections have labels containing "CA", "Certification Authority", or are InvitationGenerated state for CA invites
-    // Also filter out soft-deleted connections
-    const employeeConnections = connections.filter(conn => {
-      const label = (conn.label || '').toLowerCase();
-      const theirLabel = (conn.theirLabel || '').toLowerCase();
+    // DB enrichment: fall back to persistent employee records when pendingInvitations is empty
+    let dbConnectionMap = new Map();
+    if (process.env.ENTERPRISE_DB_PASSWORD) {
+      try {
+        dbConnectionMap = await getEnterpriseDb().getEmployeeConnectionMap();
+      } catch (e) { console.warn('[connections] DB enrich skipped:', e.message); }
+    }
 
-      // Exclude soft-deleted connections
-      if (softDeleted.has(conn.connectionId)) {
-        return false;
-      }
+    function enrichConn(conn) {
+      const pending = global.pendingInvitations.get(conn.connectionId);
+      const dbRow = dbConnectionMap.get(conn.connectionId);
+      // Parse label "Name (role) - department" as last-resort fallback for old connections
+      // whose pendingInvitations entry was lost (e.g. pre-persistence or missed saves)
+      let labelName = null, labelRole = null, labelDept = null;
+      const lm = (conn.label || '').match(/^(.+?)\s+\(([^)]+)\)\s+-\s+(.+)$/);
+      if (lm && lm[1] !== 'Pending') { labelName = lm[1]; labelRole = lm[2]; labelDept = lm[3]; }
+      else if (lm) { labelRole = lm[2]; labelDept = lm[3]; }
+      return {
+        connectionId: conn.connectionId,
+        label: conn.label,
+        theirLabel: conn.theirLabel || null,
+        state: conn.state,
+        theirDid: conn.theirDid,
+        myDid: conn.myDid,
+        createdAt: conn.createdAt,
+        updatedAt: conn.updatedAt,
+        proofState: pending?.proofState || null,
+        proofError: pending?.proofError || null,
+        employeeName: pending?.name || dbRow?.full_name || labelName || null,
+        employeeEmail: pending?.email || dbRow?.email || null,
+        employeeRole: pending?.role || labelRole || null,
+        employeeDept: pending?.department || dbRow?.department || labelDept || null,
+      };
+    }
 
-      // Exclude connections with CA-related labels
-      if (label.includes('ca ') || label.includes(' ca') ||
-          label.includes('certification') || label.includes('authority') ||
-          theirLabel.includes('certification') || theirLabel.includes('authority')) {
-        return false;
-      }
+    // HR-invited connections (non-↔)
+    const hrEmployees = connections
+      .filter(conn => isEmployeeConnection(conn, softDeleted))
+      .map(enrichConn);
 
-      // ✨ NEW: Exclude Enterprise Cloud Agent connections (auto-created during VC issuance)
-      // Pattern: "TechCorp ↔ Name (email@domain.com)" or "TechCorp <-> Name"
-      // These are connections between Employee Wallet (port 8300) and TechCorp (port 8200)
-      if (label.includes('↔') || label.includes('<->') ||
-          theirLabel.includes('↔') || theirLabel.includes('<->')) {
-        console.log(`[FILTER] Excluding Enterprise wallet connection: ${label}`);
-        return false;
-      }
+    // EmployeeWalletManager (↔) connections: include if DB-backed and not already shown by name
+    const shownNames = new Set(hrEmployees.map(e => (e.employeeName || '').toLowerCase()).filter(Boolean));
+    const shownIds = new Set(hrEmployees.map(e => e.connectionId));
+    const connById = new Map(connections.map(c => [c.connectionId, c]));
 
-      // Exclude InvitationGenerated states (these are outgoing invites to CA)
-      if (conn.state === 'InvitationGenerated') {
-        return false;
-      }
+    const dbEmployees = [];
+    for (const [connId, dbRow] of dbConnectionMap.entries()) {
+      if (shownIds.has(connId)) continue;
+      if (dbRow.full_name && shownNames.has(dbRow.full_name.toLowerCase())) continue;
+      const conn = connById.get(connId);
+      if (!conn) continue;
+      if (softDeleted.has(connId)) continue;
+      const activeStates = ['ConnectionResponseSent', 'ConnectionResponseReceived', 'Active', 'ACTIVE', 'active'];
+      if (!activeStates.includes(conn.state)) continue;
+      dbEmployees.push(enrichConn(conn));
+    }
 
-      return true;
-    });
-
-    // Filter and format connections
-    const employees = employeeConnections.map(conn => ({
-      connectionId: conn.connectionId,
-      label: conn.label,
-      state: conn.state,
-      theirDid: conn.theirDid,
-      myDid: conn.myDid,
-      createdAt: conn.createdAt,
-      updatedAt: conn.updatedAt
-    }));
+    const employees = [...hrEmployees, ...dbEmployees];
 
     res.json({
       success: true,
@@ -875,31 +987,18 @@ app.get('/api/company/connections', requireCompany, async (req, res) => {
 app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
   try {
     const { employeeName, name, role, department } = req.body;
-    const resolvedName = employeeName || name;
+    const resolvedName = employeeName || name || '';
 
-    if (!resolvedName) {
-      return res.status(400).json({
-        success: false,
-        error: 'Employee name is required'
-      });
-    }
-
-    // Auto-generate unique email for this employee
-    const existingEmails = getExistingEmailsForCompany(req.company.id);
-    const generatedEmail = generateEmployeeEmail(resolvedName, req.company.id, existingEmails);
-
-    // Build portalUrl that pre-populates the login field
-    const portalBaseUrl = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
-    const portalUrl = `${portalBaseUrl}/employee-portal-login.html?email=${encodeURIComponent(generatedEmail)}`;
-
-    // Create label with employee details
-    const labelParts = [resolvedName];
+    // Build label — name is unknown until RealPerson proof is received
+    const labelParts = resolvedName ? [resolvedName] : ['Pending'];
     if (role) labelParts.push(`(${role})`);
     if (department) labelParts.push(`- ${department}`);
     const label = labelParts.join(' ');
 
     // Create goal for invitation
-    const goal = `Employee connection for ${resolvedName} at ${req.company.displayName}`;
+    const goal = resolvedName
+      ? `Employee connection for ${resolvedName} at ${req.company.displayName}`
+      : `Employee connection at ${req.company.displayName}`;
 
     // Create invitation via Cloud Agent
     const result = await cloudAgentRequest(
@@ -916,114 +1015,89 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
 
     const invitation = result.data;
 
-    console.log(`[EMPLOYEE] Created invitation for ${resolvedName} (${req.company.name}) → ${generatedEmail}`);
+    console.log(`[EMPLOYEE] Created invitation (${req.company.name}) label="${label}"`);
 
-    // Store invitation record for later auto-load during VC issuance
+    // Store invitation record — name/email will be filled in after RealPerson proof
     global.pendingInvitations.set(invitation.connectionId, {
       companyId: req.company.id,
       name: resolvedName,
-      email: generatedEmail,
+      email: '',
       role: role || '',
       department: department || '',
-      portalUrl,
+      portalUrl: '',
     });
 
-    // Fetch company's CompanyIdentity credential
+    // Always modify the OOB invitation to embed the company name and (optionally) company credential
     let finalInvitation = invitation.invitation;
     let hasCompanyCredential = false;
 
     try {
-      // Get company's issued credentials
-      const credentialsResult = await cloudAgentRequest(
-        req.company.apiKey,
-        '/issue-credentials/records'
-      );
+      const invitationUrl = new URL(invitation.invitation.invitationUrl);
+      const oobParam = invitationUrl.searchParams.get('_oob');
 
-      const allRecords = credentialsResult.data.contents || [];
+      if (!oobParam) throw new Error('Invalid invitation URL: missing _oob parameter');
 
-      // Filter for CompanyIdentity credentials that are received/sent
-      const companyIdentityCredentials = allRecords.filter(r => {
-        const isIssued = r.protocolState === 'CredentialReceived' || r.protocolState === 'CredentialSent';
-        // Decode to check if it's a CompanyIdentity credential
-        if (!isIssued) return false;
+      const invitationObj = JSON.parse(Buffer.from(oobParam, 'base64').toString('utf-8'));
+      if (!invitationObj.body) invitationObj.body = {};
 
-        try {
-          const decoded = decodeCredential(r);
-          return decoded && decoded.credentialType === 'CompanyIdentity';
-        } catch {
-          return false;
-        }
-      });
+      // Always set company name so wallet shows "TechCorp Corporation" instead of "Unknown connection"
+      invitationObj.label = req.company.displayName;
+      invitationObj.body.goal = `Connect as employee at ${req.company.displayName}`;
 
-      if (companyIdentityCredentials.length > 0) {
-        // Use the first (most recent) CompanyIdentity credential
-        const companyCredential = decodeCredential(companyIdentityCredentials[0]);
+      // Try to embed CompanyIdentity credential if available
+      try {
+        const credentialsResult = await cloudAgentRequest(req.company.apiKey, '/issue-credentials/records');
+        const allRecords = credentialsResult.data.contents || [];
 
-        if (companyCredential && companyCredential.jwtCredential) {
-          console.log(`[EMPLOYEE] Found CompanyIdentity credential for ${req.company.name}`);
+        const companyIdentityCredentials = allRecords.filter(r => {
+          const isIssued = r.protocolState === 'CredentialReceived' || r.protocolState === 'CredentialSent';
+          if (!isIssued) return false;
+          try {
+            const decoded = decodeCredential(r);
+            return decoded && decoded.credentialType === 'CompanyIdentity';
+          } catch { return false; }
+        });
 
-          // Extract and decode the _oob parameter from invitation URL
-          const invitationUrl = new URL(invitation.invitation.invitationUrl);
-          const oobParam = invitationUrl.searchParams.get('_oob');
-
-          if (!oobParam) {
-            throw new Error('Invalid invitation URL: missing _oob parameter');
-          }
-
-          // Decode the base64 invitation
-          const invitationJson = Buffer.from(oobParam, 'base64').toString('utf-8');
-          const invitationObj = JSON.parse(invitationJson);
-
-          // Embed Company Identity credential in invitation body (DIDComm OOB 2.0)
-          if (!invitationObj.body) {
-            invitationObj.body = {};
-          }
-          invitationObj.body.goal_code = 'company-employee-verification';
-          invitationObj.body.goal = `Connect as ${req.company.displayName} employee`;
-
-          // Use top-level requests_attach (RFC 0434) — wallet reads invitation.requests_attach
-          invitationObj.requests_attach = [{
-            '@id': 'company-identity-credential',
-            'mime-type': 'application/json',
-            data: {
-              json: {
-                credential: companyCredential.jwtCredential,
-                claims: companyCredential.claims,
-                issuerDID: companyCredential.issuer,
-                holderDID: companyCredential.subject,
-                credentialType: companyCredential.credentialType,
-                issuedDate: companyCredential.issuanceDate
+        if (companyIdentityCredentials.length > 0) {
+          const companyCredential = decodeCredential(companyIdentityCredentials[0]);
+          if (companyCredential && companyCredential.jwtCredential) {
+            invitationObj.body.goal_code = 'company-employee-verification';
+            invitationObj.requests_attach = [{
+              '@id': 'company-identity-credential',
+              'mime-type': 'application/json',
+              data: {
+                json: {
+                  credential: companyCredential.jwtCredential,
+                  claims: companyCredential.claims,
+                  issuerDID: companyCredential.issuer,
+                  holderDID: companyCredential.subject,
+                  credentialType: companyCredential.credentialType,
+                  issuedDate: companyCredential.issuanceDate
+                }
               }
-            }
-          }];
-
-          // Re-encode the modified invitation
-          const modifiedInvitationJson = JSON.stringify(invitationObj);
-          const modifiedOobParam = Buffer.from(modifiedInvitationJson).toString('base64');
-
-          // Update invitation URL with modified _oob parameter
-          invitationUrl.searchParams.set('_oob', modifiedOobParam);
-
-          // Create modified invitation object
-          finalInvitation = {
-            ...invitation.invitation,
-            invitationUrl: invitationUrl.toString()
-          };
-
-          hasCompanyCredential = true;
-          console.log(`✅ [EMPLOYEE] Company credential embedded in invitation for ${resolvedName}`);
+            }];
+            hasCompanyCredential = true;
+            console.log(`✅ [EMPLOYEE] Company credential embedded in invitation`);
+          }
+        } else {
+          console.warn(`⚠️ [EMPLOYEE] No CompanyIdentity credential for ${req.company.name} — label-only OOB`);
         }
-      } else {
-        console.warn(`⚠️ [EMPLOYEE] No CompanyIdentity credential found for ${req.company.name}. Invitation still created.`);
+      } catch (credErr) {
+        console.warn(`⚠️ [EMPLOYEE] Could not fetch company credential: ${credErr.message} — label-only OOB`);
       }
+
+      // Re-encode the modified invitation
+      const modifiedOobParam = Buffer.from(JSON.stringify(invitationObj)).toString('base64');
+      invitationUrl.searchParams.set('_oob', modifiedOobParam);
+      finalInvitation = { ...invitation.invitation, invitationUrl: invitationUrl.toString() };
     } catch (embedError) {
-      console.error('⚠️ [EMPLOYEE] Failed to embed company credential:', embedError.message);
-      // Continue with original invitation without credential
+      console.error('⚠️ [EMPLOYEE] Failed to modify OOB invitation:', embedError.message);
+      // Continue with original invitation
     }
 
     res.json({
       success: true,
-      message: `Invitation created for ${resolvedName}`,
+      message: `Invitation created`,
       invitation: {
         connectionId: invitation.connectionId,
         invitationUrl: finalInvitation.invitationUrl,
@@ -1031,8 +1105,6 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
         state: invitation.state,
         createdAt: invitation.createdAt,
         hasCompanyCredential,
-        email: generatedEmail,
-        portalUrl,
       }
     });
   } catch (error) {
@@ -1481,21 +1553,103 @@ app.get('/api/company/connections/:connectionId/invitation-data', requireCompany
 });
 
 /**
+ * Shared helper: issue ServiceConfiguration VC to a connection.
+ * Extracted so both auto-issue-config and rp-proof-status can call it.
+ */
+async function issueServiceConfigVC(connectionId, name, email, rawDepartment, company, realPersonClaims = null) {
+  const VALID_DEPTS = ['HR', 'IT', 'Security'];
+  const resolvedDepartment = VALID_DEPTS.includes(rawDepartment) ? rawDepartment : 'IT';
+
+  const departmentApiKey = DEPARTMENT_API_KEYS[resolvedDepartment];
+  if (!departmentApiKey) throw new Error(`Department API key not configured for ${resolvedDepartment}`);
+
+  console.log(`\n📝 [AUTO-ISSUE] Issuing ServiceConfiguration to ${name} (${email})`);
+  const claims = await ServiceConfigVCBuilder.buildServiceConfigClaims({
+    email, name, department: resolvedDepartment, connectionId
+  }, company, realPersonClaims);
+
+  const schemaId = await SchemaManager.ensureServiceConfigSchema(
+    MULTITENANCY_CLOUD_AGENT_URL,
+    company.apiKey,
+    company.did
+  );
+
+  const credentialOffer = {
+    connectionId,
+    credentialFormat: 'JWT',
+    claims: claims.credentialSubject,
+    automaticIssuance: true,
+    issuingDID: company.did,
+    schemaId,
+  };
+
+  const result = await cloudAgentRequest(
+    company.apiKey,
+    '/issue-credentials/credential-offers',
+    { method: 'POST', body: JSON.stringify(credentialOffer) }
+  );
+
+  await EmployeeApiKeyManager.markConfigVcIssued(connectionId, result.data.recordId);
+
+  // Persist the personal wallet connectionId so clearance/initiate can find it without label heuristics
+  if (email) {
+    try {
+      const empDb = getEnterpriseDb();
+      await empDb.savePersonalWalletConnectionId(email, connectionId);
+      console.log(`[AUTO-ISSUE] Saved personal wallet connectionId for ${email}: ${connectionId}`);
+    } catch (saveErr) {
+      console.warn(`[AUTO-ISSUE] Could not persist personal_wallet_connection_id: ${saveErr.message}`);
+    }
+  }
+
+  console.log(`[AUTO-ISSUE] Issued ServiceConfiguration VC to ${name} (${email})`);
+  return result.data;
+}
+
+/**
+ * Helper: decode a JWT VP and find the RealPersonIdentity VC claims.
+ * Returns { firstName, lastName, uniqueId, photo } or throws.
+ */
+function extractRealPersonClaims(vpJwt) {
+  if (!vpJwt || typeof vpJwt !== 'string') throw new Error('No JWT VP provided');
+
+  const parts = vpJwt.split('.');
+  if (parts.length < 2) throw new Error('Invalid JWT VP format');
+
+  const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+  const payload = JSON.parse(Buffer.from(padded + '='.repeat((4 - padded.length % 4) % 4), 'base64').toString('utf8'));
+
+  const vcs = payload?.vp?.verifiableCredential || [];
+  for (const vcJwt of vcs) {
+    if (typeof vcJwt !== 'string') continue;
+    const vcParts = vcJwt.split('.');
+    if (vcParts.length < 2) continue;
+    const vcPadded = vcParts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const vcPayload = JSON.parse(Buffer.from(vcPadded + '='.repeat((4 - vcPadded.length % 4) % 4), 'base64').toString('utf8'));
+    const cs = vcPayload?.vc?.credentialSubject || vcPayload?.credentialSubject || {};
+    if (cs.credentialType === 'RealPersonIdentity') {
+      return {
+        firstName: cs.firstName || null,
+        lastName: cs.lastName || null,
+        uniqueId: cs.uniqueId || null,
+        photo: cs.photo || null,
+      };
+    }
+  }
+  throw new Error('RealPersonIdentity credential not found in presented VP');
+}
+
+/**
  * POST /api/company/connections/:connectionId/auto-issue-config
  * Alias for issue-service-config — used by the frontend Issue Credential button.
  */
 app.post('/api/company/connections/:connectionId/auto-issue-config', requireCompany, async (req, res) => {
-  // Delegate to the same logic as issue-service-config
-  req.params.connectionId = req.params.connectionId;
   const { connectionId } = req.params;
 
   const stored = global.pendingInvitations.get(connectionId);
   const email = stored?.email || req.body.email;
   const name = stored?.name || req.body.name;
-
-  const VALID_DEPTS = ['HR', 'IT', 'Security'];
   const rawDept = stored?.department || req.body.department || '';
-  const resolvedDepartment = VALID_DEPTS.includes(rawDept) ? rawDept : 'IT';
 
   if (!email || !name) {
     return res.status(400).json({
@@ -1504,47 +1658,102 @@ app.post('/api/company/connections/:connectionId/auto-issue-config', requireComp
     });
   }
 
-  const departmentApiKey = DEPARTMENT_API_KEYS[resolvedDepartment];
-  if (!departmentApiKey) {
-    return res.status(500).json({ success: false, error: `Department API key not configured for ${resolvedDepartment}` });
-  }
-
   try {
-    console.log(`\n📝 [AUTO-ISSUE] Issuing ServiceConfiguration to ${name} (${email})`);
-    const claims = await ServiceConfigVCBuilder.buildServiceConfigClaims({
-      email, name, department: resolvedDepartment, connectionId
-    }, req.company);
-
-    // Get the company's ServiceConfiguration schema ID (registered on multitenancy agent)
-    const schemaId = await SchemaManager.ensureServiceConfigSchema(
-      MULTITENANCY_CLOUD_AGENT_URL,
-      req.company.apiKey,
-      req.company.did
-    );
-
-    // Issue via company's multitenancy Cloud Agent (where the connection lives)
-    const credentialOffer = {
-      connectionId,
-      credentialFormat: 'JWT',
-      claims: claims.credentialSubject,
-      automaticIssuance: true,
-      issuingDID: req.company.did,
-      schemaId,
-    };
-
-    const result = await cloudAgentRequest(
-      req.company.apiKey,
-      '/issue-credentials/credential-offers',
-      { method: 'POST', body: JSON.stringify(credentialOffer) }
-    );
-
-    await EmployeeApiKeyManager.markConfigVcIssued(connectionId, result.data.recordId);
-    console.log(`[AUTO-ISSUE] Issued ServiceConfiguration VC to ${name} (${email})`);
-
-    res.json({ success: true, message: `ServiceConfiguration credential issued to ${name}`, data: result.data });
+    const data = await issueServiceConfigVC(connectionId, name, email, rawDept, req.company);
+    res.json({ success: true, message: `ServiceConfiguration credential issued to ${name}`, data });
   } catch (error) {
     console.error('[AUTO-ISSUE] Issuance failed:', error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/company/connections/:connectionId/request-rp-proof
+ * Sends a RealPersonIdentity proof request to the employee wallet.
+ * Returns { success, presentationId }.
+ */
+app.post('/api/company/connections/:connectionId/request-rp-proof', requireCompany, async (req, res) => {
+  const { connectionId } = req.params;
+  try {
+    const result = await cloudAgentRequest(
+      req.company.apiKey,
+      '/present-proof/presentations',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          connectionId,
+          proofs: [],
+          options: {
+            challenge: crypto.randomBytes(32).toString('hex'),
+            domain: 'identuslabel.cz'
+          },
+          goalCode: 'present-vp',
+          goal: 'Share your RealPersonIdentity credential for employee onboarding',
+          credentialFormat: 'JWT'
+        })
+      }
+    );
+    const presentationId = result.data.presentationId || result.data.thid || result.data.id;
+    if (!presentationId) throw new Error('No presentationId in response: ' + JSON.stringify(result.data));
+    console.log(`[RP-PROOF] Proof request sent to connection ${connectionId}, presentationId: ${presentationId}`);
+    res.json({ success: true, presentationId });
+  } catch (err) {
+    console.error('[RP-PROOF] Failed to send proof request:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /api/company/connections/:connectionId/rp-proof-status/:presentationId
+ * Polls the cloud agent for proof status.
+ * On PresentationVerified: extracts RealPerson claims, generates email, issues ServiceConfig VC.
+ * Returns { status: 'pending'|'complete'|'failed', name?, email?, error? }
+ */
+app.get('/api/company/connections/:connectionId/rp-proof-status/:presentationId', requireCompany, async (req, res) => {
+  const { connectionId, presentationId } = req.params;
+  try {
+    const result = await cloudAgentRequest(
+      req.company.apiKey,
+      `/present-proof/presentations/${presentationId}`
+    );
+    const pres = result.data;
+    const state = pres.status;
+
+    console.log(`[RP-PROOF] Status poll for ${presentationId}: ${state}`);
+
+    if (state === 'PresentationVerified' || state === 'PresentationReceived') {
+      // Extract JWT VP from response
+      const vpJwt = Array.isArray(pres.data) ? pres.data[0] : (pres.data || pres.presentation || null);
+      const claims = extractRealPersonClaims(vpJwt);
+
+      const fullName = [claims.firstName, claims.lastName].filter(Boolean).join(' ');
+      const existingEmails = getExistingEmailsForCompany(req.company.id);
+      const email = generateEmployeeEmail(fullName || 'employee', req.company.id, existingEmails);
+
+      // Update pendingInvitations with real identity data
+      const stored = global.pendingInvitations.get(connectionId) || { companyId: req.company.id };
+      const portalBaseUrl = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
+      stored.name = fullName;
+      stored.email = email;
+      stored.uniqueId = claims.uniqueId;
+      stored.photo = claims.photo;
+      stored.portalUrl = `${portalBaseUrl}/employee-portal-login.html?email=${encodeURIComponent(email)}`;
+      global.pendingInvitations.set(connectionId, stored);
+
+      // Issue ServiceConfiguration VC
+      await issueServiceConfigVC(connectionId, fullName, email, stored.department || '', req.company);
+
+      return res.json({ status: 'complete', name: fullName, email });
+    }
+
+    if (['ProblemReported', 'RequestRejected', 'PresentationRejected'].includes(state)) {
+      return res.json({ status: 'failed', error: `Presentation ${state}` });
+    }
+
+    res.json({ status: 'pending' });
+  } catch (err) {
+    console.error('[RP-PROOF] Status poll error:', err);
+    res.status(500).json({ status: 'failed', error: err.message });
   }
 });
 
@@ -1939,6 +2148,78 @@ app.post('/api/company/process-pending-connections', requireCompany, async (req,
 const employeeSessions = new Map();
 const pendingEmployeeAuths = new Map();
 
+// ── DIDComm Access Request Protocol ──────────────────────────────────────────
+// Mirrors the CA's DIDComm access request flow for TechCorp and ACME dashboards.
+// Each company has its own DIDCommCommandService instance polling its Cloud Agent wallet.
+
+const COMPANY_PUBLIC_BASE_URL = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
+const EMPLOYEE_ROLE_SCHEMA_ID = '6c39cc8e-b292-30aa-bbef-98ca2fdc6abe';
+
+function makeEmployeePortalProofSpec(companyLabel) {
+  return {
+    proofTypes: [{
+      schema: EMPLOYEE_ROLE_SCHEMA_ID,
+      requiredFields: ['email', 'prismDid', 'role', 'department']
+    }],
+    goalCode: 'schema:EmployeeRole',
+    goal: `Please present your Employee Role credential for ${companyLabel} access`,
+    claims: { email: {}, prismDid: {}, role: {}, department: {} }
+  };
+}
+
+async function resolveConnectionByDID(agentUrl, apiKey, fromDid) {
+  try {
+    const resp = await fetch(`${agentUrl}/connections?limit=200`, {
+      headers: { 'apikey': apiKey }
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const match = (data.contents || []).find(c => c.theirDid === fromDid || c.myDid === fromDid);
+    return match ? match.connectionId : null;
+  } catch (e) {
+    console.error(`[DIDCommAccess] resolveConnectionByDID error: ${e.message}`);
+    return null;
+  }
+}
+
+const techcorpDIDComm = new DIDCommCommandService({
+  cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL,
+  apiKey:        COMPANIES.techcorp.apiKey,
+  publicBaseUrl: COMPANY_PUBLIC_BASE_URL,
+  tokenTTLMs:    5 * 60 * 1000,
+  async resolveConnection(fromDid) {
+    return resolveConnectionByDID(MULTITENANCY_CLOUD_AGENT_URL, COMPANIES.techcorp.apiKey, fromDid);
+  },
+  async getUserInfo(connectionId) { return null; },
+  targets: {
+    'techcorp-employee-portal': {
+      label:        'TechCorp Employee Portal',
+      icon:         '🏢',
+      redirectPath: '/company-admin/employee-portal-dashboard.html',
+      proofSpec:    makeEmployeePortalProofSpec('TechCorp')
+    }
+  }
+});
+
+const acmeDIDComm = new DIDCommCommandService({
+  cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL,
+  apiKey:        COMPANIES.acme.apiKey,
+  publicBaseUrl: COMPANY_PUBLIC_BASE_URL,
+  tokenTTLMs:    5 * 60 * 1000,
+  async resolveConnection(fromDid) {
+    return resolveConnectionByDID(MULTITENANCY_CLOUD_AGENT_URL, COMPANIES.acme.apiKey, fromDid);
+  },
+  async getUserInfo(connectionId) { return null; },
+  targets: {
+    'acme-employee-portal': {
+      label:        'ACME Employee Portal',
+      icon:         '⚙️',
+      redirectPath: '/company-admin/employee-portal-dashboard.html',
+      proofSpec:    makeEmployeePortalProofSpec('ACME')
+    }
+  }
+});
+
 // Employee authentication configuration - uses Multitenancy Cloud Agent (port 8200)
 // This connects to TechCorp's tenant wallet for employee authentication via DIDComm
 const TECHCORP_CLOUD_AGENT_URL = process.env.TECHCORP_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
@@ -1956,6 +2237,18 @@ const ACCEPTED_ISSUER_DIDS = [
 // Employee Role schema GUID (v1.1.0 with email field for authentication)
 const EMPLOYEE_ROLE_SCHEMA_GUID = process.env.EMPLOYEE_ROLE_SCHEMA_GUID ||
   '6c39cc8e-b292-30aa-bbef-98ca2fdc6abe';
+
+// Compare PRISM DIDs tolerating long-form vs short-form differences.
+// Short-form: did:prism:<hash>
+// Long-form:  did:prism:<hash>:<base64-key-material>
+// One of the two may be short-form; match if the hash segments are equal.
+function prismDidsMatch(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const hashOf = did => did.startsWith('did:prism:') ? did.split(':')[2] : null;
+  const ha = hashOf(a), hb = hashOf(b);
+  return ha && hb && ha === hb;
+}
 
 /**
  * Helper function to check CIS Training status
@@ -1990,7 +2283,7 @@ async function checkCISTrainingStatus(prismDid) {
           if (decoded &&
               decoded.claims.trainingYear !== undefined &&
               decoded.claims.certificateNumber !== undefined &&
-              decoded.subject === prismDid) {
+              prismDidsMatch(decoded.subject, prismDid)) {
             claims = decoded.claims;
           }
         } else if (record.claims) {
@@ -1998,7 +2291,7 @@ async function checkCISTrainingStatus(prismDid) {
           const c = record.claims;
           if (c.trainingYear !== undefined &&
               c.certificateNumber !== undefined &&
-              c.prismDid === prismDid) {
+              prismDidsMatch(c.prismDid, prismDid)) {
             claims = c;
           }
         }
@@ -2027,6 +2320,39 @@ async function checkCISTrainingStatus(prismDid) {
   } catch (error) {
     console.error('[EmployeeAuth] Error checking CIS training status:', error);
     return { hasValidTraining: false, expiryDate: null };
+  }
+}
+
+// Look up SecurityClearanceGrant VC issued by TechCorp for this PRISM DID.
+// Used by the DIDComm access flow which only presents EmployeeRole.
+async function checkSecurityClearanceGrant(prismDid) {
+  try {
+    const response = await cloudAgentRequest(TECHCORP_API_KEY, '/issue-credentials/records?limit=200');
+    const records = response.data.contents || [];
+    const VALID_STATES = ['CredentialSent', 'CredentialReceived', 'OfferSent', 'RequestReceived'];
+
+    for (const record of records) {
+      if (!VALID_STATES.includes(record.protocolState)) continue;
+      try {
+        let level = null;
+        if (record.credential) {
+          const decoded = decodeCredential(record);
+          if (decoded && decoded.claims.clearanceLevel && prismDidsMatch(decoded.subject, prismDid)) {
+            level = decoded.claims.clearanceLevel;
+          }
+        } else if (record.claims) {
+          const c = record.claims;
+          if (c.clearanceLevel &&
+              (prismDidsMatch(c.holderDID, prismDid) || prismDidsMatch(c.prismDid, prismDid))) {
+            level = c.clearanceLevel;
+          }
+        }
+        if (level) return { hasClearance: true, level };
+      } catch (e) { continue; }
+    }
+    return { hasClearance: false, level: null };
+  } catch (e) {
+    return { hasClearance: false, level: null };
   }
 }
 
@@ -2073,6 +2399,413 @@ function requireEmployeeSession(req, res, next) {
 
   next();
 }
+
+/**
+ * Middleware: authenticate IDL wallet requests via enterprise agent API key + walletId.
+ * The IDL wallet sends X-Employee-Api-Key (enterprise agent apiKey) and
+ * X-Employee-Wallet-Id (enterpriseAgentWalletId from ServiceConfiguration VC).
+ */
+async function requireEmployeeWalletKey(req, res, next) {
+  const apiKey = req.headers['x-employee-api-key'];
+  if (!apiKey) {
+    return res.status(401).json({ success: false, error: 'Missing X-Employee-Api-Key' });
+  }
+  try {
+    // GET /wallets with a wallet-level apikey returns only that wallet — validates key and resolves walletId
+    // in one call. This is authoritative: avoids trusting X-Employee-Wallet-Id from the client, which may
+    // be "undefined" if the employee's ServiceConfiguration VC predates the enterpriseAgentWalletId field.
+    const walletResp = await fetch(`${ENTERPRISE_CLOUD_AGENT_URL}/wallets?limit=1`, {
+      headers: { 'apikey': apiKey }
+    });
+    if (!walletResp.ok) {
+      return res.status(401).json({ success: false, error: 'Invalid employee API key' });
+    }
+    const walletData = await walletResp.json();
+    const wallet = (walletData.contents || [])[0];
+    if (!wallet) {
+      return res.status(401).json({ success: false, error: 'No wallet found for API key' });
+    }
+    req.employee = { walletId: wallet.id, apiKey };
+    next();
+  } catch (err) {
+    console.error('[requireEmployeeWalletKey] error:', err.message);
+    return res.status(500).json({ success: false, error: 'Auth check failed' });
+  }
+}
+
+// ─── Colleague Chat Endpoints ───────────────────────────────────────────────
+
+/**
+ * GET /api/employee-portal/colleagues
+ * Returns all active employees (excluding self) for the colleague directory.
+ */
+app.get('/api/employee-portal/colleagues', requireEmployeeWalletKey, async (req, res) => {
+  try {
+    const db = getEnterpriseDb();
+    const all = await db.getAllActiveEmployees();
+    const colleagues = all
+      .filter(e => e.wallet_id !== req.employee.wallet_id)
+      .map(e => ({ email: e.email, full_name: e.full_name, department: e.department, wallet_id: e.wallet_id }));
+    res.json({ success: true, colleagues });
+  } catch (err) {
+    console.error('[colleagues] error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/employee-portal/colleague-invite
+ * Store an OOB invitation for delivery to a colleague.
+ * Body: { toEmail, oobBase64 }
+ */
+app.post('/api/employee-portal/colleague-invite', requireEmployeeWalletKey, async (req, res) => {
+  try {
+    const { toEmail, oobBase64 } = req.body;
+    if (!toEmail || !oobBase64) return res.status(400).json({ success: false, error: 'toEmail and oobBase64 required' });
+    const id = require('crypto').randomUUID();
+    colleagueInvitations.set(id, {
+      id, fromEmail: req.employee.email, fromName: req.employee.full_name,
+      toEmail, oobBase64, createdAt: new Date().toISOString()
+    });
+    console.log(`[ColleagueInvite] ${req.employee.email} → ${toEmail} (${id})`);
+    res.json({ success: true, id });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /api/employee-portal/colleague-invitations
+ * Returns pending OOB invitations addressed to the authenticated employee.
+ */
+app.get('/api/employee-portal/colleague-invitations', requireEmployeeWalletKey, async (req, res) => {
+  const myEmail = req.employee.email;
+  const pending = [];
+  for (const inv of colleagueInvitations.values()) {
+    if (inv.toEmail === myEmail) {
+      pending.push({ id: inv.id, fromEmail: inv.fromEmail, fromName: inv.fromName, oobBase64: inv.oobBase64, createdAt: inv.createdAt });
+    }
+  }
+  res.json({ success: true, invitations: pending });
+});
+
+/**
+ * DELETE /api/employee-portal/colleague-invitations/:id
+ * Mark an invitation as consumed after the IDL wallet accepted it.
+ * Body: { connectionId } — the connectionId returned by the enterprise agent after accepting
+ */
+app.delete('/api/employee-portal/colleague-invitations/:id', requireEmployeeWalletKey, async (req, res) => {
+  const inv = colleagueInvitations.get(req.params.id);
+  if (!inv) return res.status(404).json({ success: false, error: 'Invitation not found' });
+  if (inv.toEmail !== req.employee.email) return res.status(403).json({ success: false, error: 'Forbidden' });
+  const { connectionId } = req.body || {};
+  // Store reverse mapping so webhook can route reply messages
+  if (connectionId) {
+    connectionColleagueMap.set(`${req.employee.wallet_id}:${connectionId}`, {
+      ownerEmail: req.employee.email, colleagueEmail: inv.fromEmail, colleagueName: inv.fromName
+    });
+  }
+  colleagueInvitations.delete(req.params.id);
+  res.json({ success: true });
+});
+
+// In-memory store for multitenancy test webhook events (ring buffer, max 500)
+const multitenancyTestEvents = [];
+const MAX_TEST_EVENTS = 500;
+
+// ─── Admin Chat Inbox ────────────────────────────────────────────────────────
+// connectionId → [{from, fromLabel, content, timestamp, messageId}]
+const adminInbox = new Map();
+const MAX_ADMIN_MSGS = 500;
+const ADMIN_INBOX_FILE = path.join(__dirname, 'data', 'admin-inbox.json');
+
+function saveAdminInbox() {
+  try {
+    const obj = {};
+    for (const [k, v] of adminInbox) obj[k] = v;
+    fs.writeFileSync(ADMIN_INBOX_FILE, JSON.stringify(obj));
+  } catch (e) { console.warn('[AdminInbox] Failed to persist:', e.message); }
+}
+
+function loadAdminInbox() {
+  try {
+    if (fs.existsSync(ADMIN_INBOX_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(ADMIN_INBOX_FILE, 'utf8'));
+      for (const [k, v] of Object.entries(raw)) adminInbox.set(k, v);
+      console.log(`[AdminInbox] Loaded ${adminInbox.size} conversation(s) from disk`);
+    }
+  } catch (e) { console.warn('[AdminInbox] Failed to load:', e.message); }
+}
+
+loadAdminInbox();
+setInterval(saveAdminInbox, 10_000);
+
+/**
+ * POST /api/multitenancy-test-webhook
+ * Receives all webhook events from the multitenancy cloud agent (for testing).
+ * Also routes BasicMessageReceived events to adminInbox so admin chat sees employee messages.
+ */
+app.post('/api/multitenancy-test-webhook', async (req, res) => {
+  res.sendStatus(200);
+  const event = req.body;
+  if (!event) return;
+  event._receivedAt = Date.now();
+
+  // Route BasicMessageReceived to adminInbox so admin chat shows employee messages
+  if (event.type === 'BasicMessageReceived' && event.data) {
+    const { from: senderId, content, id: eventId } = event.data;
+    const walletId = event.walletId;
+    const company = Object.values(COMPANIES).find(c => c.walletId === walletId);
+    if (company && senderId && content) {
+      resolveConnectionByDID(MULTITENANCY_CLOUD_AGENT_URL, company.apiKey, senderId)
+        .then(connId => {
+          if (!connId) return;
+          const msgs = adminInbox.get(connId) || [];
+          msgs.push({
+            from: 'employee',
+            fromLabel: connId.slice(0, 8),
+            content,
+            timestamp: Date.now(),
+            messageId: eventId || crypto.randomUUID(),
+            sentByAdmin: false
+          });
+          adminInbox.set(connId, msgs.slice(-MAX_ADMIN_MSGS));
+          console.log(`[MultitenancyTestWebhook] BasicMessage → adminInbox[${connId.slice(0, 8)}]: ${content.substring(0, 50)}`);
+        })
+        .catch(e => console.error('[MultitenancyTestWebhook] resolveConnection error:', e.message));
+    }
+  }
+
+  multitenancyTestEvents.push(event);
+  if (multitenancyTestEvents.length > MAX_TEST_EVENTS) multitenancyTestEvents.shift();
+  console.log(`[MultitenancyTestWebhook] event type=${event.type || 'unknown'} wallet=${event.walletId || '-'}`);
+});
+
+/**
+ * GET /api/multitenancy-test-webhook/events
+ * Returns all captured events since ?since=<unix_ms> and clears them.
+ */
+app.get('/api/multitenancy-test-webhook/events', (req, res) => {
+  const since = parseInt(req.query.since || '0', 10);
+  const filtered = since
+    ? multitenancyTestEvents.filter(e => e._receivedAt > since)
+    : multitenancyTestEvents.slice();
+  res.json({ events: filtered, total: multitenancyTestEvents.length });
+});
+
+/**
+ * DELETE /api/multitenancy-test-webhook/events
+ * Clears all captured test events.
+ */
+app.delete('/api/multitenancy-test-webhook/events', (req, res) => {
+  multitenancyTestEvents.length = 0;
+  res.json({ cleared: true });
+});
+
+// ─── Admin Chat API ──────────────────────────────────────────────────────────
+// Uses the HR department API key to access the enterprise agent (port 8300).
+// Admin chat uses the company's multitenancy agent (port 8200) because that is where
+// EmployeeWalletManager creates employee connections (via createTechCorpInvitation).
+
+/**
+ * GET /api/admin/connections
+ * List all connections from the company's multitenancy agent.
+ */
+app.get('/api/admin/connections', requireCompany, async (req, res) => {
+  try {
+    const result = await cloudAgentRequest(req.company.apiKey, '/connections?limit=1000');
+    if (!result.success) return res.status(502).json({ error: result.error });
+    res.json({ success: true, connections: result.data.contents || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * GET /api/admin/employee-index
+ * Joins enterprise agent connections with employee DB records.
+ * Returns [{connectionId, label, state, email, name, department}]
+ */
+app.get('/api/admin/employee-index', requireCompany, async (req, res) => {
+  try {
+    const connResult = await cloudAgentRequest(req.company.apiKey, '/connections?limit=1000');
+    if (!connResult.success) return res.status(502).json({ error: connResult.error });
+
+    const conns = connResult.data.contents || [];
+    const softDeleted = global.softDeletedConnections.get(req.company.id) || new Set();
+
+    // Build connectionId → employee info: colleague map, then pendingInvitations, then DB
+    const connToEmployee = {};
+    for (const [key, mapping] of connectionColleagueMap.entries()) {
+      const connId = key.split(':').slice(1).join(':');
+      if (!connToEmployee[connId]) {
+        connToEmployee[connId] = { email: mapping.colleagueEmail, name: mapping.colleagueName || mapping.colleagueEmail };
+      }
+    }
+    for (const [connId, inv] of global.pendingInvitations.entries()) {
+      if (!connToEmployee[connId] && (inv.name || inv.email)) {
+        connToEmployee[connId] = { email: inv.email || null, name: inv.name || inv.email || null };
+      }
+    }
+    let dbConnectionMap = new Map();
+    if (process.env.ENTERPRISE_DB_PASSWORD) {
+      try {
+        dbConnectionMap = await getEnterpriseDb().getEmployeeConnectionMap();
+        for (const [connId, row] of dbConnectionMap.entries()) {
+          if (!connToEmployee[connId]) {
+            connToEmployee[connId] = { email: row.email, name: row.full_name };
+          }
+        }
+      } catch (e) { console.warn('[employee-index] DB enrich skipped:', e.message); }
+    }
+
+    function resolveEntry(c) {
+      const lm = (c.label || '').match(/^(.+?)\s+\(([^)]+)\)\s+-\s+(.+)$/);
+      const labelName = (lm && lm[1] !== 'Pending') ? lm[1] : null;
+      const resolvedName = connToEmployee[c.connectionId]?.name || labelName || c.label || null;
+      return {
+        connectionId: c.connectionId,
+        label: resolvedName || c.connectionId.slice(0, 8),
+        state: c.state,
+        email: connToEmployee[c.connectionId]?.email || null,
+        name: resolvedName,
+        unreadCount: (adminInbox.get(c.connectionId) || []).filter(m => !m._adminRead).length
+      };
+    }
+
+    const hrIndex = conns.filter(c => isEmployeeConnection(c, softDeleted)).map(resolveEntry);
+
+    // Add DB-backed ↔ connections not already shown
+    const shownNames = new Set(hrIndex.map(e => (e.name || '').toLowerCase()).filter(Boolean));
+    const shownIds = new Set(hrIndex.map(e => e.connectionId));
+    const connByIdMap = new Map(conns.map(c => [c.connectionId, c]));
+    const activeStates = ['ConnectionResponseSent', 'ConnectionResponseReceived', 'Active', 'ACTIVE', 'active'];
+
+    for (const [connId, row] of dbConnectionMap.entries()) {
+      if (shownIds.has(connId)) continue;
+      if (row.full_name && shownNames.has(row.full_name.toLowerCase())) continue;
+      const conn = connByIdMap.get(connId);
+      if (!conn || !activeStates.includes(conn.state)) continue;
+      if (softDeleted.has(connId)) continue;
+      connToEmployee[connId] = { name: row.full_name, email: row.email };
+      hrIndex.push(resolveEntry(conn));
+    }
+
+    res.json({ success: true, employees: hrIndex });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * POST /api/admin/send-message
+ * Send a BasicMessage from the admin (HR wallet) to an employee connection.
+ * Body: { connectionId, content }
+ */
+app.post('/api/admin/send-message', requireCompany, async (req, res) => {
+  const { connectionId, content } = req.body || {};
+  if (!connectionId || !content) return res.status(400).json({ error: 'connectionId and content required' });
+  try {
+    const result = await cloudAgentRequest(req.company.apiKey, `/connections/${connectionId}/basic-messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content })
+    });
+    if (!result.success) return res.status(502).json({ error: result.error });
+
+    // Store the sent message in admin inbox too (as admin's own sent message)
+    const msgs = adminInbox.get(connectionId) || [];
+    msgs.push({ from: 'admin', fromLabel: 'Admin', content, timestamp: Date.now(), messageId: result.data.id || crypto.randomUUID(), sentByAdmin: true });
+    adminInbox.set(connectionId, msgs.slice(-MAX_ADMIN_MSGS));
+
+    res.json({ success: true, messageId: result.data.id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * GET /api/admin/messages/:connectionId
+ * Return admin inbox for a connection. Supports ?since=<unix_ms>.
+ */
+app.get('/api/admin/messages/:connectionId', requireCompany, (req, res) => {
+  const { connectionId } = req.params;
+  const since = parseInt(req.query.since || '0', 10);
+  const all = adminInbox.get(connectionId) || [];
+  const filtered = since ? all.filter(m => m.timestamp > since) : all;
+  // Mark as read
+  all.forEach(m => { m._adminRead = true; });
+  res.json({ success: true, messages: filtered });
+});
+
+/**
+ * POST /api/enterprise-messages-webhook
+ * Receives BasicMessageReceived webhook events from the enterprise cloud agent.
+ */
+app.post('/api/enterprise-messages-webhook', async (req, res) => {
+  res.sendStatus(200); // ack immediately
+  const { type, walletId: bodyWalletId, data } = req.body || {};
+  const walletId = req.query.walletId || bodyWalletId;
+  console.log(`[EnterpriseWebhook] event type=${type || 'unknown'} wallet=${walletId || '-'}`);
+  if (type !== 'BasicMessageReceived' || !data) return;
+
+  // connectionId is absent in enterprise agent per-wallet webhook payloads (only from/to DIDs present).
+  // Resolve the enterprise connection UUID by looking up the connection where theirDid === fromDid.
+  const { id, content, connectionId: rawConnectionId, from: fromDid } = data;
+  if (!content) return;
+
+  let connectionId = rawConnectionId || null;
+  if (!connectionId && fromDid) {
+    const webhookKey = enterpriseWalletKeyMap.get(walletId);
+    if (webhookKey) {
+      connectionId = await resolveConnectionByDID(ENTERPRISE_CLOUD_AGENT_URL, webhookKey, fromDid).catch(() => null);
+    }
+  }
+  connectionId = connectionId || fromDid || 'admin';
+
+  // Look up which colleague sent this via the connection map (keyed by walletId:connectionId)
+  const mapping = connectionId ? connectionColleagueMap.get(`${walletId}:${connectionId}`) : null;
+  if (!mapping) {
+    // No colleague mapping → message is from the company admin (sent via multitenancy agent)
+    const msg = { id: id || crypto.randomUUID(), fromEmail: 'admin', fromName: 'Company Admin', content, timestamp: Date.now(), connectionId: connectionId || fromDid || 'admin' };
+    const inbox = walletAdminMessages.get(walletId) || [];
+    inbox.push(msg);
+    walletAdminMessages.set(walletId, inbox.slice(-200));
+    console.log(`[EnterpriseWebhook] Admin message → wallet=${walletId}: ${content.substring(0, 50)}`);
+    return;
+  }
+
+  const msg = { id: id || crypto.randomUUID(), fromEmail: mapping.colleagueEmail, fromName: mapping.colleagueName, content, timestamp: Date.now(), connectionId };
+  const inbox = colleagueMessages.get(mapping.ownerEmail) || [];
+  inbox.push(msg);
+  colleagueMessages.set(mapping.ownerEmail, inbox.slice(-200)); // keep last 200
+  console.log(`[EnterpriseWebhook] Message from ${mapping.colleagueEmail} → ${mapping.ownerEmail}: ${content.substring(0, 50)}`);
+
+  // Also push into admin inbox so admins can see employee messages (connectionId may be null here)
+  if (connectionId) {
+    const adminMsgs = adminInbox.get(connectionId) || [];
+    adminMsgs.push({ from: mapping.colleagueEmail, fromLabel: mapping.colleagueName || mapping.colleagueEmail, content, timestamp: Date.now(), messageId: msg.id });
+    adminInbox.set(connectionId, adminMsgs.slice(-MAX_ADMIN_MSGS));
+  }
+});
+
+/**
+ * GET /api/employee-portal/colleague-messages
+ * Returns messages received since a given timestamp.
+ * Query: ?since=<unix_ms>
+ */
+app.get('/api/employee-portal/colleague-messages', requireEmployeeWalletKey, (req, res) => {
+  const since = parseInt(req.query.since || '0', 10);
+  const walletId = req.employee.walletId;
+  // Colleague-to-colleague messages (keyed by email, may be absent if no email in req.employee)
+  const peerMsgs = req.employee.email ? (colleagueMessages.get(req.employee.email) || []) : [];
+  // Admin→employee messages (keyed by walletId, no email needed)
+  const adminMsgs = walletAdminMessages.get(walletId) || [];
+  const all = [...peerMsgs, ...adminMsgs].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  const filtered = since ? all.filter(m => m.timestamp > since) : all;
+  res.json({ success: true, messages: filtered });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/employee-portal/auth/initiate
@@ -2155,19 +2888,51 @@ app.post('/api/employee-portal/auth/initiate', async (req, res) => {
     const challenge = crypto.randomUUID();
     const domain = 'employee-portal.techcorp.com';
 
+    // Always use the stored enterprise connection — the proof request goes to the enterprise
+    // wallet where the EmployeeRole VC lives.
+    const loginConnectionId = employee.techcorp_connection_id;
+
+    // Reject any stale RequestReceived presentations from previous login attempts
+    // so they don't block UX in the enterprise wallet modal.
+    if (employee.wallet_id) {
+      const enterpriseApiKey = enterpriseWalletKeyMap.get(employee.wallet_id);
+      if (enterpriseApiKey) {
+        try {
+          const staleResp = await fetch(`${ENTERPRISE_CLOUD_AGENT_URL}/present-proof/presentations?limit=100`, {
+            headers: { 'apikey': enterpriseApiKey }
+          });
+          if (staleResp.ok) {
+            const staleData = await staleResp.json();
+            const stale = (staleData.contents || []).filter(p =>
+              p.status === 'RequestReceived' && p.role === 'Prover'
+            );
+            await Promise.all(stale.map(p =>
+              fetch(`${ENTERPRISE_CLOUD_AGENT_URL}/present-proof/presentations/${p.presentationId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', 'apikey': enterpriseApiKey },
+                body: JSON.stringify({ action: 'request-reject' })
+              }).catch(() => {})
+            ));
+            if (stale.length > 0) {
+              console.log(`[EmployeeAuth] Rejected ${stale.length} stale proof request(s) for ${identifier}`);
+            }
+          }
+        } catch (e) {
+          console.warn(`[EmployeeAuth] Stale request cleanup failed (non-blocking): ${e.message}`);
+        }
+      }
+    }
+
     console.log(`[EmployeeAuth] Creating proof request:`);
-    console.log(`   Connection ID: ${employee.techcorp_connection_id}`);
+    console.log(`   Connection ID: ${loginConnectionId}`);
     console.log(`   Challenge: ${challenge.substring(0, 12)}...`);
     console.log(`   Domain: ${domain}`);
 
     // Create Present Proof request via DIDComm connection
-    // ✅ SCHEMA-LESS PROOF REQUEST: Accepts ANY verifiable presentation
-    // User requested: "I want to implement simpler workaround using schema-less proof requests (allowing any VP)"
-    //
-    // Note: Cloud Agent API requires 'proofs' field, but we use empty array to bypass schema validation
-    // This allows manual credential selection in wallet without schema constraints
+    // Schema-less: accepts ANY verifiable presentation so the user can provide either
+    // EmployeeRole or SecurityClearance from whichever wallet they prefer.
     const proofRequestPayload = {
-      connectionId: employee.techcorp_connection_id,
+      connectionId: loginConnectionId,
       options: {
         challenge: challenge,
         domain: domain
@@ -2690,6 +3455,28 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
       console.log(`[EmployeeAuth] No Security Clearance credential provided in presentation`);
     }
 
+    // Enrich session with current CA identity data (photo + lastName freshness check)
+    let photoUrl = null;
+    let lastNameMismatch = false;
+    let lastNameCurrent = verifiedClaims.lastName || null;
+    const caUniqueId = verifiedClaims.uniqueId || null;
+    if (caUniqueId) {
+      try {
+        const caResp = await fetch(`${CA_BASE_URL}/api/user-info/${encodeURIComponent(caUniqueId)}`);
+        if (caResp.ok) {
+          const caInfo = await caResp.json();
+          photoUrl = caInfo.proxyUrl || null;
+          lastNameCurrent = caInfo.lastName || lastNameCurrent;
+          if (caInfo.lastName && verifiedClaims.lastName && caInfo.lastName !== verifiedClaims.lastName) {
+            lastNameMismatch = true;
+            console.log(`[EmployeeAuth] ⚠️ lastName mismatch for ${caUniqueId}: VC="${verifiedClaims.lastName}" CA="${caInfo.lastName}"`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[EmployeeAuth] CA user-info lookup failed (non-blocking): ${e.message}`);
+      }
+    }
+
     // Create session
     const sessionToken = crypto.randomBytes(32).toString('hex');
     const session = {
@@ -2706,6 +3493,9 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
       trainingExpiryDate: trainingStatus.expiryDate,
       clearanceLevel, // Security clearance level (null if not provided)
       hasClearanceVC, // Flag indicating if employee has security clearance
+      photoUrl,         // Photo proxy URL from CA (null if no photo or no uniqueId in VC)
+      lastNameMismatch, // true if CA lastName differs from VC lastName
+      lastNameCurrent,  // Current lastName from CA
       authenticatedAt: Date.now(),
       lastActivity: Date.now()
     };
@@ -2816,20 +3606,8 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
 app.get('/api/employee-portal/profile', requireEmployeeSession, async (req, res) => {
   const session = req.employeeSession;
 
-  // If session has no training, do a live check against the cloud agent
-  // (covers the case where the CIS Training VC wasn't in the login VP)
-  if (!session.hasTraining && session.prismDid) {
-    try {
-      const liveStatus = await checkCISTrainingStatus(session.prismDid);
-      if (liveStatus.hasValidTraining) {
-        session.hasTraining = true;
-        session.trainingExpiryDate = liveStatus.expiryDate;
-        session.trainingCompletionDate = liveStatus.completionDate;
-      }
-    } catch (e) {
-      // Non-fatal: fall through with session value
-    }
-  }
+  // Training status reflects only what was presented in the login VP.
+  // No live cloud-agent fallback — the employee must present the CISTraining VC to gain access.
 
   res.json({
     success: true,
@@ -2858,6 +3636,9 @@ app.get('/api/employee-portal/profile', requireEmployeeSession, async (req, res)
       hasValidTraining: session.hasTraining,
       expiryDate: session.trainingExpiryDate
     },
+    photoUrl: session.photoUrl || null,
+    lastNameMismatch: session.lastNameMismatch || false,
+    lastNameCurrent: session.lastNameCurrent || null,
     session: {
       authenticatedAt: new Date(session.authenticatedAt).toISOString(),
       lastActivity: new Date(session.lastActivity).toISOString()
@@ -2883,6 +3664,294 @@ app.post('/api/employee-portal/auth/logout', requireEmployeeSession, (req, res) 
     message: 'Logged out successfully'
   });
 });
+
+// ── DIDComm Access Request Webhooks ───────────────────────────────────────────
+
+function handleDIDCommWebhook(didCommService, companyLabel) {
+  return express.Router().post('/', express.json(), async (req, res) => {
+    const type = req.body?.type || '(unknown)';
+    console.log(`🔔 [DIDCommWebhook/${companyLabel}] Event: ${type}`);
+
+    if (type === 'BasicMessageReceived' && req.body?.data) {
+      const { content, from: senderId, connectionId: eventConnId, id: eventId } = req.body.data;
+      let actualContent = content || '';
+      try {
+        const stdBody = JSON.parse(actualContent);
+        if (stdBody && typeof stdBody.content === 'string') actualContent = stdBody.content;
+      } catch (_) {}
+      didCommService.handleIncomingMessage(senderId, actualContent).catch(e =>
+        console.error(`[DIDCommWebhook/${companyLabel}] handleIncomingMessage error:`, e.message)
+      );
+      // Feed admin inbox so admin chat shows employee messages.
+      // connectionId is absent from BasicMessageReceived payloads — resolve from sender DID.
+      const resolvedConnId = eventConnId || await didCommService.cfg.resolveConnection(senderId).catch(() => null);
+      if (resolvedConnId && actualContent) {
+        const adminMsgs = adminInbox.get(resolvedConnId) || [];
+        adminMsgs.push({
+          from: 'employee',
+          fromLabel: resolvedConnId.slice(0, 8),
+          content: actualContent,
+          timestamp: Date.now(),
+          messageId: eventId || crypto.randomUUID(),
+          sentByAdmin: false
+        });
+        adminInbox.set(resolvedConnId, adminMsgs.slice(-MAX_ADMIN_MSGS));
+        console.log(`[DIDCommWebhook/${companyLabel}] BasicMessage → adminInbox[${resolvedConnId.slice(0, 8)}]: ${actualContent.substring(0, 50)}`);
+      }
+      // Also push into test event store so test scripts can poll for delivery
+      const testEvent = { ...req.body, _receivedAt: Date.now(), _company: companyLabel };
+      multitenancyTestEvents.push(testEvent);
+      if (multitenancyTestEvents.length > MAX_TEST_EVENTS) multitenancyTestEvents.shift();
+    }
+
+    res.status(200).json({ received: true });
+  });
+}
+
+app.use('/api/didcomm-webhook/techcorp', handleDIDCommWebhook(techcorpDIDComm, 'TechCorp'));
+app.use('/api/didcomm-webhook/acme',     handleDIDCommWebhook(acmeDIDComm, 'ACME'));
+
+/**
+ * GET /api/enterprise-portal/grant-status?proofId=<presentationId>
+ * Wallet polls this after accepting a proof request to retrieve the access grant URL.
+ * The DIDCommCommandService stores the grant keyed by proofId; this endpoint consumes it (one-shot).
+ */
+app.get('/api/enterprise-portal/grant-status', (req, res) => {
+  const key = req.query.requestId || req.query.proofId;
+  if (!key) return res.status(400).json({ success: false, error: 'Missing requestId' });
+
+  const grant = techcorpDIDComm.consumeGrant(key) ?? acmeDIDComm.consumeGrant(key);
+  if (grant) {
+    console.log(`[EnterprisePortalGrant] Grant consumed for key ${String(key).slice(0, 12)}...: ${grant.accessUrl}`);
+    return res.json({ success: true, grant });
+  }
+  res.json({ success: false });
+});
+
+// ── DIDComm Access Token Redemption ──────────────────────────────────────────
+
+app.get('/api/access', async (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(400).send(accessDeniedPage('Missing token parameter.'));
+
+  const techcorpEntry = techcorpDIDComm.getToken(token);
+  const acmeEntry = techcorpEntry ? null : acmeDIDComm.getToken(token);
+  const entry = techcorpEntry || acmeEntry;
+  if (!entry)              return res.status(404).send(accessDeniedPage('Token not found. It may have expired or never existed.'));
+  if (entry.used)          return res.status(410).send(accessDeniedPage('This access link has already been used. Request a new one from your wallet.'));
+  if (Date.now() > entry.expiresAt) return res.status(410).send(accessDeniedPage('This access link has expired. Request a new one from your wallet.'));
+  const entryCompanyId = techcorpEntry ? 'techcorp' : (acmeEntry ? 'acme' : null);
+  const entryCompany = entryCompanyId ? getAllCompanies().find(c => c.id === entryCompanyId) : null;
+
+  entry.used = true;
+
+  const sessionToken = crypto.randomBytes(32).toString('hex');
+  const claims = entry.userClaims || {};
+  let prismDid = claims.prismDid || null;
+
+  // When _extractClaims doesn't find prismDid/email in the VP, look the employee up by
+  // techcorp_connection_id (always present in the token entry).
+  const isEmployeePortalTarget = entry.redirectPath?.includes('employee-portal-dashboard');
+  if (isEmployeePortalTarget && (!prismDid || !claims.email)) {
+    try {
+      const { Pool } = require('pg');
+      const _pool = new Pool({
+        host: process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
+        port: process.env.ENTERPRISE_DB_PORT || 5434,
+        database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
+        user: process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
+        password: process.env.ENTERPRISE_DB_PASSWORD,
+      });
+      const empRow = await _pool.query(
+        `SELECT email, full_name, prism_did FROM employee_portal_accounts
+         WHERE techcorp_connection_id = $1 AND deleted_at IS NULL LIMIT 1`,
+        [entry.connectionId]
+      );
+      await _pool.end();
+      const emp = empRow.rows[0];
+      if (emp) {
+        if (!prismDid)     prismDid       = emp.prism_did || null;
+        if (!claims.email) claims.email   = emp.email     || null;
+        if (!claims.fullName && !claims.firstName) claims.fullName = emp.full_name || null;
+        console.log(`[DIDCommAccess] Resolved employee from DB for ${emp.email}`);
+      }
+    } catch (e) {
+      console.warn(`[DIDCommAccess] DB lookup failed: ${e.message}`);
+    }
+  }
+
+  // Extract training and clearance from the VP that was presented.
+  // _extractClaims now returns { ...employeeRoleClaims, cisTraining: {...}|null, clearance: {...}|null }
+  // Fall back to cloud-agent lookups only when the VP carried no such VCs (e.g. older wallets).
+  let trainingStatus = { hasValidTraining: false, expiryDate: null };
+  let clearanceGrant = { hasClearance: false, level: null };
+
+  if (claims.cisTraining) {
+    trainingStatus = { hasValidTraining: claims.cisTraining.hasValidTraining, expiryDate: claims.cisTraining.expiryDate };
+    console.log(`[DIDCommAccess] CIS Training from VP: ${trainingStatus.hasValidTraining ? 'valid' : 'expired/missing'}`);
+  } else {
+    console.log(`[DIDCommAccess] No CIS Training VC in presentation → routing to training page`);
+  }
+
+  if (claims.clearance) {
+    clearanceGrant = { hasClearance: claims.clearance.hasClearanceVC, level: claims.clearance.level };
+    console.log(`[DIDCommAccess] Clearance from VP: ${clearanceGrant.level}`);
+  } else {
+    console.log(`[DIDCommAccess] No clearance VC in presentation → no clearance access`);
+  }
+
+  employeeSessions.set(sessionToken, {
+    sessionToken,
+    connectionId:   entry.connectionId,
+    prismDid,
+    employeeId:     claims.email       || prismDid || 'unknown',
+    role:           claims.role        || null,
+    department:     claims.department  || null,
+    fullName:       claims.fullName    || [claims.firstName, claims.lastName].filter(Boolean).join(' ') || claims.email || 'Employee',
+    email:          claims.email       || null,
+    issuerDID:      entryCompany?.did || null,
+    hasTraining:    trainingStatus.hasValidTraining,
+    trainingExpiryDate: trainingStatus.expiryDate || null,
+    clearanceLevel: clearanceGrant.level,
+    hasClearanceVC: clearanceGrant.hasClearance,
+    photoUrl:       null,
+    lastNameMismatch: false,
+    lastNameCurrent: null,
+    authenticatedAt: Date.now(),
+    lastActivity:    Date.now(),
+    loginMethod:    'didcomm-access-request'
+  });
+
+  let redirectPath = entry.redirectPath;
+  if (isEmployeePortalTarget && !trainingStatus.hasValidTraining) {
+    redirectPath = redirectPath.replace('employee-portal-dashboard.html', 'employee-training.html');
+    console.log(`[DIDCommAccess] No CIS training for ${claims.email || prismDid} → redirecting to training page`);
+  }
+
+  console.log(`[DIDCommAccess] Token redeemed: ${token.slice(0, 12)}... → session ${sessionToken.slice(0, 12)}... → ${redirectPath}`);
+  res.redirect(302, `${redirectPath}?session=${encodeURIComponent(sessionToken)}`);
+});
+
+function accessDeniedPage(msg) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Access Error</title>
+<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a;color:#e2e8f0}
+.box{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:2rem;max-width:480px;text-align:center}
+h2{color:#f87171;margin-top:0}p{color:#94a3b8;margin-bottom:0}</style></head>
+<body><div class="box"><h2>⛔ Access Denied</h2><p>${msg}</p></div></body></html>`;
+}
+
+// Background loop: auto-send proof request when connection establishes, then auto-issue VC
+setInterval(async () => {
+  if (!global.pendingInvitations || global.pendingInvitations.size === 0) return;
+
+  for (const [connectionId, data] of global.pendingInvitations) {
+    // Skip terminal states and 'issuing' (in-progress lock)
+    if (data.proofState === 'complete' || data.proofState === 'failed' || data.proofState === 'issuing') continue;
+
+    const company = getCompany(data.companyId);
+    if (!company) continue;
+
+    try {
+      if (!data.proofState) {
+        // Step 1: check if connection has been established
+        const connResult = await cloudAgentRequest(company.apiKey, `/connections/${connectionId}`);
+        const connState = connResult.data?.state;
+
+        if (connState === 'ConnectionResponseSent' || connState === 'Active') {
+          // Lock immediately so next tick won't send a second proof request
+          data.proofState = 'sending';
+          global.pendingInvitations.set(connectionId, data);
+
+          const proofResult = await cloudAgentRequest(
+            company.apiKey,
+            '/present-proof/presentations',
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                connectionId,
+                proofs: [],
+                options: {
+                  challenge: crypto.randomBytes(32).toString('hex'),
+                  domain: 'identuslabel.cz'
+                },
+                goalCode: 'present-vp',
+                goal: 'Share your RealPersonIdentity credential for employee onboarding',
+                credentialFormat: 'JWT'
+              })
+            }
+          );
+          data.presentationId = proofResult.data?.presentationId || proofResult.data?.thid || proofResult.data?.id;
+          if (!data.presentationId) throw new Error('No presentationId in response');
+          data.proofState = 'requested';
+          data.proofSentAt = Date.now();
+          global.pendingInvitations.set(connectionId, data);
+          console.log(`[AUTO-PROOF] Proof request sent for connection ${connectionId.substring(0,8)}..., presentationId: ${data.presentationId}`);
+        }
+      } else if (data.proofState === 'requested') {
+        // Step 2: poll for proof completion
+        const presResult = await cloudAgentRequest(
+          company.apiKey,
+          `/present-proof/presentations/${data.presentationId}`
+        );
+        const state = presResult.data?.status;
+
+        if (state === 'PresentationVerified' || state === 'PresentationReceived') {
+          // Lock immediately — prevents concurrent ticks from re-entering this block
+          data.proofState = 'issuing';
+          global.pendingInvitations.set(connectionId, data);
+
+          const vpJwt = Array.isArray(presResult.data?.data) ? presResult.data.data[0] : (presResult.data?.data || presResult.data?.presentation || null);
+          const claims = extractRealPersonClaims(vpJwt);
+
+          const fullName = [claims.firstName, claims.lastName].filter(Boolean).join(' ');
+          const existingEmails = getExistingEmailsForCompany(company.id);
+          const email = generateEmployeeEmail(fullName || 'employee', company.id, existingEmails);
+          const portalBaseUrl = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
+
+          data.name = fullName;
+          data.email = email;
+          data.uniqueId = claims.uniqueId;
+          data.photo = claims.photo;
+          data.portalUrl = `${portalBaseUrl}/employee-portal-login.html?email=${encodeURIComponent(email)}`;
+          global.pendingInvitations.set(connectionId, data);
+
+          await issueServiceConfigVC(connectionId, fullName, email, data.department || '', company, claims);
+
+          data.proofState = 'complete';
+          global.pendingInvitations.set(connectionId, data);
+          console.log(`[AUTO-PROOF] Complete for ${connectionId.substring(0,8)}...: ${fullName} (${email})`);
+
+        } else if (['ProblemReported', 'RequestRejected', 'PresentationRejected'].includes(state)) {
+          data.proofState = 'failed';
+          data.proofError = `Presentation ${state}`;
+          global.pendingInvitations.set(connectionId, data);
+          console.warn(`[AUTO-PROOF] Failed for ${connectionId.substring(0,8)}...: ${state}`);
+        } else if (state === 'RequestSent' && (!data.proofSentAt || Date.now() - data.proofSentAt > 3 * 60 * 1000)) {
+          // Proof request stuck in RequestSent — either no timestamp (legacy) or >3 min old.
+          // Wallet likely never received the request (e.g. mediator routing not yet set up). Reset so the loop retries.
+          data.proofState = null;
+          data.presentationId = null;
+          data.proofSentAt = null;
+          global.pendingInvitations.set(connectionId, data);
+          console.warn(`[AUTO-PROOF] Proof request timed out for ${connectionId.substring(0,8)}... (RequestSent >3min) — will retry`);
+        }
+      }
+    } catch (err) {
+      console.error(`[AUTO-PROOF] Error processing ${connectionId.substring(0,8)}...: ${err.message}`);
+      // 'sending' lock failed before we got a presentationId — safe to retry
+      if (data.proofState === 'sending') {
+        data.proofState = null;
+        global.pendingInvitations.set(connectionId, data);
+      }
+      // 'issuing' lock failed during VC issuance — mark failed, do not retry
+      if (data.proofState === 'issuing') {
+        data.proofState = 'failed';
+        data.proofError = err.message;
+        global.pendingInvitations.set(connectionId, data);
+      }
+    }
+  }
+}, 4000);
 
 // Periodic cleanup of expired sessions
 setInterval(() => {
@@ -6312,8 +7381,9 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
     console.log('='.repeat(70));
 
     // Personal wallet connections live in each company's own agent (company.apiKey).
-    // session.connectionId is the enterprise agent connection (techcorp_connection_id) - NOT used here.
+    // session.connectionId is the enterprise agent connection — explicitly excluded below.
     const MULTITENANCY_URL = process.env.MULTITENANCY_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
+    const enterpriseConnectionId = session.connectionId; // exclude this from personal search
 
     console.log(`[ClearanceVerification] Searching for personal wallet connection in ${company.id} agent`);
 
@@ -6334,43 +7404,85 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
     const connectionsData = await connectionsResponse.json();
     const connections = connectionsData.contents || [];
 
-    // Only consider established connections that go to the personal wallet (via mediator),
-    // not enterprise agent connections (theirDid contains /enterprise/).
+    // Personal wallet connections: established connections whose peer DID routes via the mediator,
+    // not via the enterprise agent. isEnterpriseAgentConnection() decodes the .S segment of the
+    // did:peer:2 DID to check the service endpoint URI.
     const personalWalletConns = connections.filter(conn => {
       if (conn.state !== 'ConnectionResponseSent' && conn.state !== 'ConnectionResponseReceived') return false;
-      if (conn.theirDid && conn.theirDid.includes('enterprise')) return false;
+      if (conn.connectionId === enterpriseConnectionId) return false;
+      if (isEnterpriseAgentConnection(conn.theirDid)) return false;
       return true;
     });
 
-    // Build candidate name parts from email username - try full name and base name (strip trailing numbers)
-    const emailUsername = session.email.split('@')[0]; // e.g. "vaclav.ubuntu.4"
-    const fullNamePart = emailUsername.replace(/\./g, ' ').toLowerCase(); // "vaclav ubuntu 4"
-    // Strip trailing dot-number segments: "vaclav.ubuntu.4" → "vaclav ubuntu"
-    const baseNamePart = emailUsername.replace(/(\.\d+)+$/, '').replace(/\./g, ' ').toLowerCase();
+    let employeeConnection = null;
 
-    let employeeConnection = personalWalletConns.find(conn => {
-      if (!conn.label) return false;
-      const label = conn.label.toLowerCase();
-      return label.includes(fullNamePart) ||
-             label.includes(session.email.toLowerCase()) ||
-             (baseNamePart !== fullNamePart && label.includes(baseNamePart));
-    });
+    // First: try stored personal_wallet_connection_id saved at ServiceConfig VC issuance time
+    try {
+      const empDb = getEnterpriseDb();
+      const storedEmployee = await empDb.getEmployeeByEmail(session.email);
+      const storedConnId = storedEmployee?.personal_wallet_connection_id;
+      if (storedConnId) {
+        // Look in both personal-filtered list and all connections (in case filter edge case)
+        const storedConn =
+          personalWalletConns.find(c => c.connectionId === storedConnId) ||
+          connections.find(c => c.connectionId === storedConnId && !isEnterpriseAgentConnection(c.theirDid));
+        if (storedConn) {
+          employeeConnection = storedConn;
+          console.log(`[ClearanceVerification] Using stored personal wallet connection: ${storedConnId}`);
+        } else {
+          console.log(`[ClearanceVerification] Stored connection ${storedConnId} not found in personal connections — falling back to label search`);
+        }
+      }
+    } catch (dbErr) {
+      console.warn(`[ClearanceVerification] DB lookup failed, falling back to label search: ${dbErr.message}`);
+    }
+
+    // Fallback: search with priority: exact email match first, then full name, skip base-name fallback
+    // (base-name stripping e.g. "new.test.3" → "new test" causes false matches with "new.test")
+    if (!employeeConnection) {
+      const emailLC = session.email.toLowerCase();
+      const emailUsername = session.email.split('@')[0];
+      const fullNamePart = emailUsername.replace(/\./g, ' ').toLowerCase();
+
+      employeeConnection =
+        personalWalletConns.find(conn => conn.label && conn.label.toLowerCase().includes(emailLC)) ||
+        personalWalletConns.find(conn => conn.label && conn.label.toLowerCase().includes(fullNamePart));
+    }
 
     if (employeeConnection) {
-      console.log(`[ClearanceVerification] Found connection via label search: ${employeeConnection.connectionId} (${employeeConnection.label})`);
+      console.log(`[ClearanceVerification] Found personal wallet connection: ${employeeConnection.connectionId} (${employeeConnection.label})`);
     }
 
     if (!employeeConnection) {
-      console.log(`[ClearanceVerification] No direct connection found for employee`);
+      console.log(`[ClearanceVerification] No personal wallet connection found for employee — generating OOB invitation`);
+
+      // Generate a new TechCorp OOB invitation so the employee can connect their personal IDL wallet
+      let oobUrl = null;
+      try {
+        const oobResp = await fetch(`${MULTITENANCY_URL}/connections/invitation-url`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'apikey': company.apiKey },
+          body: JSON.stringify({ label: `${company.displayName} ↔ ${session.fullName || session.email} Personal (${session.email})` })
+        });
+        if (oobResp.ok) {
+          const oobData = await oobResp.json();
+          oobUrl = oobData.invitation?.invitationUrl || oobData.invitationUrl || null;
+        }
+      } catch (oobErr) {
+        console.warn('[ClearanceVerification] Could not generate OOB:', oobErr.message);
+      }
+
       return res.status(400).json({
         success: false,
-        error: 'NoDirectConnection',
-        message: 'No DIDComm connection found to your personal wallet. Please ensure your personal wallet is connected to TechCorp.',
+        error: 'NoPersonalWalletConnection',
+        message: 'Your personal wallet is not yet connected to ' + company.displayName + '. Please connect it first, then try again.',
+        oobUrl,
         instructions: [
-          '1. Open your personal wallet',
-          '2. Go to Connections',
-          '3. Accept the company invitation or create a new connection',
-          '4. Then return here and try again'
+          '1. Copy or scan the invitation link below',
+          '2. Open your IDL Wallet (personal mode)',
+          '3. Go to Connections → paste/scan the invitation',
+          '4. Accept the connection request',
+          '5. Return here and click "Verify Clearance" again'
         ]
       });
     }
@@ -9442,6 +10554,79 @@ app.listen(PORT, async () => {
   } catch (error) {
     console.error(`   ❌ FolderRegistry initialization failed:`, error.message);
   }
+
+  // Register enterprise agent webhook for ALL entity wallets (BasicMessageReceived requires per-wallet registration)
+  // The /events/webhooks endpoint does not accept x-admin-api-key; per-wallet registration is required.
+  // We use a deterministic key per entity (so restarts stay idempotent) and register in the background.
+  console.log('🔧 Registering enterprise agent webhooks for all employee wallets (background)...');
+  const enterpriseWebhookUrl = `${COMPANY_PUBLIC_BASE_URL}/api/enterprise-messages-webhook`;
+  const ENTERPRISE_ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu';
+  (async () => {
+    try {
+      let offset = 0; const limit = 100; let registered = 0; let skipped = 0;
+      while (true) {
+        const r = await fetch(`${ENTERPRISE_CLOUD_AGENT_URL}/iam/entities?offset=${offset}&limit=${limit}`, {
+          headers: { 'x-admin-api-key': ENTERPRISE_ADMIN_TOKEN }
+        });
+        if (!r.ok) { console.warn(`   ⚠️ Could not list enterprise entities (${r.status})`); break; }
+        const data = await r.json();
+        const entities = data.contents || [];
+        if (entities.length === 0) break;
+
+        for (const entity of entities) {
+          // Deterministic per-entity key derived from admin token — stable across restarts
+          const webhookKey = crypto.createHash('sha256')
+            .update(`ew-${entity.id}-${ENTERPRISE_ADMIN_TOKEN}`)
+            .digest('hex');
+
+          // Populate walletId → webhookKey map so enterprise webhook handler can resolve connectionIds
+          if (entity.walletId) enterpriseWalletKeyMap.set(entity.walletId, webhookKey);
+
+          // Create the key (idempotent — ignore 409 conflicts if key already exists)
+          await fetch(`${ENTERPRISE_CLOUD_AGENT_URL}/iam/apikey-authentication`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-admin-api-key': ENTERPRISE_ADMIN_TOKEN },
+            body: JSON.stringify({ entityId: entity.id, apiKey: webhookKey })
+          }).catch(() => {});
+
+          // Check if webhook already registered for this wallet
+          const wResp = await fetch(`${ENTERPRISE_CLOUD_AGENT_URL}/events/webhooks`, {
+            headers: { 'apikey': webhookKey }
+          }).catch(() => null);
+          if (wResp && wResp.ok) {
+            const wData = await wResp.json().catch(() => ({}));
+            const items = wData.contents || wData.items || [];
+            if (items.some(w => w.url === enterpriseWebhookUrl)) { skipped++; continue; }
+          }
+
+          // Register webhook for this entity's wallet
+          const regResp = await fetch(`${ENTERPRISE_CLOUD_AGENT_URL}/events/webhooks`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'apikey': webhookKey },
+            body: JSON.stringify({ url: enterpriseWebhookUrl })
+          }).catch(() => null);
+          if (regResp && regResp.ok) registered++;
+        }
+
+        if (entities.length < limit) break;
+        offset += limit;
+      }
+      console.log(`   ✅ Enterprise webhooks: ${registered} newly registered, ${skipped} already registered`);
+    } catch (e) {
+      console.error('   ❌ Enterprise webhook bulk registration error:', e.message);
+    }
+  })();
+
+  // Register DIDComm command service webhooks with each company's Cloud Agent (idempotent)
+  console.log('🔧 Registering DIDComm access-request webhooks...');
+  const techcorpWebhookUrl = `${COMPANY_PUBLIC_BASE_URL}/api/didcomm-webhook/techcorp`;
+  const acmeWebhookUrl     = `${COMPANY_PUBLIC_BASE_URL}/api/didcomm-webhook/acme`;
+  techcorpDIDComm.registerWebhook(techcorpWebhookUrl).catch(e =>
+    console.error('[DIDCommAccess] TechCorp webhook registration error:', e.message)
+  );
+  acmeDIDComm.registerWebhook(acmeWebhookUrl).catch(e =>
+    console.error('[DIDCommAccess] ACME webhook registration error:', e.message)
+  );
 
   console.log('='.repeat(70));
   console.log('✅ Server ready for connections\n');

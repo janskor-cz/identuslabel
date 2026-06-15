@@ -127,6 +127,7 @@ class EmployeePortalDatabase {
         employee_role_vc_issued,
         cis_training_vc_issued,
         service_config_vc_issued,
+        personal_wallet_connection_id,
         is_active,
         created_at,
         updated_at
@@ -158,6 +159,40 @@ class EmployeePortalDatabase {
 
     const result = await this.db.query(query, [prismDid]);
     return result.rows[0] || null;
+  }
+
+  async getEmployeeByWalletId(walletId) {
+    const query = `
+      SELECT id, email, full_name, department, wallet_id, entity_id, prism_did, techcorp_connection_id
+      FROM employee_portal_accounts
+      WHERE wallet_id = $1 AND deleted_at IS NULL AND is_active = true
+    `;
+    const result = await this.db.query(query, [walletId]);
+    return result.rows[0] || null;
+  }
+
+  async getAllActiveEmployees() {
+    const query = `
+      SELECT email, full_name, department, wallet_id, prism_did
+      FROM employee_portal_accounts
+      WHERE deleted_at IS NULL AND is_active = true
+      ORDER BY full_name ASC
+    `;
+    const result = await this.db.query(query);
+    return result.rows;
+  }
+
+  async getEmployeeConnectionMap() {
+    const query = `
+      SELECT techcorp_connection_id, full_name, email, department
+      FROM employee_portal_accounts
+      WHERE deleted_at IS NULL AND is_active = true
+        AND techcorp_connection_id IS NOT NULL
+    `;
+    const rows = (await this.db.query(query)).rows;
+    const map = new Map();
+    for (const row of rows) map.set(row.techcorp_connection_id, row);
+    return map;
   }
 
   /**
@@ -540,6 +575,15 @@ class EmployeePortalDatabase {
     `;
 
     await this.db.query(historyQuery, [employeeId, recordId, reason]);
+  }
+
+  async savePersonalWalletConnectionId(email, connectionId) {
+    const query = `
+      UPDATE employee_portal_accounts
+      SET personal_wallet_connection_id = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE email = $2 AND deleted_at IS NULL
+    `;
+    await this.db.query(query, [connectionId, email]);
   }
 }
 

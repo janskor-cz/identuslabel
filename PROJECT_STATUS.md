@@ -28,6 +28,144 @@
 
 > **Historical Updates**: See [CHANGELOG.md](./CHANGELOG.md)
 
+### ✅ Enterprise Portal Login — VP-Driven Routing & Clearance (June 15, 2026)
+
+**STATUS**: ✅ **PRODUCTION** — Employee portal access level is determined entirely by which VCs the employee chose to present
+
+The enterprise portal login flow (DIDComm access-request path) was fixed so that routing and privileges reflect only what the employee presented in their Verifiable Presentation — with no server-side fallback lookups that could bypass the choice.
+
+**How it works:**
+1. Employee clicks **Login to Employee Portal** in the wallet's Enterprise connections tab
+2. Wallet sends an access-request BasicMessage over the enterprise DIDComm channel
+3. TechCorp sends a proof request; `UnifiedProofRequestModal` shows **all** enterprise credentials
+4. Employee selects which VCs to include (EmployeeRole required; CISTraining + SecurityClearanceGrant optional)
+5. VP is submitted; server reads all VCs and routes based on what was presented:
+
+| VCs presented | Result |
+|---|---|
+| EmployeeRole only | Training page |
+| EmployeeRole + SecurityClearanceGrant | Training page (clearance ignored until training done) |
+| EmployeeRole + CISTraining | Dashboard, no clearance |
+| EmployeeRole + CISTraining + SecurityClearanceGrant | Dashboard + clearance access |
+
+**Bugs fixed:**
+
+- **`DIDCommCommandService._extractClaims` read only `vcs[0]`** — now iterates all VCs in the VP, classifies each by claim structure (role+department → EmployeeRole; trainingYear+certificateNumber → CISTraining; clearanceLevel → SecurityClearanceGrant), and returns a single structured object with `cisTraining` and `clearance` sub-fields.
+- **Token entry carried only EmployeeRole claims** — now carries `{ ...employeeRoleClaims, cisTraining: {...}|null, clearance: {...}|null }` so the token redemption handler has full VP data without additional queries.
+- **`DIDCommAccess` session used hardcoded `clearanceLevel: null`** — now reads clearance and training directly from the token's VP data. Server-side cloud-agent lookups (`checkCISTrainingStatus`, `checkSecurityClearanceGrant`) remain only as named functions but are no longer called on login.
+- **`/profile` endpoint did a live `checkCISTrainingStatus` fallback** — removed; the session's `hasTraining` now reflects only what was presented, so the training page correctly stays on-screen when no CISTraining VC was included.
+- **PRISM DID short/long-form mismatch** — added `prismDidsMatch(a, b)` helper that compares only the hash segment (`did:prism:<hash>`), tolerating either form on either side. Fixed `checkCISTrainingStatus` which was always returning `false` because the DB stores short-form while the JWT `sub` carries long-form.
+- **`startFetchingMessages` wrong units** — the Identus SDK takes `iterationPeriod` in **seconds** and multiplies by 1000 internally. Was called with `5000` (83-minute interval); fixed to `5` (5-second interval).
+- **Proof request routing to wrong wallet** — added `isEnterpriseAgentConnection(theirDid)` that decodes the `.S` segment of `did:peer:2` DIDs to distinguish enterprise agent connections (`enterprise` in service URI) from personal wallet connections (mediator routing DID).
+- **`personal_wallet_connection_id` not persisted** — `issueServiceConfigVC` now saves the personal wallet connection ID to `employee_portal_accounts` so clearance proof requests are reliably routed to the correct connection.
+
+**Files changed:**
+- `certification-authority/lib/DIDCommCommandService.js` — `_extractClaims` rewritten to iterate all VCs
+- `company-admin-portal/lib/DIDCommCommandService.js` — same (extended copy with `consumeGrant`)
+- `company-admin-portal/server.js` — `prismDidsMatch` helper; `isEnterpriseAgentConnection`; token redemption uses VP data; `/profile` endpoint fallback removed; `savePersonalWalletConnectionId` called from `issueServiceConfigVC`
+- `company-admin-portal/lib/EmployeePortalDatabase.js` — `savePersonalWalletConnectionId` method; `personal_wallet_connection_id` in `getEmployeeByEmail`
+- `idl-wallet/src/actions/index.ts` — `startFetchingMessages(5)` (seconds, not ms)
+- `idl-wallet/src/components/EnterpriseCredentialOfferModal.tsx` — `holderDID` fallback for subjectId
+
+---
+
+### ✅ DIDComm Access Request Protocol — Zero-URL CA Login via Wallet (May 24, 2026)
+
+**STATUS**: ✅ **PRODUCTION** — CA dashboard accessible from wallet without URLs or manual login
+
+Users with a DIDComm connection to the CA can request access to protected CA pages directly from the wallet. The CA responds with a VC proof request; on approval it issues a one-time, 5-minute access token and opens the target page automatically inside the wallet iFrame.
+
+**Flow:**
+1. User clicks **🔓 Request Access** on a connection (Connections tab) or in a Chat header
+2. A status modal appears: *Request sent → Waiting for VC proof → Identity verified*
+3. CA sends a proof request; the wallet's existing `UnifiedProofRequestModal` pops up
+4. User approves → CA verifies the presentation → sends a JSON grant envelope via DIDComm
+5. `GlobalGrantWatcher` detects the grant in any message poll cycle → **automatically opens** the CA dashboard in the wallet iFrame
+6. Status modal disappears; the token is single-use and expires in 5 minutes
+
+**Command protocol** — all messages are carried as JSON inside DIDComm BasicMessage:
+
+| Direction | Type URI | Purpose |
+|-----------|----------|---------|
+| Wallet → CA | `…/access-request/1.0/request` | Request access to a named target |
+| CA → Wallet | `…/access-request/1.0/grant` | Access URL + expiry metadata |
+
+**Access targets** (defined in `certification-authority/server.js`):
+
+| Key | Redirects to |
+|-----|-------------|
+| `portal` | `/ca/dashboard` |
+| `login` | `/ca/dashboard` |
+| `security-clearance` | `/ca/dashboard` |
+
+Adding a new target = one object in the `targets` map + one entry in `Chat.tsx` `ACCESS_TARGETS`.
+
+**Architecture changes:**
+- `RealPersonIdentity` VCs no longer carry `serviceUrl` / `serviceName` / `serviceIcon` — CA access is via DIDComm only
+- The Browser tab's backwards-compat shim for CA credentials (via `uniqueId`) removed
+- `/api/access` token endpoint does a direct 302 redirect to `/ca/dashboard?session=<id>` (no sessionStorage bridge needed — dashboard reads session from URL param)
+
+**New files:**
+- `certification-authority/lib/DIDCommCommandService.js` — standalone reusable command dispatcher; drop it into any Express server with a `targets` config and `resolveConnection` / `getUserInfo` callbacks
+- `idl-wallet/src/components/AccessRequestStatusModal.tsx` — login-in-progress modal
+
+**Modified files:**
+- `certification-authority/server.js` — StandardMessageBody unwrapping in webhook probe; `DIDCommCommandService` instantiation; `/api/access` redirect endpoint; webhook auto-registration on startup
+- `idl-wallet/src/pages/_app.tsx` — `GlobalGrantWatcher` (auto-opens portal on grant); `CAPortalRenderer` renders `AccessRequestStatusModal` when pending
+- `idl-wallet/src/utils/CAPortalContext.tsx` — `pendingAccessRequest` state; `openCAPortal` clears it
+- `idl-wallet/src/components/Chat.tsx` — `sendProtocolAccessRequest` dispatch; grant detection → localStorage; grant cards in message list
+- `idl-wallet/src/pages/connections.tsx` — inline chat panel (💬 toggle); **🔓 Request Access** dropdown per connection row
+- `idl-wallet/src/pages/browser.tsx` — **🔗 DIDComm Access Grants** section (timed, cyan); removed CA shim
+- `idl-wallet/src/actions/index.ts` — `sendProtocolAccessRequest` async thunk
+
+---
+
+### ✅ Bidirectional Chat — Cloud Agent Extended with BasicMessage Protocol (May 24, 2026)
+
+**STATUS**: ✅ **PRODUCTION** — Full bidirectional DIDComm BasicMessage chat between CA portal and wallet
+
+The Cloud Agent was extended with native BasicMessage support so the existing CA↔Wallet connection handles both directions. No separate peer DID or custom DIDComm agent required.
+
+**What was built:**
+
+- **Receive (Wallet→CA)**: `handleBasicMessage` added to `DIDCommControllerImpl.scala` — when a wallet sends a BasicMessage over its Cloud Agent connection, the agent fires a `BasicMessageReceived` webhook event to the CA server. CA stores it in `chatMessageStore`.
+- **Send (CA→Wallet)**: `POST /connections/{connectionId}/basic-messages` REST endpoint added to the Cloud Agent — the CA calls this to send a reply. The Cloud Agent uses its own `MessagingService` stack to pack the ForwardMessage and deliver it to the mediator correctly.
+- **CA server** updated to call the new Cloud Agent endpoint instead of a custom Node.js DIDComm packing layer.
+
+**Custom Cloud Agent build** (`identuslabel/identus-cloud-agent:2.1-basicmsg`) deployed at `identuslabel.cz/cloud-agent`.
+
+**Files changed:**
+- `custom-cloud-agent/.../DIDCommControllerImpl.scala` — `handleBasicMessage` PartialFunction + `EventNotificationService` injection
+- `custom-cloud-agent/.../notification/BasicMessageReceived.scala` — new case class + JsonEncoder
+- `custom-cloud-agent/.../notification/WebhookPublisher.scala` — `BasicMessage` consumer topic
+- `custom-cloud-agent/.../connect/controller/ConnectionControllerImpl.scala` — `sendBasicMessage` implementation
+- `custom-cloud-agent/.../connect/controller/ConnectionController.scala` — `sendBasicMessage` trait method
+- `custom-cloud-agent/.../connect/controller/ConnectionEndpoints.scala` — tapir endpoint definition
+- `custom-cloud-agent/.../connect/controller/ConnectionServerEndpoints.scala` — server endpoint wiring
+- `custom-cloud-agent/.../connect/controller/http/SendBasicMessageRequest.scala` — new request model
+- `custom-cloud-agent/.../connect/controller/http/BasicMessageSent.scala` — new response model
+- `certification-authority/server.js` — delegates send to Cloud Agent; removed custom DIDComm packing
+
+---
+
+### ✅ Security Clearance — Wallet Auto-Provides Keys via postMessage (May 14, 2026)
+
+**STATUS**: ✅ **PRODUCTION** — No manual key copy-paste required
+
+When the user opens the Security Clearance request form inside the CA portal iframe, the wallet automatically provides the Ed25519 and X25519 public keys:
+
+- `security-clearance.html` sends `REQUEST_WALLET_KEYS` to `window.parent` at script load time
+- `CAPortalModal.tsx` receives the request, calls `ensureSecurityClearanceKeys()` (auto-generates a dual-key pair if none exists), and posts `{ type: 'WALLET_KEYS', ed25519PublicKey, x25519PublicKey }` back to the iframe
+- Form fields are filled automatically; green banner confirms keys are loaded
+- Any future service running inside the wallet iframe can use the same `REQUEST_WALLET_KEYS` / `WALLET_KEYS` postMessage protocol to receive keys from the wallet
+
+**Files changed**:
+- `idl-wallet/src/components/CAPortalModal.tsx` — handles `REQUEST_WALLET_KEYS`, responds with keys
+- `idl-wallet/src/utils/ensureSecurityKeys.ts` — new utility: returns existing keys or auto-generates
+- `certification-authority/public/security-clearance.html` — requests and applies keys on load
+
+---
+
 ### ✅ Multi-user Wallet, Hash-based Backup & Restore, Enterprise Config from VCs (May 14, 2026)
 
 **STATUS**: ✅ **PRODUCTION** — IDL Wallet at `identuslabel.cz/wallet`
@@ -54,9 +192,9 @@ A new **Browser** tab in the IDL Wallet automatically discovers and lists servic
 - **Standard**: `serviceUrl`, `serviceName`, `serviceIcon` fields in `credentialSubject` are the convention for service-linked VCs
 - **Auto-discovery**: Browser page scans all local + enterprise credentials; deduplicates by URL
 - **Launch**: clicking "Launch" opens the service in the existing fullscreen iframe modal
-- **Backwards-compatible shims**: existing `RealPersonIdentity` (via `uniqueId`) and `EmployeeRole` (via `email`) credentials work without re-issuance
-- **CA issuer updated**: `RealPersonIdentity` VCs now include `serviceUrl`, `serviceName`, `serviceIcon` baked in at issuance
-- **Company Admin updated**: `EmployeeRole` VCs now include `serviceUrl`, `serviceName`, `serviceIcon` baked in at issuance
+- **Backwards-compatible shim**: existing `EmployeeRole` (via `email`) credentials work without re-issuance
+- **Company Admin updated**: `EmployeeRole` VCs include `serviceUrl`, `serviceName`, `serviceIcon` baked in at issuance
+- **CA access removed from credential tab**: `RealPersonIdentity` VCs no longer carry `serviceUrl`; CA is accessed via the DIDComm Access Request protocol (see above). The Browser tab shows time-limited DIDComm grant cards in a separate **🔗 DIDComm Access Grants** section instead
 
 **Files Modified**:
 - `idl-wallet/src/pages/browser.tsx` — new Browser page

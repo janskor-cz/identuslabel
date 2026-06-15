@@ -6,12 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Infrastructure Services (Docker)
 ```bash
+# NOTE: /usr/bin/docker-compose (v1) is too old — always use DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose
 # Start all infrastructure (run from /root — docker-compose files live there)
-docker-compose -f cloud-agent-with-reverse-proxy.yml up -d
-docker-compose -f identus-mediator/docker-compose.yml up -d
-docker-compose -f enterprise-cloud-agent.yml up -d
-docker-compose -f test-multitenancy-cloud-agent.yml up -d
-docker-compose -f local-prism-node-addon.yml up -d
+DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose -f cloud-agent-with-reverse-proxy.yml up -d
+DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose -f enterprise-cloud-agent.yml up -d
+DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose -f test-multitenancy-cloud-agent.yml up -d
+DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose -f local-prism-node-addon.yml up -d
+
+# Mediator — compose file lives in /opt/project_identuslabel/identus-mediator/ (NOT /root)
+DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose --project-directory /opt/project_identuslabel/identus-mediator -f /opt/project_identuslabel/identus-mediator/docker-compose.yml up -d
 
 # Reload reverse proxy config (Caddy runs inside Docker container identus-cloud-agent-proxy)
 docker exec identus-cloud-agent-proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -20,8 +23,10 @@ docker exec identus-cloud-agent-proxy caddy reload --config /etc/caddy/Caddyfile
 ### Application Services (Node.js)
 ```bash
 # Certification Authority (port 3005)
+# WARNING: An old CA process from /root/certification-authority may hold port 3005 after a reboot.
+# If kill below fails (permission denied), ask a root user to: kill $(lsof -ti :3005)
 kill $(lsof -ti :3005) 2>/dev/null; sleep 1
-cd /opt/project_identuslabel/certification-authority && PORT=3005 nohup node server.js > /opt/project_identuslabel/ca.log 2>&1 &
+cd /opt/project_identuslabel/certification-authority && set -a && source .env && set +a && nohup node server.js > /opt/project_identuslabel/ca.log 2>&1 &
 
 # Company Admin Portal (port 3010)
 kill $(lsof -ti :3010) 2>/dev/null; sleep 1
@@ -212,16 +217,75 @@ const serviceConfig = getServiceConfigurationFromCredentials(credentials);
 Any VC whose purpose is to grant access to a service should include these fields in `credentialSubject`:
 ```json
 {
-  "serviceUrl": "https://identuslabel.cz/ca/login?uid=...",
-  "serviceName": "Certification Authority",
-  "serviceIcon": "🔐"
+  "serviceUrl": "https://identuslabel.cz/company-admin/employee-portal-login.html?email=...",
+  "serviceName": "Employee Portal",
+  "serviceIcon": "🏢"
 }
 ```
 The IDL Wallet **Browser tab** (`/browser`) scans all credentials for `serviceUrl` and auto-displays the service — no wallet code changes needed per new service type. `serviceName` and `serviceIcon` are optional but recommended.
 
 Current issuers baking this in:
-- `RealPersonIdentity` (CA server) — URL includes `uid` param for auto-login
 - `EmployeeRole` (Company Admin) — URL includes `email` param for portal login
+
+**CA access is NOT via serviceUrl** — use the DIDComm Access Request protocol instead (see below).
+
+### DIDComm Access Request Protocol
+CA-protected pages are accessed via DIDComm, not URL links in VCs.
+
+**To request access** (from Connections tab or Chat header):
+1. User clicks **🔓 Request Access** → selects a target from dropdown
+2. Wallet sends JSON envelope over DIDComm BasicMessage:
+   ```json
+   { "type": "https://identuslabel.cz/protocols/access-request/1.0/request",
+     "id": "ar-...", "body": { "target": "security-clearance" } }
+   ```
+3. CA sends a VP proof request; user approves in wallet
+4. CA verifies → sends grant envelope:
+   ```json
+   { "type": "https://identuslabel.cz/protocols/access-request/1.0/grant",
+     "body": { "accessUrl": "https://.../ca/api/access?token=UUID", "label": "...", ... } }
+   ```
+5. `GlobalGrantWatcher` in `_app.tsx` detects the grant → auto-opens `CAPortalModal` iFrame
+
+**Adding a new CA target** — two places only:
+1. `certification-authority/server.js` — add entry to `targets` object in `DIDCommCommandService` config:
+   ```javascript
+   'my-target': { label: 'My Page', icon: '📄', redirectPath: '/ca/my-page',
+     proofSpec: { proofTypes: [{ schema: '...', requiredFields: [...] }], ... } }
+   ```
+2. `idl-wallet/src/components/Chat.tsx` — add to `ACCESS_TARGETS` array:
+   ```typescript
+   { key: 'my-target', label: 'My Page', icon: '📄' }
+   ```
+   (Also add to `ACCESS_TARGETS` in `connections.tsx`)
+
+**Key files:**
+- `certification-authority/lib/DIDCommCommandService.js` — standalone reusable service; copy to any Express server
+- `company-admin-portal/lib/DIDCommCommandService.js` — extended copy with `consumeGrant()` for HTTP polling
+- `idl-wallet/src/pages/_app.tsx` → `GlobalGrantWatcher` — auto-opens portal on grant
+- `idl-wallet/src/utils/CAPortalContext.tsx` → `pendingAccessRequest` — drives login status modal
+- `idl-wallet/src/components/AccessRequestStatusModal.tsx` — login-in-progress UI
+
+### Enterprise Employee Portal Login
+
+The employee portal uses the same DIDComm access-request protocol but goes through the **enterprise agent** channel (not personal wallet). The `DIDCommCommandService._extractClaims` method reads **all VCs** from the VP — not just the first — and returns:
+
+```javascript
+{ email, role, department, prismDid,        // always present (EmployeeRole)
+  cisTraining: { hasValidTraining, expiryDate, ... } | null,
+  clearance:   { hasClearanceVC, level }    | null }
+```
+
+Portal routing is determined strictly by what the employee presented:
+- No CISTraining VC → training page
+- CISTraining VC → dashboard
+- SecurityClearanceGrant VC → clearance access on dashboard
+
+No server-side fallback lookups are performed — the employee's VC selection is the authority.
+
+**PRISM DID format:** The DB stores short-form DIDs (`did:prism:<hash>`); JWT `sub` fields carry long-form (`did:prism:<hash>:<key-material>`). Use `prismDidsMatch(a, b)` in `server.js` for all PRISM DID comparisons — it compares only the hash segment.
+
+**Enterprise vs personal connection detection:** Use `isEnterpriseAgentConnection(theirDid)` in `server.js` — decodes the `.S` segment of `did:peer:2` DIDs to check the service URI. Enterprise connections contain `enterprise` in the URI; personal wallet connections route through the mediator.
 
 ## Service URLs
 
