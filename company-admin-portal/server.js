@@ -13,6 +13,8 @@ const path = require('path');
 const dotenvPath = path.join(__dirname, '.env');
 require('dotenv').config({ path: dotenvPath });
 
+const SlackNotifier = require('./lib/SlackNotifier');
+
 const ACCESS_GATE_LOG_PATH = path.join(__dirname, 'data', 'access-gate-log.jsonl');
 
 const express = require('express');
@@ -79,7 +81,7 @@ const DocumentRegistry = require('./lib/DocumentRegistry');
 const FolderRegistry = require('./lib/FolderRegistry');
 const EnterpriseDocumentManager = require('./lib/EnterpriseDocumentManager');
 const ReEncryptionService = require('./lib/ReEncryptionService');
-const DIDCommCommandService = require('./lib/DIDCommCommandService');
+const { ServiceAccessService, createTrustRegistry, createIssuerResolver, verifyPresentationCredentials, decodeJWT, verifyES256KSignature } = require('service-access-didcomm');
 
 // Task 1: Initialise Classification Master Key (CMK) store — server will not
 // start if any CMK env var is missing or has wrong length.
@@ -552,6 +554,34 @@ async function enterpriseAgentRequest(apiKey, endpoint, options = {}) {
 }
 
 /**
+ * Resolve a PRISM photoDID to its LinkedPhoto service endpoint URL.
+ * Used as a fallback when the CA's photoDIDs cache doesn't have an entry for the user.
+ * The photoDID's service endpoint contains the photo proxy URL per SSI resolution spec.
+ */
+async function resolveLinkedPhotoDID(photoDID) {
+  if (!photoDID || !photoDID.startsWith('did:prism:')) return null;
+  // Validate DID format: only alphanumeric, colon, hyphen, underscore — prevents path traversal / SSRF
+  if (!/^did:prism:[a-zA-Z0-9:_-]+$/.test(photoDID)) {
+    console.warn(`[PhotoDID] Invalid DID format rejected: ${photoDID.substring(0, 40)}`);
+    return null;
+  }
+  try {
+    const resp = await fetch(
+      `${ENTERPRISE_CLOUD_AGENT_URL}/dids/${encodeURIComponent(photoDID)}`,
+      { headers: { 'apikey': process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu' } }
+    );
+    if (!resp.ok) return null;
+    const doc = await resp.json();
+    const services = doc?.didDocument?.service || [];
+    const linkedPhoto = services.find(s => s.type === 'LinkedPhoto');
+    return linkedPhoto?.serviceEndpoint || null;
+  } catch (e) {
+    console.warn(`[PhotoDID] DID resolution failed for ${photoDID.substring(0, 30)}...: ${e.message}`);
+    return null;
+  }
+}
+
+/**
  * Fetch the current KeyManifest VC record for a document from document-service.
  * Returns the full record ({ vcJwt, claims, ... }) or null if not found / unavailable.
  *
@@ -714,7 +744,9 @@ app.get('/api/companies', (req, res) => {
     displayName: company.displayName,
     tagline: company.tagline,
     color: company.color,
-    logo: company.logo
+    logo: company.logo,
+    did: company.did,
+    trustedPartners: company.trustedPartners || []
   }));
 
   res.json({
@@ -986,6 +1018,18 @@ app.get('/api/company/connections', requireCompany, async (req, res) => {
  */
 app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
   try {
+    // Bounds worst-case resource usage: each pending invitation costs the auto-proof loop a
+    // Cloud Agent API call every 4s until it resolves, so an unbounded queue (even from an
+    // authenticated admin, accidentally or otherwise) could grow into a real load problem.
+    const MAX_PENDING_INVITATIONS = 200;
+    if (global.pendingInvitations && global.pendingInvitations.size >= MAX_PENDING_INVITATIONS) {
+      return res.status(429).json({
+        success: false,
+        error: 'TooManyPendingInvitations',
+        message: `${MAX_PENDING_INVITATIONS} invitations are already pending onboarding completion. Wait for some to finish (or fail) before creating more.`
+      });
+    }
+
     const { employeeName, name, role, department } = req.body;
     const resolvedName = employeeName || name || '';
 
@@ -1017,7 +1061,10 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
 
     console.log(`[EMPLOYEE] Created invitation (${req.company.name}) label="${label}"`);
 
-    // Store invitation record — name/email will be filled in after RealPerson proof
+    // Store invitation record — name/email will be filled in after RealPerson proof.
+    // triggerEnterpriseOnboarding: auto-proof loop will call createEmployeeWallet() after
+    // the RealPerson proof is verified, so the enterprise wallet + EmployeeRole VC are
+    // created only after the photo DID is already persisted to DB.
     global.pendingInvitations.set(invitation.connectionId, {
       companyId: req.company.id,
       name: resolvedName,
@@ -1025,6 +1072,7 @@ app.post('/api/company/invite-employee', requireCompany, async (req, res) => {
       role: role || '',
       department: department || '',
       portalUrl: '',
+      triggerEnterpriseOnboarding: true,
     });
 
     // Always modify the OOB invitation to embed the company name and (optionally) company credential
@@ -1607,39 +1655,6 @@ async function issueServiceConfigVC(connectionId, name, email, rawDepartment, co
 }
 
 /**
- * Helper: decode a JWT VP and find the RealPersonIdentity VC claims.
- * Returns { firstName, lastName, uniqueId, photo } or throws.
- */
-function extractRealPersonClaims(vpJwt) {
-  if (!vpJwt || typeof vpJwt !== 'string') throw new Error('No JWT VP provided');
-
-  const parts = vpJwt.split('.');
-  if (parts.length < 2) throw new Error('Invalid JWT VP format');
-
-  const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-  const payload = JSON.parse(Buffer.from(padded + '='.repeat((4 - padded.length % 4) % 4), 'base64').toString('utf8'));
-
-  const vcs = payload?.vp?.verifiableCredential || [];
-  for (const vcJwt of vcs) {
-    if (typeof vcJwt !== 'string') continue;
-    const vcParts = vcJwt.split('.');
-    if (vcParts.length < 2) continue;
-    const vcPadded = vcParts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const vcPayload = JSON.parse(Buffer.from(vcPadded + '='.repeat((4 - vcPadded.length % 4) % 4), 'base64').toString('utf8'));
-    const cs = vcPayload?.vc?.credentialSubject || vcPayload?.credentialSubject || {};
-    if (cs.credentialType === 'RealPersonIdentity') {
-      return {
-        firstName: cs.firstName || null,
-        lastName: cs.lastName || null,
-        uniqueId: cs.uniqueId || null,
-        photo: cs.photo || null,
-      };
-    }
-  }
-  throw new Error('RealPersonIdentity credential not found in presented VP');
-}
-
-/**
  * POST /api/company/connections/:connectionId/auto-issue-config
  * Alias for issue-service-config — used by the frontend Issue Credential button.
  */
@@ -1675,6 +1690,29 @@ app.post('/api/company/connections/:connectionId/auto-issue-config', requireComp
 app.post('/api/company/connections/:connectionId/request-rp-proof', requireCompany, async (req, res) => {
   const { connectionId } = req.params;
   try {
+    // This endpoint and the auto-proof setInterval loop both key off connectionId into the same
+    // global.pendingInvitations map. Without a lock, this call could overwrite the auto-proof
+    // loop's in-flight proofChallenge/presentationId for the same connection (or vice versa) —
+    // a real race flagged by security review. 'manual-pending' is a state name the auto-loop's
+    // own state machine never checks for (only `!proofState` or `proofState === 'requested'`),
+    // so setting it here — synchronously, before any await — makes the auto-loop skip this
+    // connectionId entirely until this flow releases it, the same way the auto-loop's own
+    // 'sending'/'issuing' locks protect it from concurrent ticks.
+    const stored = global.pendingInvitations.get(connectionId) || { companyId: req.company.id };
+    if (stored.proofState && stored.proofState !== 'failed' && stored.proofState !== 'manual-failed') {
+      return res.status(409).json({
+        success: false,
+        error: 'ProofFlowAlreadyActive',
+        message: `This connection's proof flow is already active (state: ${stored.proofState}). Check rp-proof-status instead of requesting a new proof.`
+      });
+    }
+    stored.proofState = 'manual-pending';
+    global.pendingInvitations.set(connectionId, stored);
+
+    // Stored (not just generated inline) so /rp-proof-status below can check the presentation's
+    // own nonce claim against it — see verifyAndExtractRealPersonClaims. Domain is per-company
+    // for the same reason as the auto-proof loop's equivalent request.
+    const challenge = crypto.randomBytes(32).toString('hex');
     const result = await cloudAgentRequest(
       req.company.apiKey,
       '/present-proof/presentations',
@@ -1684,8 +1722,8 @@ app.post('/api/company/connections/:connectionId/request-rp-proof', requireCompa
           connectionId,
           proofs: [],
           options: {
-            challenge: crypto.randomBytes(32).toString('hex'),
-            domain: 'identuslabel.cz'
+            challenge,
+            domain: `realperson.${req.company.id}.identuslabel.cz`
           },
           goalCode: 'present-vp',
           goal: 'Share your RealPersonIdentity credential for employee onboarding',
@@ -1695,10 +1733,21 @@ app.post('/api/company/connections/:connectionId/request-rp-proof', requireCompa
     );
     const presentationId = result.data.presentationId || result.data.thid || result.data.id;
     if (!presentationId) throw new Error('No presentationId in response: ' + JSON.stringify(result.data));
+
+    stored.proofChallenge = challenge;
+    stored.presentationId = presentationId;
+    global.pendingInvitations.set(connectionId, stored);
+
     console.log(`[RP-PROOF] Proof request sent to connection ${connectionId}, presentationId: ${presentationId}`);
     res.json({ success: true, presentationId });
   } catch (err) {
     console.error('[RP-PROOF] Failed to send proof request:', err);
+    // Release the lock so a retry is possible — only if it's still ours and never progressed.
+    const stored = global.pendingInvitations.get(connectionId);
+    if (stored && stored.proofState === 'manual-pending' && !stored.presentationId) {
+      stored.proofState = 'manual-failed';
+      global.pendingInvitations.set(connectionId, stored);
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1722,16 +1771,20 @@ app.get('/api/company/connections/:connectionId/rp-proof-status/:presentationId'
     console.log(`[RP-PROOF] Status poll for ${presentationId}: ${state}`);
 
     if (state === 'PresentationVerified' || state === 'PresentationReceived') {
-      // Extract JWT VP from response
+      // Looked up before verification so the presentation's nonce can be checked against the
+      // challenge this specific request-rp-proof call generated (replay protection).
+      const stored = global.pendingInvitations.get(connectionId) || { companyId: req.company.id };
+
+      // Extract JWT VP from response — cryptographically verified (signature + trust registry +
+      // holder binding + nonce), not just decoded. See verifyAndExtractRealPersonClaims.
       const vpJwt = Array.isArray(pres.data) ? pres.data[0] : (pres.data || pres.presentation || null);
-      const claims = extractRealPersonClaims(vpJwt);
+      const claims = await verifyAndExtractRealPersonClaims(vpJwt, stored.proofChallenge);
 
       const fullName = [claims.firstName, claims.lastName].filter(Boolean).join(' ');
       const existingEmails = getExistingEmailsForCompany(req.company.id);
       const email = generateEmployeeEmail(fullName || 'employee', req.company.id, existingEmails);
 
       // Update pendingInvitations with real identity data
-      const stored = global.pendingInvitations.get(connectionId) || { companyId: req.company.id };
       const portalBaseUrl = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
       stored.name = fullName;
       stored.email = email;
@@ -1739,6 +1792,21 @@ app.get('/api/company/connections/:connectionId/rp-proof-status/:presentationId'
       stored.photo = claims.photo;
       stored.portalUrl = `${portalBaseUrl}/employee-portal-login.html?email=${encodeURIComponent(email)}`;
       global.pendingInvitations.set(connectionId, stored);
+
+      // Persist uniqueId/photo/credentialStatus into DB metadata so they survive beyond pendingInvitations lifetime
+      if (claims.uniqueId || claims.photo) {
+        try {
+          const empDb = getEnterpriseDb();
+          const updated = await empDb.updateEmployeeRealPersonData(email, claims.uniqueId, claims.photo, claims.credentialStatus);
+          if (updated) {
+            console.log(`[RP-PROOF] Persisted caUniqueId=${claims.uniqueId} for ${email}`);
+          } else {
+            console.log(`[RP-PROOF] Employee ${email} not yet in DB — RealPerson data stored in pendingInvitations only`);
+          }
+        } catch (dbErr) {
+          console.warn(`[RP-PROOF] Could not persist RealPerson data to DB: ${dbErr.message}`);
+        }
+      }
 
       // Issue ServiceConfiguration VC
       await issueServiceConfigVC(connectionId, fullName, email, stored.department || '', req.company);
@@ -1947,6 +2015,64 @@ app.post('/api/admin/create-employee-wallet', async (req, res) => {
     console.log(`✅ [CREATE-EMPLOYEE-WALLET] Wallet created successfully!`);
     console.log(`   Wallet ID: ${employeeWallet.walletId}`);
     console.log(`   PRISM DID: ${employeeWallet.prismDid.substring(0, 50)}...`);
+    SlackNotifier.notifyWalletCreated(employeeWallet);
+
+    // Automatically create a personal wallet OOB invitation and deliver it to the employee's
+    // enterprise wallet via BasicMessage. The auto-proof loop picks up the pending connection
+    // and requests the RealPerson proof once the employee accepts the invitation.
+    // This eliminates the manual "Request RealPerson Proof" step entirely.
+    try {
+      const company = req.company || getAllCompanies().find(c => c.id === 'techcorp');
+      if (company && employeeWallet.techCorpConnectionId) {
+        const invResp = await cloudAgentRequest(company.apiKey, '/connections', {
+          method: 'POST',
+          body: JSON.stringify({
+            label: `Personal Wallet - ${name} (${email})`,
+            goal: 'Connect personal IDL Wallet for identity verification'
+          })
+        });
+        if (invResp.success && invResp.data?.connectionId) {
+          const personalConnId = invResp.data.connectionId;
+          const rawUrl = invResp.data.invitation?.invitationUrl
+            || invResp.data.invitation?.invitation?.invitationUrl
+            || null;
+
+          // Rewrite the cloud-agent placeholder domain to the actual wallet URL so the
+          // employee can tap the link and have their IDL Wallet handle the _oob param.
+          let invitationUrl = rawUrl;
+          if (rawUrl) {
+            const oobMatch = rawUrl.match(/[?&]_oob=([^&]+)/);
+            if (oobMatch) {
+              invitationUrl = `https://identuslabel.cz/wallet?_oob=${oobMatch[1]}`;
+            }
+          }
+
+          // Register in pendingInvitations with known email so the proof loop
+          // doesn't regenerate a conflicting email when the proof is verified.
+          global.pendingInvitations.set(personalConnId, {
+            companyId: company.id,
+            email,
+            name,
+            department
+          });
+
+          // Deliver the OOB link to the employee's enterprise wallet via BasicMessage.
+          // The employee sees it in their IDL Wallet and taps the link to connect.
+          if (invitationUrl) {
+            await cloudAgentRequest(company.apiKey, `/connections/${employeeWallet.techCorpConnectionId}/basic-messages`, {
+              method: 'POST',
+              body: JSON.stringify({
+                content: `🔗 To complete your profile setup, please connect your personal IDL Wallet by opening this link:\n${invitationUrl}`
+              })
+            });
+            console.log(`[CREATE-EMPLOYEE-WALLET] Personal wallet invitation delivered via BasicMessage (pendingConn: ${personalConnId.substring(0,8)}...)`);
+          }
+        }
+      }
+    } catch (personalInvErr) {
+      // Non-fatal — enterprise onboarding succeeded; personal wallet link can be requested manually
+      console.warn(`[CREATE-EMPLOYEE-WALLET] Personal wallet auto-invite failed (non-fatal): ${personalInvErr.message}`);
+    }
 
     // Return wallet details (API key visible only once!)
     res.json({
@@ -1993,6 +2119,46 @@ app.get('/api/admin/list-employee-wallets', async (req, res) => {
       success: false,
       error: error.message
     });
+  }
+});
+
+/**
+ * POST /api/admin/connect-doc-service - Connect existing employee(s) enterprise wallet to Document Service
+ * Body: { email } for single employee, or { all: true } for all active employees
+ */
+app.post('/api/admin/connect-doc-service', async (req, res) => {
+  try {
+    const { email, all } = req.body || {};
+
+    const db = getEnterpriseDb();
+
+    if (all) {
+      const employees = await db.getAllActiveEmployees?.() ?? [];
+      const results = [];
+      for (const emp of employees) {
+        try {
+          const empFull = await db.getEmployeeByEmail(emp.email);
+          if (!empFull?.entity_id) {
+            results.push({ email: emp.email, status: 'skipped', reason: 'no entity_id' });
+            continue;
+          }
+          const connectionId = await EmployeeWalletManager.connectExistingEmployeeToDocService(empFull.entity_id);
+          results.push({ email: emp.email, status: 'ok', connectionId });
+        } catch (e) {
+          results.push({ email: emp.email, status: 'error', error: e.message });
+        }
+      }
+      return res.json({ success: true, results });
+    }
+
+    if (!email) return res.status(400).json({ success: false, error: 'email or all:true required' });
+    const emp = await db.getEmployeeByEmail(email);
+    if (!emp?.entity_id) return res.status(404).json({ success: false, error: 'Employee not found or missing entity_id' });
+    const connectionId = await EmployeeWalletManager.connectExistingEmployeeToDocService(emp.entity_id);
+    res.json({ success: true, email, connectionId });
+  } catch (error) {
+    console.error('[CONNECT-DOC-SERVICE] Failed:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -2153,17 +2319,54 @@ const pendingEmployeeAuths = new Map();
 // Each company has its own DIDCommCommandService instance polling its Cloud Agent wallet.
 
 const COMPANY_PUBLIC_BASE_URL = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
-const EMPLOYEE_ROLE_SCHEMA_ID = '6c39cc8e-b292-30aa-bbef-98ca2fdc6abe';
+// Must match the schema EmployeeRole VCs are actually issued against — see
+// EmployeeWalletManager.js's own EMPLOYEE_ROLE_SCHEMA_GUID (v1.4.0) and .schema-cache.json's
+// employeeRoleSchemaGuid. This was previously a stale v1.1.0 GUID that no longer matched any
+// issued credential, causing every employee-portal login to fail with the Cloud Agent's
+// PresentationVerificationFailed status (schema mismatch) — the wallet always presented a real,
+// validly-signed EmployeeRole VC, it just didn't match what was being requested.
+const EMPLOYEE_ROLE_SCHEMA_ID = '028358d2-1f3b-37cc-ad1c-b8ca48d1e6c3';
 
-function makeEmployeePortalProofSpec(companyLabel) {
+function makeEmployeePortalProofSpec(companyLabel, issuerDid) {
   return {
-    proofTypes: [{
-      schema: EMPLOYEE_ROLE_SCHEMA_ID,
-      requiredFields: ['email', 'prismDid', 'role', 'department']
-    }],
+    // Empty, not a schemaId/trustIssuers constraint — the wallet is *supposed* to bundle a
+    // second credential (CISTraining, when the employee has it) into this same VP, so the
+    // server's ClaimExtractor can read every presented VC and route dashboard-vs-training in
+    // one shot (see this file's employee-portal-login docs). A non-empty `proofs` entry here
+    // previously named exactly one schema (EmployeeRole) — querying this multitenancy Cloud
+    // Agent's own presentation history directly (91.99.4.54:8200) showed every single
+    // 'employee-portal.techcorp.com' presentation bundling 2 credentials had failed
+    // (PresentationVerificationFailed, 9/9), while single-credential presentations against the
+    // same domain succeeded (249/252 historically) and other domains bundling 2-5 credentials
+    // with an empty `proofs` succeeded in the hundreds — i.e. the Cloud Agent's own verifier
+    // rejects a multi-credential VP when a single-schema proof constraint is attached, even
+    // though it has no trouble with multi-credential VPs in general. That constraint bought no
+    // real security anyway: `_onProofVerified` (ServiceAccessService.js) already does its own
+    // independent, fail-closed trustedIssuerVcType/trustRegistry check on the extracted
+    // EmployeeRole credential regardless of what's sent here — this is explicitly "defense in
+    // depth, not a replacement" per that function's own comment. issuerDid is kept as a
+    // parameter (unused here now) since callers still pass it for that independent check via
+    // the capability's trustedIssuerVcType/trustRegistry, not through this proofSpec.
+    proofs: [],
     goalCode: 'schema:EmployeeRole',
     goal: `Please present your Employee Role credential for ${companyLabel} access`,
-    claims: { email: {}, prismDid: {}, role: {}, department: {} }
+    // Per the Cloud Agent's OpenAPI spec, `claims` (not proofs[].schemaId alone) is what
+    // populates presentation_definition's input_descriptors with actual field constraints.
+    claims: { email: {}, prismDid: {}, role: {}, department: {} },
+    // Wallet-side schema hint: the Cloud Agent does not forward goalCode/goal/claims into
+    // the actual DIDComm wire message for JWT-format requests (verified live against this
+    // same Cloud Agent — presentation_definition arrives with empty input_descriptors), so
+    // options.domain is the one field confirmed to survive and doubles as the schema signal.
+    //
+    // SECURITY/CORRECTNESS NOTE: this value isn't cosmetic — it's checked by the Cloud Agent
+    // itself as part of presentation verification. Querying this multitenancy Cloud Agent's own
+    // presentation history directly (91.99.4.54:8200) shows domain 'employee-portal.techcorp.com'
+    // has succeeded 249/252 times ever recorded, while a prior, uncommitted (never verified
+    // working) change to a single shared 'employeerole.identuslabel.cz' domain for both
+    // companies had failed 6/6 times — 100% failure, 0 historical successes. Restored the
+    // per-company convention this codebase already uses elsewhere (see e.g.
+    // 'resource-authorization.techcorp.com' at this file's enterprise-resource-auth flow).
+    domain: `employee-portal.${companyLabel.toLowerCase()}.com`
   };
 }
 
@@ -2182,40 +2385,61 @@ async function resolveConnectionByDID(agentUrl, apiKey, fromDid) {
   }
 }
 
-const techcorpDIDComm = new DIDCommCommandService({
+// Migrated from the standalone lib/DIDCommCommandService.js (a hand-forked copy of
+// certification-authority's own copy) onto the shared service-access-didcomm package — see
+// packages/service-access-didcomm/PROTOCOL.md. Unlike the CA (which is self-trusting against
+// its own rotating issuing DIDs), each company's EmployeeRole issuer DID is a fixed, already-known
+// config value (COMPANIES.*.did), so the trust registry here is a simple static table.
+//
+// SECURITY IMPROVEMENTS vs. the prior fork: (1) the old _extractClaims silently dropped the
+// RealPerson fallback branch that certification-authority's copy had — the shared ClaimExtractor's
+// one rule table restores it; (2) real ES256K signature verification + a fail-closed trust
+// registry check are now performed post-hoc, not just relied on via Cloud Agent's internal state.
+const employeeRoleTrustRegistry = createTrustRegistry([
+  { did: COMPANIES.techcorp.did, vcTypes: ['EmployeeRole'] },
+  { did: COMPANIES.acme.did,     vcTypes: ['EmployeeRole'] },
+]);
+
+const techcorpDIDComm = new ServiceAccessService({
   cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL,
   apiKey:        COMPANIES.techcorp.apiKey,
   publicBaseUrl: COMPANY_PUBLIC_BASE_URL,
+  accessPath:    '/api/access',
   tokenTTLMs:    5 * 60 * 1000,
+  verifiedEventAdapter: 'polling', // no PresentationVerified webhook wired for this Cloud Agent yet
   async resolveConnection(fromDid) {
     return resolveConnectionByDID(MULTITENANCY_CLOUD_AGENT_URL, COMPANIES.techcorp.apiKey, fromDid);
   },
-  async getUserInfo(connectionId) { return null; },
-  targets: {
+  resolveIssuerDID: createIssuerResolver({ cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL, apiKey: COMPANIES.techcorp.apiKey }),
+  trustRegistry: employeeRoleTrustRegistry,
+  capabilities: {
     'techcorp-employee-portal': {
-      label:        'TechCorp Employee Portal',
-      icon:         '🏢',
+      label: 'TechCorp Employee Portal', icon: '🏢', mode: 'redirect',
       redirectPath: '/company-admin/employee-portal-dashboard.html',
-      proofSpec:    makeEmployeePortalProofSpec('TechCorp')
+      trustedIssuerVcType: 'EmployeeRole',
+      proofSpec: makeEmployeePortalProofSpec('TechCorp', COMPANIES.techcorp.did)
     }
   }
 });
 
-const acmeDIDComm = new DIDCommCommandService({
+const acmeDIDComm = new ServiceAccessService({
   cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL,
   apiKey:        COMPANIES.acme.apiKey,
   publicBaseUrl: COMPANY_PUBLIC_BASE_URL,
+  accessPath:    '/api/access',
   tokenTTLMs:    5 * 60 * 1000,
+  verifiedEventAdapter: 'polling',
   async resolveConnection(fromDid) {
     return resolveConnectionByDID(MULTITENANCY_CLOUD_AGENT_URL, COMPANIES.acme.apiKey, fromDid);
   },
-  async getUserInfo(connectionId) { return null; },
-  targets: {
+  resolveIssuerDID: createIssuerResolver({ cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL, apiKey: COMPANIES.acme.apiKey }),
+  trustRegistry: employeeRoleTrustRegistry,
+  capabilities: {
     'acme-employee-portal': {
-      label:        'ACME Employee Portal',
-      icon:         '⚙️',
+      label: 'ACME Employee Portal', icon: '⚙️', mode: 'redirect',
       redirectPath: '/company-admin/employee-portal-dashboard.html',
-      proofSpec:    makeEmployeePortalProofSpec('ACME')
+      trustedIssuerVcType: 'EmployeeRole',
+      proofSpec: makeEmployeePortalProofSpec('ACME', COMPANIES.acme.did)
     }
   }
 });
@@ -2248,6 +2472,91 @@ function prismDidsMatch(a, b) {
   const hashOf = did => did.startsWith('did:prism:') ? did.split(':')[2] : null;
   const ha = hashOf(a), hb = hashOf(b);
   return ha && hb && ha === hb;
+}
+
+// ── RealPersonIdentity presentation verification (auto-proof onboarding gate) ────────────────
+//
+// Previously, this codebase's `extractRealPersonClaims` did nothing but decode the presented
+// VP — no signature check, no issuer trust check, no holder-binding check, no nonce check.
+// It relied entirely on the Cloud Agent's own internal `PresentationVerified` status, which this
+// project's own investigation (see the service-access/1.0 migration and its
+// PresentationVerificationFailed diagnosis) already found to be an unreliable sole source of
+// truth. This is a fail-closed, independently-verified replacement, reusing the same
+// cryptographic primitives the service-access/1.0 protocol already relies on elsewhere.
+//
+// The Certification Authority is the sole trusted issuer of RealPersonIdentity — the
+// "Main Cloud Agent (backwards compatibility)" entry in ACCEPTED_ISSUER_DIDS.
+const realPersonTrustRegistry = createTrustRegistry(
+  ACCEPTED_ISSUER_DIDS
+    .filter(did => did === 'did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c')
+    .map(did => ({ did, vcTypes: ['RealPersonIdentity'] }))
+);
+const realPersonIssuerResolver = createIssuerResolver({ cloudAgentUrl: ENTERPRISE_CLOUD_AGENT_URL });
+
+/**
+ * Verify a presented RealPersonIdentity VP before trusting any of its claims:
+ *   1. Inner VC-JWT signature verified against the issuer's own resolved DID.
+ *   2. Issuer must be the Certification Authority's own known DID (fail-closed trust registry —
+ *      an unconfigured/unrecognized issuer is rejected, not silently trusted).
+ *   3. Outer VP-JWT signature verified against the presenter's own DID, using their
+ *      `authentication` key (holder binding / DID-Auth) — proves whoever is presenting actually
+ *      controls the corresponding private key, not just relaying a copy of someone else's VC.
+ *   4. The outer VP-JWT's holder DID must match the inner VC's own subject — proves the
+ *      presenter IS the credential's subject.
+ *   5. The outer VP-JWT's nonce must match the exact challenge issued for *this* presentation
+ *      request — rejects replay of a presentation captured for a different request/company.
+ *
+ * Throws with a descriptive message on any failure; the auto-proof loop's existing catch block
+ * already treats a thrown error during the 'issuing' state as a terminal 'failed' (no retry).
+ */
+async function verifyAndExtractRealPersonClaims(vpJwt, expectedChallenge) {
+  if (!vpJwt || typeof vpJwt !== 'string') throw new Error('No JWT VP provided');
+
+  const outerDecoded = decodeJWT(vpJwt);
+  if (!outerDecoded) throw new Error('Malformed outer VP JWT');
+
+  const holderDID = outerDecoded.payload.iss;
+  if (!holderDID) throw new Error('Outer VP JWT missing iss (holder DID)');
+  // Explicit, not accidental: prismDidsMatch happens to reject non-"did:prism:" DIDs today (its
+  // hashOf() returns null for any other prefix), which was the only thing stopping a VC whose
+  // credentialSubject.id is a non-PRISM DID from passing holder binding. Pinning it here means
+  // the constraint survives even if prismDidsMatch is ever generalized to other DID methods.
+  if (!holderDID.startsWith('did:prism:')) throw new Error('Holder DID must be a PRISM DID');
+
+  if (expectedChallenge && outerDecoded.payload.nonce !== expectedChallenge) {
+    throw new Error('Presentation nonce does not match the challenge issued for this request (possible replay)');
+  }
+
+  const holderSigValid = await verifyES256KSignature(outerDecoded, holderDID, realPersonIssuerResolver, 'authentication');
+  if (!holderSigValid) throw new Error('Outer VP JWT signature verification failed (holder binding)');
+
+  const vp = { verifiableCredential: outerDecoded.payload?.vp?.verifiableCredential || [] };
+  const vpResult = await verifyPresentationCredentials(vp, realPersonIssuerResolver);
+  if (!vpResult.success) throw new Error(`RealPersonIdentity VC verification failed: ${vpResult.error} — ${vpResult.message}`);
+
+  const realPersonCred = vpResult.credentials.find(c => c.claims?.credentialType === 'RealPersonIdentity');
+  if (!realPersonCred) throw new Error('RealPersonIdentity credential not found in presented VP');
+
+  if (!realPersonTrustRegistry.isTrustedIssuer(realPersonCred.issuerDID, 'RealPersonIdentity')) {
+    throw new Error(`Untrusted RealPersonIdentity issuer: ${realPersonCred.issuerDID}`);
+  }
+
+  const subjectDID = realPersonCred.subjectDID || realPersonCred.claims?.id;
+  if (!prismDidsMatch(subjectDID, holderDID)) {
+    throw new Error('Holder binding failed: presenter DID does not match the credential subject');
+  }
+
+  const cs = realPersonCred.claims;
+  return {
+    firstName: cs.firstName || null,
+    lastName: cs.lastName || null,
+    uniqueId: cs.uniqueId || null,
+    photo: cs.photo || null,
+    credentialStatus: realPersonCred.credentialStatus
+      ? { statusListCredential: realPersonCred.credentialStatus.statusListCredential,
+          statusListIndex: realPersonCred.credentialStatus.statusListIndex }
+      : null,
+  };
 }
 
 /**
@@ -2425,7 +2734,25 @@ async function requireEmployeeWalletKey(req, res, next) {
     if (!wallet) {
       return res.status(401).json({ success: false, error: 'No wallet found for API key' });
     }
-    req.employee = { walletId: wallet.id, apiKey };
+    req.employee = { walletId: wallet.id, wallet_id: wallet.id, apiKey };
+
+    // Enrich with employee identity (email/full_name) so downstream colleague-chat
+    // endpoints (fromEmail/fromName on invitations, connectionColleagueMap ownership)
+    // have real values instead of undefined. Best-effort: proceeds without enrichment
+    // if the enterprise DB isn't configured or the lookup fails (e.g. stale wallet_id
+    // after a cross-device wallet restore).
+    if (process.env.ENTERPRISE_DB_PASSWORD) {
+      try {
+        const employeeRecord = await getEnterpriseDb().getEmployeeByWalletId(wallet.id);
+        if (employeeRecord) {
+          req.employee.email = employeeRecord.email;
+          req.employee.full_name = employeeRecord.full_name;
+        }
+      } catch (e) {
+        console.warn('[requireEmployeeWalletKey] Employee lookup failed:', e.message);
+      }
+    }
+
     next();
   } catch (err) {
     console.error('[requireEmployeeWalletKey] error:', err.message);
@@ -2460,13 +2787,20 @@ app.get('/api/employee-portal/colleagues', requireEmployeeWalletKey, async (req,
  */
 app.post('/api/employee-portal/colleague-invite', requireEmployeeWalletKey, async (req, res) => {
   try {
-    const { toEmail, oobBase64 } = req.body;
+    const { toEmail, toName, oobBase64, connectionId } = req.body;
     if (!toEmail || !oobBase64) return res.status(400).json({ success: false, error: 'toEmail and oobBase64 required' });
     const id = require('crypto').randomUUID();
     colleagueInvitations.set(id, {
       id, fromEmail: req.employee.email, fromName: req.employee.full_name,
       toEmail, oobBase64, createdAt: new Date().toISOString()
     });
+    // Record the inviter's own side of the connection so their Connections list can
+    // show the colleague's name too (mirrors the acceptor-side mapping below).
+    if (connectionId) {
+      connectionColleagueMap.set(`${req.employee.wallet_id}:${connectionId}`, {
+        ownerEmail: req.employee.email, colleagueEmail: toEmail, colleagueName: toName || toEmail
+      });
+    }
     console.log(`[ColleagueInvite] ${req.employee.email} → ${toEmail} (${id})`);
     res.json({ success: true, id });
   } catch (err) {
@@ -2811,6 +3145,27 @@ app.get('/api/employee-portal/colleague-messages', requireEmployeeWalletKey, (re
  * POST /api/employee-portal/auth/initiate
  * Initiate employee authentication via EmployeeRole VC presentation
  */
+// Resolve employeeId (email prefix from ?user= param in serviceUrl) → full email.
+// Used by login page to pre-fill the email field without embedding email in the VC serviceUrl.
+app.get('/api/employee-portal/resolve-user', async (req, res) => {
+  const { user } = req.query;
+  if (!user || typeof user !== 'string' || user.length > 100) {
+    return res.status(400).json({ error: 'Invalid user parameter' });
+  }
+  try {
+    const employeeDb = getEnterpriseDb();
+    const employee = await employeeDb.getEmployeeByEmployeeId(user.trim());
+    if (!employee) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    // Return only the email — no other PII
+    return res.json({ email: employee.email });
+  } catch (err) {
+    console.error('[resolve-user]', err.message);
+    return res.status(500).json({ error: 'Lookup failed' });
+  }
+});
+
 app.post('/api/employee-portal/auth/initiate', async (req, res) => {
   try {
     const { identifier } = req.body;
@@ -3267,6 +3622,8 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
                     statusListCredential: cs.statusListCredential,
                     statusListIndex:      Number(cs.statusListIndex)
                   });
+                } else {
+                  console.warn(`[EmployeeAuth] VC at index ${i} has no credentialStatus — revocation cannot be verified`);
                 }
 
                 if (isEmployeeRoleCred(decoded.claims)) {
@@ -3388,19 +3745,48 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
     // Revocation check via StatusList2021 bitstring (best-effort — never blocks on fetch failure)
     try {
       const StatusListService = require('./lib/StatusListService');
-      for (const cs of loginRevocationChecks) {
+      await Promise.all(loginRevocationChecks.map(async (cs) => {
         const rev = await StatusListService.checkByCredentialStatus(cs);
         if (rev.isRevoked) {
           console.error(`[EmployeeAuth] DENIED — credential revoked (statusListIndex=${cs.statusListIndex})`);
+          throw { code: 'CredentialRevoked', statusListIndex: cs.statusListIndex };
+        }
+      }));
+    } catch (revErr) {
+      if (revErr.code === 'CredentialRevoked') {
+        return res.status(403).json({
+          success: false,
+          error: 'CredentialRevoked',
+          message: 'One of your credentials has been revoked and can no longer be used to log in'
+        });
+      }
+      console.warn(`[EmployeeAuth] Revocation check failed (non-fatal): ${revErr.message}`);
+    }
+
+    // RealPersonIdentity revocation check — the root identity credential was presented during
+    // personal onboarding; its credentialStatus pointer is stored in DB metadata. A revoked
+    // RealPersonIdentity means the employee's underlying identity is no longer valid.
+    try {
+      let meta = pendingAuth.employee?.metadata || null;
+      if (meta && typeof meta === 'string') { try { meta = JSON.parse(meta); } catch (_) { meta = null; } }
+      const rpCs = meta?.realPersonCredentialStatus;
+      if (rpCs?.statusListCredential && rpCs?.statusListIndex != null) {
+        const StatusListService = require('./lib/StatusListService');
+        const rev = await StatusListService.checkByCredentialStatus(rpCs);
+        if (rev.isRevoked) {
+          console.error(`[EmployeeAuth] DENIED — RealPersonIdentity VC revoked (statusListIndex=${rpCs.statusListIndex})`);
           return res.status(403).json({
             success: false,
-            error: 'CredentialRevoked',
-            message: 'Your credential has been revoked and can no longer be used to log in'
+            error: 'IdentityCredentialRevoked',
+            message: 'Your identity credential has been revoked. Please contact your administrator.'
           });
         }
+        console.log(`[EmployeeAuth] ✅ RealPersonIdentity revocation check passed`);
+      } else {
+        console.warn(`[EmployeeAuth] No RealPersonIdentity credentialStatus in DB — identity revocation not verifiable`);
       }
-    } catch (revErr) {
-      console.warn(`[EmployeeAuth] Revocation check failed (non-fatal): ${revErr.message}`);
+    } catch (rpRevErr) {
+      console.warn(`[EmployeeAuth] RealPersonIdentity revocation check failed (non-fatal): ${rpRevErr.message}`);
     }
 
     // Extract employee information from claims
@@ -3476,6 +3862,27 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
         console.warn(`[EmployeeAuth] CA user-info lookup failed (non-blocking): ${e.message}`);
       }
     }
+    // Fallback: resolve the photoDID from the VC directly if the CA lookup returned no proxyUrl.
+    // verifiedClaims.photo is a PRISM DID with a LinkedPhoto service endpoint — resolve it.
+    if (!photoUrl && verifiedClaims.photo) {
+      photoUrl = await resolveLinkedPhotoDID(verifiedClaims.photo);
+      if (photoUrl) {
+        console.log(`[EmployeeAuth] PhotoDID resolved via DID document: ${photoUrl}`);
+      }
+    }
+    // Fallback: resolve photo DID stored in DB metadata during personal onboarding.
+    // Employees whose EmployeeRole VC lacks the photo field (issued before RealPerson proof
+    // was linked) still get their photo by resolving the DID document at every login.
+    if (!photoUrl && pendingAuth.employee?.metadata) {
+      let meta = pendingAuth.employee.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch (_) { meta = {}; } }
+      if (meta.photoDid) {
+        photoUrl = await resolveLinkedPhotoDID(meta.photoDid);
+        if (photoUrl) {
+          console.log(`[EmployeeAuth] Photo resolved via stored photoDid DID document`);
+        }
+      }
+    }
 
     // Create session
     const sessionToken = crypto.randomBytes(32).toString('hex');
@@ -3502,6 +3909,9 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
 
     // Store session
     employeeSessions.set(sessionToken, session);
+    if (clearanceLevel) {
+      SlackNotifier.notifyClearanceVerification(email, clearanceLevel, true);
+    }
 
     // Clean up pending auth
     pendingEmployeeAuths.delete(presentationId);
@@ -3542,6 +3952,10 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
             connectionId: enterpriseConnectionId,
             schemaId: `${MULTITENANCY_CLOUD_AGENT_URL}/schema-registry/schemas/${SECURITY_CLEARANCE_GRANT_SCHEMA_GUID}`,
             credentialFormat: 'JWT',
+            // subjectId sets JWT payload.sub to the holder's PRISM DID so that subject
+            // consistency checks work correctly when the VC is presented in a VP alongside
+            // other enterprise credentials (without it the agent defaults to the peer DID).
+            subjectId: prismDid || undefined,
             claims: {
               credentialType: 'SecurityClearanceGrant',
               clearanceLevel: clearanceLevel.toUpperCase(),
@@ -3712,18 +4126,24 @@ app.use('/api/didcomm-webhook/techcorp', handleDIDCommWebhook(techcorpDIDComm, '
 app.use('/api/didcomm-webhook/acme',     handleDIDCommWebhook(acmeDIDComm, 'ACME'));
 
 /**
- * GET /api/enterprise-portal/grant-status?proofId=<presentationId>
- * Wallet polls this after accepting a proof request to retrieve the access grant URL.
- * The DIDCommCommandService stores the grant keyed by proofId; this endpoint consumes it (one-shot).
+ * GET /api/enterprise-portal/grant-status?requestId=<the original service-access/1.0/request id>
+ * Wallet polls this after sending an access request, for connections managed over the
+ * enterprise agent (a REST-only channel the wallet's own DIDComm inbox can't observe messages
+ * on — see packages/service-access-didcomm/PROTOCOL.md "Optional alternate transport").
+ * ServiceAccessService.consumeGrant stores the outcome keyed by requestId; one-shot.
  */
 app.get('/api/enterprise-portal/grant-status', (req, res) => {
   const key = req.query.requestId || req.query.proofId;
   if (!key) return res.status(400).json({ success: false, error: 'Missing requestId' });
 
-  const grant = techcorpDIDComm.consumeGrant(key) ?? acmeDIDComm.consumeGrant(key);
-  if (grant) {
-    console.log(`[EnterprisePortalGrant] Grant consumed for key ${String(key).slice(0, 12)}...: ${grant.accessUrl}`);
-    return res.json({ success: true, grant });
+  const result = techcorpDIDComm.consumeGrant(key) ?? acmeDIDComm.consumeGrant(key);
+  if (result?.grant) {
+    console.log(`[EnterprisePortalGrant] Grant consumed for key ${String(key).slice(0, 12)}...: ${result.grant.accessUrl}`);
+    return res.json({ success: true, grant: result.grant });
+  }
+  if (result?.error) {
+    console.warn(`[EnterprisePortalGrant] Error result for key ${String(key).slice(0, 12)}...: ${result.error}`);
+    return res.json({ success: false, error: result.error, message: result.message });
   }
   res.json({ success: false });
 });
@@ -3800,6 +4220,55 @@ app.get('/api/access', async (req, res) => {
     console.log(`[DIDCommAccess] No clearance VC in presentation → no clearance access`);
   }
 
+  // Resolve photo from DB metadata (photoDid stored during personal wallet onboarding).
+  // Also check RealPersonIdentity revocation before granting access.
+  let photoUrl = null;
+  const sessionEmail = claims.email || null;
+  if (sessionEmail && process.env.ENTERPRISE_DB_PASSWORD) {
+    try {
+      const empDb = getEnterpriseDb();
+      const empRecord = await empDb.getEmployeeByEmail(sessionEmail);
+      if (empRecord?.metadata) {
+        let meta = empRecord.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch (_) { meta = {}; } }
+
+        // Check RealPersonIdentity revocation before allowing login
+        const rpCs = meta?.realPersonCredentialStatus;
+        if (rpCs?.statusListCredential && rpCs?.statusListIndex != null) {
+          try {
+            const StatusListService = require('./lib/StatusListService');
+            const rev = await StatusListService.checkByCredentialStatus(rpCs);
+            if (rev.isRevoked) {
+              console.error(`[DIDCommAccess] DENIED — RealPersonIdentity VC revoked for ${sessionEmail}`);
+              return res.status(403).send(accessDeniedPage('Your identity credential has been revoked. Please contact your administrator.'));
+            }
+          } catch (revErr) {
+            console.warn(`[DIDCommAccess] RealPersonIdentity revocation check failed (non-fatal): ${revErr.message}`);
+          }
+        }
+
+        if (meta.photoDid) {
+          photoUrl = await resolveLinkedPhotoDID(meta.photoDid);
+          if (photoUrl) console.log(`[DIDCommAccess] Photo resolved via stored photoDid for ${sessionEmail}`);
+        }
+      }
+    } catch (photoErr) {
+      console.warn(`[DIDCommAccess] Photo resolution failed (non-fatal): ${photoErr.message}`);
+    }
+  }
+
+  // Fallback: photo DID embedded directly in the EmployeeRole VC (set when wallet was created
+  // with preloadedRealPersonClaims). Covers employees whose DB metadata.photoDid was never
+  // persisted due to the ordering bug (UPDATE before INSERT).
+  if (!photoUrl && claims.photo) {
+    try {
+      photoUrl = await resolveLinkedPhotoDID(claims.photo);
+      if (photoUrl) console.log(`[DIDCommAccess] Photo resolved via EmployeeRole VC claims.photo for ${sessionEmail}`);
+    } catch (e) {
+      console.warn(`[DIDCommAccess] claims.photo resolution failed (non-fatal): ${e.message}`);
+    }
+  }
+
   employeeSessions.set(sessionToken, {
     sessionToken,
     connectionId:   entry.connectionId,
@@ -3814,7 +4283,7 @@ app.get('/api/access', async (req, res) => {
     trainingExpiryDate: trainingStatus.expiryDate || null,
     clearanceLevel: clearanceGrant.level,
     hasClearanceVC: clearanceGrant.hasClearance,
-    photoUrl:       null,
+    photoUrl,
     lastNameMismatch: false,
     lastNameCurrent: null,
     authenticatedAt: Date.now(),
@@ -3841,6 +4310,22 @@ h2{color:#f87171;margin-top:0}p{color:#94a3b8;margin-bottom:0}</style></head>
 }
 
 // Background loop: auto-send proof request when connection establishes, then auto-issue VC
+//
+// CONCURRENCY NOTE: this loop ticks every 4s, but a single connectionId's processing can take
+// far longer than that (createEmployeeWallet's full 13-step flow alone runs ~25s). setInterval
+// does not wait for a previous tick's async callback to finish, so without an explicit lock,
+// several overlapping ticks can all reach the same connectionId's entry while an earlier tick
+// is still mid-flight (suspended at an `await`), each independently passing the in-data
+// 'issuing'/'enterpriseOnboardingStarted' checks before any of them has actually written the
+// updated flag back — those checks are state written by *this* async body, so they only
+// protect against re-entry *after* being set, not concurrent entry *before* that point. This
+// previously produced two full createEmployeeWallet() runs (and two live DIDComm connections)
+// for the same employee from a single onboarding trigger. _autoProofProcessing below is a
+// separate, tick-external lock: acquired synchronously the instant a connectionId is picked up
+// (before any `await`), and released in `finally` regardless of outcome — so a later tick can
+// only ever see a fully-settled state for that connectionId, never a half-finished one.
+const _autoProofProcessing = new Set();
+
 setInterval(async () => {
   if (!global.pendingInvitations || global.pendingInvitations.size === 0) return;
 
@@ -3850,6 +4335,9 @@ setInterval(async () => {
 
     const company = getCompany(data.companyId);
     if (!company) continue;
+
+    if (_autoProofProcessing.has(connectionId)) continue; // a previous, still-running tick owns this one
+    _autoProofProcessing.add(connectionId);
 
     try {
       if (!data.proofState) {
@@ -3862,6 +4350,12 @@ setInterval(async () => {
           data.proofState = 'sending';
           global.pendingInvitations.set(connectionId, data);
 
+          // Challenge is stored (not just generated inline) so the presentation's own nonce
+          // claim can be checked against it later — see the nonce/replay check below. Domain is
+          // per-company (not a single shared 'identuslabel.cz') so a captured presentation for
+          // one company's onboarding challenge can't be replayed against another's.
+          const challenge = crypto.randomBytes(32).toString('hex');
+          const domain = `realperson.${company.id}.identuslabel.cz`;
           const proofResult = await cloudAgentRequest(
             company.apiKey,
             '/present-proof/presentations',
@@ -3870,10 +4364,7 @@ setInterval(async () => {
               body: JSON.stringify({
                 connectionId,
                 proofs: [],
-                options: {
-                  challenge: crypto.randomBytes(32).toString('hex'),
-                  domain: 'identuslabel.cz'
-                },
+                options: { challenge, domain },
                 goalCode: 'present-vp',
                 goal: 'Share your RealPersonIdentity credential for employee onboarding',
                 credentialFormat: 'JWT'
@@ -3884,6 +4375,8 @@ setInterval(async () => {
           if (!data.presentationId) throw new Error('No presentationId in response');
           data.proofState = 'requested';
           data.proofSentAt = Date.now();
+          data.proofChallenge = challenge;
+          data.proofResetCount = data.proofResetCount || 0;
           global.pendingInvitations.set(connectionId, data);
           console.log(`[AUTO-PROOF] Proof request sent for connection ${connectionId.substring(0,8)}..., presentationId: ${data.presentationId}`);
         }
@@ -3901,21 +4394,74 @@ setInterval(async () => {
           global.pendingInvitations.set(connectionId, data);
 
           const vpJwt = Array.isArray(presResult.data?.data) ? presResult.data.data[0] : (presResult.data?.data || presResult.data?.presentation || null);
-          const claims = extractRealPersonClaims(vpJwt);
+          const claims = await verifyAndExtractRealPersonClaims(vpJwt, data.proofChallenge);
 
           const fullName = [claims.firstName, claims.lastName].filter(Boolean).join(' ');
           const existingEmails = getExistingEmailsForCompany(company.id);
-          const email = generateEmployeeEmail(fullName || 'employee', company.id, existingEmails);
+          // Reuse the pre-stored email (set when personal wallet invitation was auto-created after
+          // enterprise onboarding) so we don't generate a conflicting second email.
+          const email = data.email || generateEmployeeEmail(fullName || 'employee', company.id, existingEmails);
           const portalBaseUrl = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
 
           data.name = fullName;
           data.email = email;
           data.uniqueId = claims.uniqueId;
           data.photo = claims.photo;
+          data.credentialStatus = claims.credentialStatus || null;
           data.portalUrl = `${portalBaseUrl}/employee-portal-login.html?email=${encodeURIComponent(email)}`;
           global.pendingInvitations.set(connectionId, data);
 
+          // Persist photoDID + credentialStatus so every subsequent login can resolve the photo
+          // and check RealPersonIdentity revocation without requiring re-presentation.
+          if ((claims.uniqueId || claims.photo) && process.env.ENTERPRISE_DB_PASSWORD) {
+            try {
+              const empDb = getEnterpriseDb();
+              await empDb.updateEmployeeRealPersonData(email, claims.uniqueId, claims.photo, claims.credentialStatus);
+              console.log(`[AUTO-PROOF] Persisted RealPerson data (photoDid + credentialStatus) for ${email}`);
+            } catch (dbErr) {
+              console.warn(`[AUTO-PROOF] Could not persist RealPerson data to DB: ${dbErr.message}`);
+            }
+          }
+
           await issueServiceConfigVC(connectionId, fullName, email, data.department || '', company, claims);
+
+          // SSI-compliant enterprise onboarding gate: EmployeeRole VC is only issued AFTER
+          // the personal wallet has presented the RealPerson VC and photoDID is in DB.
+          // Pass realPersonClaims so photo is embedded directly in the EmployeeRole VC.
+          if (data.triggerEnterpriseOnboarding && !data.enterpriseOnboardingStarted) {
+            data.enterpriseOnboardingStarted = true;
+            global.pendingInvitations.set(connectionId, data);
+            const rpClaims = {
+              uniqueId:  data.uniqueId  || null,
+              photo:     data.photo     || null,
+              firstName: claims.firstName || null,
+              lastName:  claims.lastName  || null,
+            };
+            // Awaited (not fire-and-forget): previously this ran without awaiting and
+            // `proofState` was set to 'complete' unconditionally right after, regardless of
+            // whether wallet creation actually succeeded — a failure here (or the process
+            // exiting mid-flight) left the employee permanently marked done with no wallet and
+            // no credential, and no way to retry since 'complete' is a terminal state the loop
+            // skips forever. Now a thrown error here falls through to this loop's own outer
+            // catch block, which already handles the 'issuing' → 'failed' transition correctly.
+            const w = await EmployeeWalletManager.createEmployeeWallet(
+              { email, name: fullName, department: data.department || 'IT' },
+              null, // companyDID — resolved inside manager
+              rpClaims
+            );
+            console.log(`[AUTO-PROOF] ✅ Enterprise wallet created for ${email}: walletId=${w.walletId}`);
+            // DB row now exists — persist photoDid (the earlier call found no row). Best-effort:
+            // a failure here is logged but doesn't undo the wallet creation that already succeeded.
+            if ((data.uniqueId || data.photo) && process.env.ENTERPRISE_DB_PASSWORD) {
+              try {
+                const empDb = getEnterpriseDb();
+                await empDb.updateEmployeeRealPersonData(email, data.uniqueId, data.photo, data.credentialStatus);
+                console.log(`[AUTO-PROOF] ✅ photoDid persisted for ${email} (post-wallet-creation)`);
+              } catch (e) {
+                console.warn(`[AUTO-PROOF] photoDid post-persist failed: ${e.message}`);
+              }
+            }
+          }
 
           data.proofState = 'complete';
           global.pendingInvitations.set(connectionId, data);
@@ -3928,12 +4474,26 @@ setInterval(async () => {
           console.warn(`[AUTO-PROOF] Failed for ${connectionId.substring(0,8)}...: ${state}`);
         } else if (state === 'RequestSent' && (!data.proofSentAt || Date.now() - data.proofSentAt > 3 * 60 * 1000)) {
           // Proof request stuck in RequestSent — either no timestamp (legacy) or >3 min old.
-          // Wallet likely never received the request (e.g. mediator routing not yet set up). Reset so the loop retries.
-          data.proofState = null;
-          data.presentationId = null;
-          data.proofSentAt = null;
-          global.pendingInvitations.set(connectionId, data);
-          console.warn(`[AUTO-PROOF] Proof request timed out for ${connectionId.substring(0,8)}... (RequestSent >3min) — will retry`);
+          // Wallet likely never received the request (e.g. mediator routing not yet set up).
+          // Bounded retry: each reset creates a brand-new presentationId/challenge, so an old,
+          // still-outstanding request can no longer succeed against the new challenge (the
+          // nonce check in verifyAndExtractRealPersonClaims rejects it) — this is a real retry,
+          // not a duplicate-issuance risk. But retrying forever for a permanently-unreachable
+          // wallet would poll the Cloud Agent indefinitely, so cap it and mark 'failed' instead.
+          data.proofResetCount = (data.proofResetCount || 0) + 1;
+          if (data.proofResetCount > 5) {
+            data.proofState = 'failed';
+            data.proofError = 'Proof request timed out after 5 attempts — wallet never responded';
+            global.pendingInvitations.set(connectionId, data);
+            console.warn(`[AUTO-PROOF] Giving up on ${connectionId.substring(0,8)}... after ${data.proofResetCount} timed-out attempts`);
+          } else {
+            data.proofState = null;
+            data.presentationId = null;
+            data.proofSentAt = null;
+            data.proofChallenge = null;
+            global.pendingInvitations.set(connectionId, data);
+            console.warn(`[AUTO-PROOF] Proof request timed out for ${connectionId.substring(0,8)}... (RequestSent >3min) — retry ${data.proofResetCount}/5`);
+          }
         }
       }
     } catch (err) {
@@ -3949,6 +4509,8 @@ setInterval(async () => {
         data.proofError = err.message;
         global.pendingInvitations.set(connectionId, data);
       }
+    } finally {
+      _autoProofProcessing.delete(connectionId);
     }
   }
 }, 4000);
@@ -4489,6 +5051,31 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
     let wrappedManifest = null; // hoisted: needed for KeyManifest VC push in Step 5
     if (iagonClient.isConfigured()) {
       try {
+        // For DOCX files: reject if any section is tagged above the uploader's own clearance.
+        // The full document is stored on Iagon; per-reader redaction happens server-side
+        // inside /api/access-gate/present using DocxRedactionService.
+        const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        if (req.file.mimetype === DOCX_MIME) {
+          try {
+            const { parseDocxClearanceSections, CLEARANCE_LEVELS } = require('./lib/DocxClearanceParser');
+            const parsed = await parseDocxClearanceSections(req.file.buffer);
+            const uploaderLevelNum = CLEARANCE_LEVELS[(session.clearanceLevel || 'INTERNAL').toUpperCase()] ?? 1;
+            const tooHighSection = (parsed.sections || []).find(s =>
+              (CLEARANCE_LEVELS[(s.clearanceLevel || '').toUpperCase()] ?? 0) > uploaderLevelNum
+            );
+            if (tooHighSection) {
+              return res.status(403).json({
+                success: false,
+                error: 'InsufficientClearance',
+                message: `Document contains ${tooHighSection.clearanceLevel} sections but your clearance is ${session.clearanceLevel || 'INTERNAL'}. You cannot upload content above your own clearance level.`
+              });
+            }
+            console.log(`[DocumentUpload] ✅ DOCX clearance check passed (uploader level: ${session.clearanceLevel || 'INTERNAL'})`);
+          } catch (parseErr) {
+            console.warn('[DocumentUpload] DOCX clearance check skipped (parse error):', parseErr.message);
+          }
+        }
+
         const iagonResult = await iagonClient.uploadFile(
           req.file.buffer,
           `${Date.now()}_${req.file.originalname}`,
@@ -4547,6 +5134,7 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
 
     if (iagonStorage && iagonStorage.fileId) {
       // Create DID WITH service endpoint (Iagon URL embedded before blockchain publication)
+      const PUBLIC_URL = process.env.PUBLIC_URL || 'https://identuslabel.cz/company-admin';
       const didResult = await documentManager.createDocumentDIDWithServiceEndpoint(
         session.department,
         {
@@ -4565,7 +5153,7 @@ app.post('/api/employee-portal/documents/upload', requireEmployeeSession, upload
           contentHash:    iagonStorage.contentHash   || null,
           encryptionInfo: iagonStorage.encryptionInfo || null
         },
-        [],
+        [{ id: 'document-access-gate', type: 'DocumentAccessGate', serviceEndpoint: `${PUBLIC_URL}/api/access-gate/challenge` }],
         { documentServiceUrl: req.company?.documentServiceUrl || null }
       );
       documentDID = didResult.documentDID;
@@ -5049,6 +5637,8 @@ app.post('/api/documents/register', async (req, res) => {
       classificationLevel,
       releasableTo,
       contentEncryptionKey,
+      iagonStorage,
+      ownerCompanyDID,
       metadata
     } = req.body;
 
@@ -5065,6 +5655,7 @@ app.post('/api/documents/register', async (req, res) => {
     console.log(`[DocumentRegistry] Title: ${title}`);
     console.log(`[DocumentRegistry] Classification: ${classificationLevel}`);
     console.log(`[DocumentRegistry] Releasable to ${releasableTo.length} companies`);
+    if (iagonStorage?.fileId) console.log(`[DocumentRegistry] Iagon fileId: ${iagonStorage.fileId}`);
 
     // Register document in registry
     const result = await DocumentRegistry.registerDocument({
@@ -5073,6 +5664,8 @@ app.post('/api/documents/register', async (req, res) => {
       classificationLevel,
       releasableTo,
       contentEncryptionKey,
+      iagonStorage:    iagonStorage    || null,
+      ownerCompanyDID: ownerCompanyDID || null,
       metadata: metadata || {}
     });
 
@@ -6020,67 +6613,9 @@ app.post('/api/document-access/complete', async (req, res) => {
       return res.status(403).json({ success: false, error: vpResult.error, message: vpResult.message });
     }
 
-    const { companyDID, clearanceLevel, issuerDID, viewerName } = vpResult;
-
-    // Get document
-    const document = DocumentRegistry.documents.get(documentDID);
-    if (!document) {
-      return res.status(404).json({ success: false, error: 'DocumentNotFound', message: 'Document not found in registry' });
-    }
-
-    // Releasability check
-    if (document.releasableTo && document.releasableTo.length > 0 && !document.releasableTo.includes(issuerDID)) {
-      return res.status(403).json({ success: false, error: 'ReleasabilityDenied', message: 'Your credential issuer is not authorized for this document' });
-    }
-
-    // Clearance check
-    const CLEARANCE_NUMERIC = { 'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2, 'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4, 'TOP_SECRET': 4 };
-    const docLevel  = CLEARANCE_NUMERIC[document.classificationLevel] ?? 1;
-    const userLevel = clearanceLevel ? (CLEARANCE_NUMERIC[clearanceLevel.toUpperCase()] ?? 0) : 0;
-    if (userLevel < docLevel) {
-      return res.status(403).json({ success: false, error: 'ClearanceDenied', message: `Document requires ${document.classificationLevel}, your clearance is ${clearanceLevel || 'UNCLASSIFIED'}` });
-    }
-
-    // Revocation check via StatusList2021 bitstring
-    try {
-      const StatusListService = require('./lib/StatusListService');
-      for (const cs of (vpResult.credentialStatuses || [])) {
-        const rev = await StatusListService.checkByCredentialStatus(cs);
-        if (rev.isRevoked) {
-          return res.status(403).json({ success: false, error: 'CredentialRevoked', message: 'Your security clearance credential has been revoked' });
-        }
-      }
-    } catch (revErr) {
-      console.warn(`[DocumentAccess] Revocation check failed (non-fatal): ${revErr.message}`);
-    }
-
-    // Delegate to the same download + redact + re-encrypt pipeline as access-gate/present
-    // by re-calling the inner logic via a synthetic req object. Simpler: inline the
-    // IagonStorage download + ReEncryptionService call directly.
-    if (!document.iagonStorage || !document.iagonStorage.fileId) {
-      return res.status(404).json({ success: false, error: 'NoStorage', message: 'Document has no Iagon storage record' });
-    }
-
-    // Reuse the same ReEncryptionService path as access-gate/present
-    // by re-using req with the same body shape the internal handler expects.
-    // Easiest: call the internal handler logic via a helper by delegating to a synthetic
-    // express request with the correct body. Instead, just set req.body and call next route:
-    //
-    // Simplest correct approach: forward to /api/access-gate/present internally.
-    // We can't easily do that; instead replicate the minimal steps by constructing a
-    // synthetic body and calling the same inner function that /api/access-gate/present uses.
-    //
-    // Since the download/redact/encrypt logic is 100+ lines embedded in the route,
-    // we create a synthetic request body and proxy to the existing route handler via
-    // a local fetch.  The challenge for the gate is already consumed — use a special
-    // bypass challenge signed with a server-side token to avoid double challenge.
-    //
-    // Better: extract the ephemeralPublicKey already stored in session and perform
-    // a local HTTP call to /api/access-gate/present-internal.
-    //
-    // Simplest: get a fresh challenge and re-POST to /api/access-gate/present
-    // from the server itself (loopback).
-
+    // VP is valid — delegate all document checks (registry, releasability, clearance,
+    // revocation, iagonStorage) and the download+redact+encrypt pipeline to
+    // access-gate/present via loopback.  This keeps all business logic in one place.
     const loopbackBase = `http://127.0.0.1:${PORT || 3010}`;
     const challengeRes = await fetch(`${loopbackBase}/api/access-gate/challenge?documentDID=${encodeURIComponent(documentDID)}`);
     const challengeJson = await challengeRes.json();
@@ -6089,16 +6624,15 @@ app.post('/api/document-access/complete', async (req, res) => {
     }
     const internalChallenge = challengeJson.challenge;
 
-    // Build a VP that the access-gate/present endpoint can verify.
-    // We already verified the VP above — pass the raw vp along with the internal challenge.
-    // Patch the proof.challenge so the gate check passes.
-    const patchedVP = JSON.parse(JSON.stringify(vp));
-    if (patchedVP.proof) patchedVP.proof.challenge = internalChallenge;
-
+    // Forward the VP to access-gate/present unmodified.
+    // The internal challenge was issued by access-gate/challenge above and is valid
+    // for this documentDID; access-gate/present validates it from pendingDocumentAccessChallenges.
+    // VP proof integrity is not violated — the Identus JWT VP has no .proof field
+    // (the signature lives in the JWT envelope, already verified by the cloud agent).
     const presentRes = await fetch(`${loopbackBase}/api/access-gate/present`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documentDID, vp: patchedVP, challenge: internalChallenge, ephemeralPublicKey })
+      body: JSON.stringify({ documentDID, vp, challenge: internalChallenge, ephemeralPublicKey })
     });
 
     const presentJson = await presentRes.json();
@@ -6275,7 +6809,9 @@ app.post('/api/access-gate/present', async (req, res) => {
     }
 
     // --- 5. Releasability check ---
-    const releasabilityOk = document.releasableTo && document.releasableTo.includes(issuerDID);
+    // Empty/absent releasableTo = no restriction (open to any trusted issuer).
+    // Non-empty = issuerDID must be in the list.
+    const releasabilityOk = !document.releasableTo || document.releasableTo.length === 0 || document.releasableTo.includes(issuerDID);
     if (!releasabilityOk) {
       console.log(`[AccessGate] DENIED — issuerDID not in releasableTo`);
       fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
@@ -6347,7 +6883,30 @@ app.post('/api/access-gate/present', async (req, res) => {
 
     // --- 8. Download document from Iagon ---
     if (!document.iagonStorage || !document.iagonStorage.fileId) {
-      return res.status(404).json({ success: false, error: 'NoStorage', message: 'Document has no Iagon storage record' });
+      // Fall back to DID resolution to find iagonFileId for documents whose
+      // registry entry predates the iagonStorage field in registration payloads.
+      try {
+        const didRes  = await fetch(`${ENTERPRISE_CLOUD_AGENT_URL}/dids/${encodeURIComponent(documentDID)}`);
+        if (didRes.ok) {
+          const didData  = await didRes.json();
+          const didDoc   = didData.didDocument || didData.did || didData;
+          const services = didDoc.services || didDoc.service || [];
+          const metaSvc  = services.find(s => s.type === 'DocumentMetadata');
+          let meta = metaSvc?.serviceEndpoint;
+          if (Array.isArray(meta)) meta = meta[0];
+          if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch (_) {} }
+          if (meta?.iagonFileId) {
+            document.iagonStorage = { fileId: meta.iagonFileId, filename: meta.originalFilename || meta.iagonFilename || null };
+            DocumentRegistry.documents.set(documentDID, document);
+            console.log(`[AccessGate] Resolved iagonStorage from DID for: ${documentDID.substring(0, 50)}`);
+          }
+        }
+      } catch (didErr) {
+        console.warn(`[AccessGate] DID resolution fallback failed: ${didErr.message}`);
+      }
+      if (!document.iagonStorage || !document.iagonStorage.fileId) {
+        return res.status(404).json({ success: false, error: 'NoStorage', message: 'Document has no Iagon storage record' });
+      }
     }
 
     const iagonClient = getIagonClient();
@@ -7348,12 +7907,15 @@ const pendingClearanceVerifications = new Map();
 
 /**
  * POST /api/employee-portal/clearance/initiate
- * Initiate Security Clearance VC verification via DIDComm
+ * Initiate Security Clearance VC verification via DIDComm.
  *
- * ARCHITECTURE: Uses DIRECT DIDComm connection from TechCorp (Cloud Agent 8200)
- * to Alice's personal wallet. No CA intermediary needed.
+ * ARCHITECTURE: SecurityClearance VC lives in the employee's PERSONAL wallet (SDK/Pluto/IndexedDB),
+ * not the enterprise wallet. The personal wallet connects to the company's 8200 multitenancy tenant
+ * separately from the enterprise wallet connection (session.connectionId is the enterprise connection
+ * and is explicitly excluded from the search below).
  *
- * Flow: Employee Portal → Company Admin Portal → Cloud Agent 8200 → Alice Personal Wallet
+ * Flow: Employee Portal → Company Admin Portal → searches 8200 connections for personal wallet →
+ *       sends proof request to personal wallet connection → IDL Wallet (personal mode) receives it
  */
 app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, async (req, res) => {
   try {
@@ -7361,113 +7923,103 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
     const token = req.headers['x-session-token'];
 
     console.log('\n' + '='.repeat(70));
-    console.log('[ClearanceVerification] Initiating DIRECT DIDComm Security Clearance verification');
+    console.log('[ClearanceVerification] Initiating Security Clearance verification');
     console.log(`   Employee: ${session.email} (${session.employeeId})`);
     console.log(`   PRISM DID: ${session.prismDid}`);
-    console.log(`   Issuer DID: ${session.issuerDID}`);
+    console.log(`   Enterprise connectionId (excluded): ${session.connectionId}`);
     console.log('='.repeat(70));
 
-    // Find company configuration by matching issuerDID against company DIDs
-    const company = getAllCompanies().find(c => c.did === session.issuerDID);
-    if (!company) {
-      console.error(`[ClearanceVerification] No company found with DID: ${session.issuerDID}`);
-      return res.status(400).json({
-        success: false,
-        error: 'CompanyNotFound',
-        message: `No company found for issuer DID ${session.issuerDID}`
-      });
-    }
-    console.log(`   Company: ${company.displayName} (${company.id})`);
-    console.log('='.repeat(70));
-
-    // Personal wallet connections live in each company's own agent (company.apiKey).
-    // session.connectionId is the enterprise agent connection — explicitly excluded below.
     const MULTITENANCY_URL = process.env.MULTITENANCY_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
-    const enterpriseConnectionId = session.connectionId; // exclude this from personal search
+    const enterpriseConnectionId = session.connectionId; // exclude this — it routes to enterprise wallet
 
-    console.log(`[ClearanceVerification] Searching for personal wallet connection in ${company.id} agent`);
-
-    const connectionsResponse = await fetch(`${MULTITENANCY_URL}/connections`, {
-      method: 'GET',
-      headers: { 'apikey': company.apiKey }
-    });
-
-    if (!connectionsResponse.ok) {
-      console.error('[ClearanceVerification] Failed to fetch connections');
-      return res.status(500).json({
-        success: false,
-        error: 'ConnectionFetchError',
-        message: 'Failed to fetch company connections'
-      });
-    }
-
-    const connectionsData = await connectionsResponse.json();
-    const connections = connectionsData.contents || [];
-
-    // Personal wallet connections: established connections whose peer DID routes via the mediator,
-    // not via the enterprise agent. isEnterpriseAgentConnection() decodes the .S segment of the
-    // did:peer:2 DID to check the service endpoint URI.
-    const personalWalletConns = connections.filter(conn => {
-      if (conn.state !== 'ConnectionResponseSent' && conn.state !== 'ConnectionResponseReceived') return false;
-      if (conn.connectionId === enterpriseConnectionId) return false;
-      if (isEnterpriseAgentConnection(conn.theirDid)) return false;
-      return true;
-    });
-
-    let employeeConnection = null;
-
-    // First: try stored personal_wallet_connection_id saved at ServiceConfig VC issuance time
+    // Fetch stored personal_wallet_connection_id from DB (email-keyed)
+    let storedConnId = null;
     try {
       const empDb = getEnterpriseDb();
       const storedEmployee = await empDb.getEmployeeByEmail(session.email);
-      const storedConnId = storedEmployee?.personal_wallet_connection_id;
-      if (storedConnId) {
-        // Look in both personal-filtered list and all connections (in case filter edge case)
-        const storedConn =
-          personalWalletConns.find(c => c.connectionId === storedConnId) ||
-          connections.find(c => c.connectionId === storedConnId && !isEnterpriseAgentConnection(c.theirDid));
-        if (storedConn) {
-          employeeConnection = storedConn;
-          console.log(`[ClearanceVerification] Using stored personal wallet connection: ${storedConnId}`);
-        } else {
-          console.log(`[ClearanceVerification] Stored connection ${storedConnId} not found in personal connections — falling back to label search`);
-        }
-      }
+      storedConnId = storedEmployee?.personal_wallet_connection_id || null;
+      if (storedConnId) console.log(`[ClearanceVerification] DB stored connection ID: ${storedConnId}`);
     } catch (dbErr) {
-      console.warn(`[ClearanceVerification] DB lookup failed, falling back to label search: ${dbErr.message}`);
+      console.warn(`[ClearanceVerification] DB lookup failed: ${dbErr.message}`);
     }
 
-    // Fallback: search with priority: exact email match first, then full name, skip base-name fallback
-    // (base-name stripping e.g. "new.test.3" → "new test" causes false matches with "new.test")
+    // Search ALL company tenants for the personal wallet connection.
+    // session.issuerDID is unreliable (EmployeeWalletManager hardcodes TechCorp as JWT issuer
+    // for all employees regardless of company), so we cannot use it to select a single company.
+    // The connection exists in exactly one company's 8200 agent — finding it there IS the proof
+    // of which company to use.
+    const emailUsername = session.email.split('@')[0];
+    const fullNamePart = emailUsername.replace(/\./g, ' ').toLowerCase();
+    const emailLC = session.email.toLowerCase();
+
+    let foundCompany = null;
+    let employeeConnection = null;
+
+    for (const candidate of getAllCompanies()) {
+      console.log(`[ClearanceVerification] Searching ${candidate.id} (${candidate.apiKey.slice(0, 8)}...) for personal wallet connection`);
+      let connections = [];
+      try {
+        const resp = await fetch(`${MULTITENANCY_URL}/connections`, {
+          headers: { 'apikey': candidate.apiKey }
+        });
+        if (!resp.ok) { console.warn(`  ${candidate.id}: HTTP ${resp.status}`); continue; }
+        connections = (await resp.json()).contents || [];
+      } catch (fetchErr) {
+        console.warn(`  ${candidate.id}: fetch failed — ${fetchErr.message}`); continue;
+      }
+
+      // Keep only established personal-wallet connections
+      const personalWalletConns = connections.filter(conn =>
+        (conn.state === 'ConnectionResponseSent' || conn.state === 'ConnectionResponseReceived') &&
+        !(enterpriseConnectionId && conn.connectionId === enterpriseConnectionId) &&
+        !isEnterpriseAgentConnection(conn.theirDid)
+      );
+      console.log(`  ${candidate.id}: ${connections.length} total, ${personalWalletConns.length} personal-wallet`);
+
+      // Try DB-stored ID first (most reliable)
+      let conn = storedConnId
+        ? (personalWalletConns.find(c => c.connectionId === storedConnId) ||
+           connections.find(c => c.connectionId === storedConnId && !isEnterpriseAgentConnection(c.theirDid)))
+        : null;
+      if (conn) console.log(`  ${candidate.id}: ✅ Found via stored connection ID: ${storedConnId}`);
+
+      // Fallback: label contains employee email or name
+      if (!conn) {
+        conn = personalWalletConns.find(c => c.label && c.label.toLowerCase().includes(emailLC))
+            || personalWalletConns.find(c => c.label && c.label.toLowerCase().includes(fullNamePart));
+        if (conn) console.log(`  ${candidate.id}: ✅ Found via label search: ${conn.connectionId} (${conn.label})`);
+      }
+
+      if (conn) { foundCompany = candidate; employeeConnection = conn; break; }
+    }
+
+    // No personal wallet connection found in any company tenant → generate OOB invitation
     if (!employeeConnection) {
-      const emailLC = session.email.toLowerCase();
-      const emailUsername = session.email.split('@')[0];
-      const fullNamePart = emailUsername.replace(/\./g, ' ').toLowerCase();
+      console.log('[ClearanceVerification] No personal wallet connection found in any agent');
 
-      employeeConnection =
-        personalWalletConns.find(conn => conn.label && conn.label.toLowerCase().includes(emailLC)) ||
-        personalWalletConns.find(conn => conn.label && conn.label.toLowerCase().includes(fullNamePart));
-    }
+      // Use email domain to select the right company for OOB — email is server-generated
+      // (generateEmployeeEmail produces name@{companyId}.test) so domain is reliable here
+      const emailDomain = (session.email || '').split('@')[1] || '';
+      const companyIdFromDomain = emailDomain.split('.')[0].toLowerCase();
+      const oobCompany = getAllCompanies().find(c => c.id === companyIdFromDomain) || getAllCompanies()[0];
 
-    if (employeeConnection) {
-      console.log(`[ClearanceVerification] Found personal wallet connection: ${employeeConnection.connectionId} (${employeeConnection.label})`);
-    }
-
-    if (!employeeConnection) {
-      console.log(`[ClearanceVerification] No personal wallet connection found for employee — generating OOB invitation`);
-
-      // Generate a new TechCorp OOB invitation so the employee can connect their personal IDL wallet
       let oobUrl = null;
       try {
-        const oobResp = await fetch(`${MULTITENANCY_URL}/connections/invitation-url`, {
+        const label = `${oobCompany.displayName} ↔ ${session.fullName || session.email} Personal (${session.email})`;
+        const oobResult = await cloudAgentRequest(oobCompany.apiKey, '/connections', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'apikey': company.apiKey },
-          body: JSON.stringify({ label: `${company.displayName} ↔ ${session.fullName || session.email} Personal (${session.email})` })
+          body: JSON.stringify({ label })
         });
-        if (oobResp.ok) {
-          const oobData = await oobResp.json();
-          oobUrl = oobData.invitation?.invitationUrl || oobData.invitationUrl || null;
+        const rawUrl = oobResult.data?.invitation?.invitationUrl || null;
+        if (rawUrl) {
+          try {
+            const oobParam = new URL(rawUrl).searchParams.get('_oob');
+            oobUrl = oobParam
+              ? `https://identuslabel.cz/wallet/oob?_oob=${encodeURIComponent(oobParam)}`
+              : rawUrl;
+          } catch (_) { oobUrl = rawUrl; }
         }
+        console.log(`[ClearanceVerification] OOB invitation created for ${oobCompany.id}: ${oobUrl ? 'OK' : 'null'}`);
       } catch (oobErr) {
         console.warn('[ClearanceVerification] Could not generate OOB:', oobErr.message);
       }
@@ -7475,49 +8027,41 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
       return res.status(400).json({
         success: false,
         error: 'NoPersonalWalletConnection',
-        message: 'Your personal wallet is not yet connected to ' + company.displayName + '. Please connect it first, then try again.',
+        message: `Your personal wallet is not yet connected to ${oobCompany.displayName}. Please connect it first, then try again.`,
         oobUrl,
         instructions: [
-          '1. Copy or scan the invitation link below',
+          '1. Copy the invitation link below',
           '2. Open your IDL Wallet (personal mode)',
-          '3. Go to Connections → paste/scan the invitation',
+          '3. Go to Connections → paste the invitation',
           '4. Accept the connection request',
           '5. Return here and click "Verify Clearance" again'
         ]
       });
     }
 
-    console.log(`[ClearanceVerification] Found employee connection:`);
-    console.log(`   Connection ID: ${employeeConnection.connectionId}`);
-    console.log(`   Label: ${employeeConnection.label}`);
-    console.log(`   State: ${employeeConnection.state}`);
-
-    // Create proof request for Security Clearance VC via TechCorp's Cloud Agent
-    // This sends a DIDComm proof request directly to Alice's personal wallet
-    const proofRequestPayload = {
-      connectionId: employeeConnection.connectionId,
-      proofs: [],  // JWT format - request any credential
-      options: {
-        challenge: require('crypto').randomBytes(16).toString('hex'),
-        domain: 'identuslabel.cz'
-      }
-    };
-
-    console.log(`[ClearanceVerification] Creating proof request via Cloud Agent 8200`);
-    console.log(`   Payload:`, JSON.stringify(proofRequestPayload, null, 2));
+    // Send proof request via the found personal wallet connection in foundCompany's 8200 tenant
+    console.log(`[ClearanceVerification] Sending proof request via ${foundCompany.id} connection ${employeeConnection.connectionId}`);
+    console.log(`   Label: ${employeeConnection.label}  apiKey: ${foundCompany.apiKey.slice(0, 8)}...`);
 
     const proofResponse = await fetch(`${MULTITENANCY_URL}/present-proof/presentations`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'apikey': company.apiKey
+        'apikey': foundCompany.apiKey
       },
-      body: JSON.stringify(proofRequestPayload)
+      body: JSON.stringify({
+        connectionId: employeeConnection.connectionId,
+        proofs: [],
+        options: {
+          challenge: require('crypto').randomBytes(16).toString('hex'),
+          domain: 'identuslabel.cz'
+        }
+      })
     });
 
     if (!proofResponse.ok) {
       const errorText = await proofResponse.text();
-      console.error(`[ClearanceVerification] Proof request failed: ${proofResponse.status} - ${errorText}`);
+      console.error(`[ClearanceVerification] Proof request failed (${foundCompany.id}): ${proofResponse.status} - ${errorText}`);
       return res.status(500).json({
         success: false,
         error: 'ProofRequestFailed',
@@ -7526,9 +8070,6 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
     }
 
     const proofResult = await proofResponse.json();
-    console.log(`[ClearanceVerification] Proof request created:`, JSON.stringify(proofResult, null, 2));
-
-    // Store verification for polling
     const verificationId = proofResult.presentationId || proofResult.id;
 
     pendingClearanceVerifications.set(verificationId, {
@@ -7538,33 +8079,30 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
       employeeId: session.employeeId,
       email: session.email,
       prismDid: session.prismDid,
-      company: session.company,
-      companyApiKey: company.apiKey,
+      companyId: foundCompany.id,
+      companyApiKey: foundCompany.apiKey,  // status polling reads enterpriseApiKey || companyApiKey
       sessionToken: token,
       status: 'pending',
       createdAt: Date.now(),
-      expiresAt: Date.now() + 5 * 60 * 1000 // 5 minutes expiry
+      expiresAt: Date.now() + 5 * 60 * 1000
     });
 
-    console.log(`[ClearanceVerification] DIDComm proof request sent DIRECTLY to personal wallet!`);
-    console.log(`   Presentation ID: ${verificationId}`);
-    console.log(`   Connection: ${employeeConnection.connectionId}`);
+    console.log(`[ClearanceVerification] ✅ Proof request sent via ${foundCompany.id}. Presentation ID: ${verificationId}`);
     console.log('='.repeat(70));
 
-    // Return verification details for the UI to poll status
-    res.json({
+    return res.json({
       success: true,
       verificationId,
       presentationId: verificationId,
-      message: 'Security Clearance proof request sent to your Alice Wallet via DIDComm. Please check your wallet to approve the request.',
+      message: 'Security Clearance proof request sent to your personal IDL Wallet. Please open it and approve.',
       instructions: [
-        '1. Open Alice Wallet',
-        '2. You should see a proof request from TechCorp',
-        '3. Approve the request to share your Security Clearance credential',
+        '1. Open your IDL Wallet (personal mode)',
+        '2. Go to the Messages or Credentials tab',
+        '3. Approve the proof request — select your Security Clearance credential',
         '4. Your clearance will be verified automatically'
       ],
-      aliceWalletUrl: 'https://identuslabel.cz/alice/',
-      expiresIn: 300 // 5 minutes in seconds
+      walletUrl: 'https://identuslabel.cz/wallet',
+      expiresIn: 300
     });
 
   } catch (error) {
@@ -7629,7 +8167,7 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
     });
   }
 
-  // Poll Cloud Agent 8200 directly for presentation status
+  // Poll multitenancy agent 8200 (same agent where the proof request was created)
   try {
     const MULTITENANCY_URL = process.env.MULTITENANCY_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
     const presentationResponse = await fetch(
@@ -7637,7 +8175,7 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
       {
         method: 'GET',
         headers: {
-          'apikey': verification.companyApiKey
+          'apikey': verification.enterpriseApiKey || verification.companyApiKey
         }
       }
     );

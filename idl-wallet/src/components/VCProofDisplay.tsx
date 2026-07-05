@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { InviterIdentity, FIELD_LABELS } from '../types/invitations';
+import { usePhotoDID } from '../hooks/usePhotoDID';
 
 interface VCProofDisplayProps {
   inviterIdentity: InviterIdentity;
@@ -27,6 +28,10 @@ export const VCProofDisplay: React.FC<VCProofDisplayProps> = ({
   const [showRawVC, setShowRawVC] = useState(false);
 
   const { isVerified, vcProof, validationResult, revealedData } = inviterIdentity;
+
+  // Resolve photo at component level (hook must not be inside loop)
+  const rawPhotoValue = revealedData?.photo as string | undefined;
+  const resolvedPhoto = usePhotoDID(rawPhotoValue, revealedData?.uniqueId as string | undefined);
 
   const copyToClipboard = async (text: string, label: string) => {
     try {
@@ -77,16 +82,34 @@ export const VCProofDisplay: React.FC<VCProofDisplayProps> = ({
             Credential Data:
           </p>
           <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-3 space-y-2">
-            {Object.entries(revealedData).map(([field, value]) => (
-              <div key={field} className="flex justify-between items-center">
-                <span className="text-sm font-medium text-slate-400">
-                  • {FIELD_LABELS[field as keyof typeof FIELD_LABELS] || field}:
-                </span>
-                <span className="text-sm text-white font-semibold">
-                  {value}
-                </span>
-              </div>
-            ))}
+            {Object.entries(revealedData).map(([field, value]) => {
+              // Photo field: use pre-resolved URL (handles both DID refs and legacy base64)
+              const isPhotoField = field === 'photo';
+              const imgSrc = isPhotoField ? resolvedPhoto : null;
+              const isImage = imgSrc !== null || (typeof value === 'string' && value.startsWith('data:image/'));
+              const displaySrc = imgSrc || (typeof value === 'string' && value.startsWith('data:image/') ? value : null);
+
+              return (
+                <div key={field} className={`flex ${isImage ? 'flex-col items-start' : 'justify-between items-center'}`}>
+                  <span className="text-sm font-medium text-slate-400">
+                    • {FIELD_LABELS[field as keyof typeof FIELD_LABELS] || field}:
+                  </span>
+                  {displaySrc ? (
+                    <img
+                      src={displaySrc}
+                      alt={field}
+                      className="mt-1 rounded-lg border border-slate-600 object-cover object-top"
+                      style={{ maxWidth: '120px', maxHeight: '160px' }}
+                    />
+                  ) : isPhotoField && !resolvedPhoto ? (
+                    // Photo DID not yet resolved — show placeholder while loading
+                    <span className="text-sm text-slate-400 italic">Loading photo...</span>
+                  ) : (
+                    <span className="text-sm text-white font-semibold">{value as string}</span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

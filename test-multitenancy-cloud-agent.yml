@@ -12,7 +12,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.18.0.0/16
+        - subnet: 172.21.0.0/16
 
 services:
   # PostgreSQL Database - INTERNAL ONLY (NO external port)
@@ -51,7 +51,7 @@ services:
   # Cloud Agent - Multitenancy Enabled
   multitenancy-test-cloud-agent:
     container_name: multitenancy-test-cloud-agent
-    image: hyperledgeridentus/identus-cloud-agent:2.1.0
+    image: identuslabel/identus-cloud-agent:2.1-basicmsg
     environment:
       # SECURITY: Secure admin token (32 chars random)
       ADMIN_TOKEN: "N9TEJXrZlIX4Qg8R1RSlJwC820QZKwXb"

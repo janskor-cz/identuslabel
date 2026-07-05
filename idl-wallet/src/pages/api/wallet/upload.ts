@@ -37,7 +37,7 @@ function saveRegistry(registry: Registry) {
 }
 
 export const config = {
-    api: { bodyParser: { sizeLimit: '10mb' } },
+    api: { bodyParser: { sizeLimit: '50mb' } },
 };
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {

@@ -922,3 +922,56 @@ export const initiateDocumentDownload = createAsyncThunk(
     }
   }
 );
+
+/**
+ * Upload a document to the document service via an enterprise agent DIDComm connection.
+ * Uses the enterprise agent REST API (/connections/{id}/basic-messages) instead of
+ * the personal wallet SDK, so the employee's enterprise identity is the sender.
+ */
+export const sendEnterpriseDocumentUpload = createAsyncThunk(
+  'sendEnterpriseDocumentUpload',
+  async (
+    params: {
+      connectionId: string;
+      title: string;
+      clearanceLevel: string;
+      releasableTo: string[];
+      fileBuffer: ArrayBuffer;
+      filename: string;
+      mimeType: string;
+      publisherDID?: string;
+    },
+    { getState }
+  ) => {
+    const state: any = getState();
+    const config = state.enterpriseAgent?.activeConfiguration;
+    if (!config?.enterpriseAgentUrl || !config?.enterpriseAgentApiKey) {
+      throw new Error('Enterprise agent not configured');
+    }
+
+    const { connectionId, title, clearanceLevel, releasableTo, fileBuffer, filename, mimeType, publisherDID } = params;
+    const requestId = `dup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const base64Data = Buffer.from(fileBuffer).toString('base64');
+
+    const protocolEnvelope = JSON.stringify({
+      type: 'https://identuslabel.cz/protocols/document-upload/1.0/request',
+      id: requestId,
+      body: { title, clearanceLevel, releasableTo, filename, department: null, publisherDID: publisherDID ?? null },
+      attachments: [{ id: 'file', mediaType: mimeType, data: { base64: base64Data } }]
+    });
+
+    const resp = await fetch(
+      `${config.enterpriseAgentUrl}/connections/${connectionId}/basic-messages`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': config.enterpriseAgentApiKey },
+        body: JSON.stringify({ content: protocolEnvelope })
+      }
+    );
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Enterprise upload failed: ${resp.status} ${errText}`);
+    }
+  }
+);

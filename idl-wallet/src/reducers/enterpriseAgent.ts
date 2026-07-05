@@ -22,7 +22,7 @@
 
 import { PayloadAction, createSlice } from "@reduxjs/toolkit";
 import { WalletConfiguration } from "@/utils/serviceConfigManager";
-import { EnterpriseAgentClient } from "@/utils/EnterpriseAgentClient";
+import { EnterpriseAgentClient, ColleagueMessage } from "@/utils/EnterpriseAgentClient";
 
 /**
  * Agent context types
@@ -36,6 +36,13 @@ export interface EnterpriseConnection {
   connectionId: string;
   thid?: string;
   label?: string;
+  goalCode?: string;
+  // The Cloud Agent's AcceptConnectionInvitationRequest schema has no `label` field at all —
+  // only the invitation *creator* (POST /connections) can set one, so an invitee-side connection
+  // record's `label` is always empty. `goal` (a free-text OOB invitation body field, unlike
+  // `label`) *is* transmitted to the invitee and is what these enterprise connections actually
+  // carry a human-readable description in — see EmployeeWalletManager.js's createTechCorpInvitation.
+  goal?: string;
   state: string;
   role: string;
   createdAt: string;
@@ -115,6 +122,10 @@ export interface EnterpriseAgentState {
   // Pending proof requests (presentations needing user approval)
   pendingProofRequests: PresentationRecord[];
 
+  // Colleague messages from enterprise agent (connectionId → messages)
+  colleagueMessages: Record<string, ColleagueMessage[]>;
+  colleagueMessagesLastPoll: number;
+
   // Loading states
   isLoadingConnections: boolean;
   isLoadingCredentials: boolean;
@@ -136,6 +147,8 @@ export const initialEnterpriseAgentState: EnterpriseAgentState = {
   credentials: [],
   dids: [],
   pendingProofRequests: [],
+  colleagueMessages: {},
+  colleagueMessagesLastPoll: 0,
   isLoadingConnections: false,
   isLoadingCredentials: false,
   isLoadingDIDs: false,
@@ -337,6 +350,35 @@ const enterpriseAgentSlice = createSlice({
       state.pendingProofRequests = state.pendingProofRequests.filter(
         req => req.presentationId !== action.payload
       );
+    },
+
+    /**
+     * Append colleague messages (keyed by connectionId)
+     */
+    mergeColleagueMessages: (state, action: PayloadAction<{ connectionId: string; messages: ColleagueMessage[] }>) => {
+      const { connectionId, messages } = action.payload;
+      const existing = state.colleagueMessages[connectionId] || [];
+      const existingIds = new Set(existing.map(m => m.id));
+      const fresh = messages.filter(m => !existingIds.has(m.id));
+      state.colleagueMessages[connectionId] = [...existing, ...fresh].slice(-200);
+      state.colleagueMessagesLastPoll = Date.now();
+    },
+
+    /**
+     * Add a locally sent message to the colleague messages store
+     */
+    addSentColleagueMessage: (state, action: PayloadAction<{ connectionId: string; message: ColleagueMessage }>) => {
+      const { connectionId, message } = action.payload;
+      const existing = state.colleagueMessages[connectionId] || [];
+      state.colleagueMessages[connectionId] = [...existing, message].slice(-200);
+    },
+
+    /**
+     * Clear colleague messages (on logout / config change)
+     */
+    clearColleagueMessages: (state) => {
+      state.colleagueMessages = {};
+      state.colleagueMessagesLastPoll = 0;
     }
   }
 });
@@ -364,7 +406,10 @@ export const {
   removeCredential,
   setPendingProofRequests,
   startLoadingProofRequests,
-  removeProofRequest
+  removeProofRequest,
+  mergeColleagueMessages,
+  addSentColleagueMessage,
+  clearColleagueMessages
 } = enterpriseAgentSlice.actions;
 
 /**
@@ -441,3 +486,22 @@ export const selectEnterpriseDIDs = (state: { enterpriseAgent: EnterpriseAgentSt
  */
 export const selectIsLoadingDIDs = (state: { enterpriseAgent: EnterpriseAgentState }) =>
   state.enterpriseAgent.isLoadingDIDs;
+
+/**
+ * Get colleague messages for a connection
+ */
+export const selectColleagueMessages = (connectionId: string) =>
+  (state: { enterpriseAgent: EnterpriseAgentState }) =>
+    state.enterpriseAgent.colleagueMessages[connectionId] || [];
+
+/**
+ * Get all colleague messages map
+ */
+export const selectAllColleagueMessages = (state: { enterpriseAgent: EnterpriseAgentState }) =>
+  state.enterpriseAgent.colleagueMessages;
+
+/**
+ * Get last poll timestamp
+ */
+export const selectColleagueMessagesLastPoll = (state: { enterpriseAgent: EnterpriseAgentState }) =>
+  state.enterpriseAgent.colleagueMessagesLastPoll;

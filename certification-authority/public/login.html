@@ -484,10 +484,12 @@
                     showSuccess(data.userData, data.connectionId);
 
                     // Store in sessionStorage for portal access
+                    // Note: portal.html reads 'personalInfo' key; write both for compatibility
                     sessionStorage.setItem('ca_auth', JSON.stringify({
                         verificationMethod: 'DIDComm-Present-Proof',
                         sessionId: currentSessionId,
                         userData: data.userData,
+                        personalInfo: data.userData,
                         connectionId: data.connectionId,
                         loginTime: new Date().toISOString()
                     }));

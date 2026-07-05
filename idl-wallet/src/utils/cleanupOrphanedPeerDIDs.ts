@@ -75,10 +75,10 @@ export async function scanOrphanedPeerDIDs(): Promise<OrphanedDIDReport> {
   console.log('🔍 [Cleanup] Scanning for orphaned peer DIDs...');
 
   // Get all DIDs from Pluto
-  const allDIDs = await agent.pluto.getDIDs();
+  const allDIDs = await agent.pluto.getAllPeerDIDs();
 
-  // Filter to peer DIDs only
-  const peerDIDs = allDIDs.filter(did => did.method === 'peer');
+  // getAllPeerDIDs() already returns only peer DIDs as PeerDID objects; extract the .did field
+  const peerDIDs = allDIDs.map((p: any) => p.did || p);
 
   // Get all active connections (DIDPairs)
   const allPairs = await agent.pluto.getAllDidPairs();
@@ -195,8 +195,8 @@ export async function cleanupOrphanedPeerDIDs(dryRun: boolean = false): Promise<
     console.log('🔄 [Cleanup] Updating mediator key list...');
 
     // Get current active DIDs (excluding the ones we just removed)
-    const updatedDIDs = await agent.pluto.getDIDs();
-    const activePeerDIDs = updatedDIDs.filter(did => did.method === 'peer');
+    const updatedDIDs = await agent.pluto.getAllPeerDIDs();
+    const activePeerDIDs = updatedDIDs.map((p: any) => p.did || p);
 
     // Update mediator with only active DIDs
     if (agent.connectionManager && agent.connectionManager.mediationHandler) {

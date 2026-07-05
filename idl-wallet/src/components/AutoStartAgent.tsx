@@ -5,7 +5,7 @@
  * Also initializes enterprise agent if active configuration exists.
  * This component is mounted globally in _app.tsx to ensure auto-start works on all pages.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMountedApp, useAppSelector } from "@/reducers/store";
 import { useDispatch } from "react-redux";
 import { clearConfiguration } from "@/reducers/enterpriseAgent";
@@ -23,6 +23,18 @@ export function AutoStartAgent() {
   // 🔧 FIX #8: Track error state for user-visible feedback
   const [initError, setInitError] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
+
+  // Identifies the ServiceConfiguration credential (if any) by its own uuid, not by the whole
+  // app.credentials array reference — so the effect below only re-runs its (non-idempotent-ish:
+  // re-applies config, refreshes enterprise state, restarts polling) side effects when this
+  // specific credential newly appears or is replaced, not on every unrelated credential arriving
+  // (e.g. a later CISTraining/SecurityClearanceGrant VC) which would otherwise thrash them.
+  const serviceConfigCredentialId = useMemo(() => {
+    const cred = (app.credentials ?? []).find(
+      (c: any) => getCredentialType(c) === 'ServiceConfiguration'
+    );
+    return cred ? (cred.uuid ?? cred.id ?? null) : null;
+  }, [app.credentials]);
 
   // CONFIG LOADING: Derive enterprise configuration from actual credentials in IndexedDB.
   // This replaces the old localStorage-based approach which caused stale configs from
@@ -55,6 +67,43 @@ export function AutoStartAgent() {
                 });
               }, 200);
             });
+
+            // Start enterprise proof/offer polling as soon as a valid ServiceConfiguration VC is
+            // present — reactive (this effect now depends on serviceConfigCredentialId), not a
+            // one-shot check at agent-start. Previously the only check ran once, synchronously
+            // right after startAgent() resolved; if the ServiceConfiguration VC (and the
+            // enterprise connection it enables) arrived *after* that check — the normal case
+            // during onboarding, since the wallet tab is typically already open and running —
+            // polling never started for the rest of the session. Any present-proof request the
+            // enterprise agent then sent sat unpolled in RequestReceived until it timed out
+            // server-side, and required a hard refresh (which re-ran this check with the VC
+            // already loaded) to recover.
+            //
+            // Guard is checked again *inside* the resolved import callback, not just before
+            // starting it: `import()` of an already-loaded module still resolves as a microtask,
+            // so two effect runs in quick succession (e.g. two credentials arriving back to back)
+            // could otherwise both pass the outer check before either had assigned the interval,
+            // leaking one. Since a resolved .then() callback runs to completion without
+            // interleaving, re-checking here makes "has an interval already been started"
+            // effectively atomic.
+            if (!(window as any).__enterprisePollingInterval) {
+              import('@/actions/enterpriseAgentActions').then(({
+                pollPendingProofRequests,
+                pollPendingCredentialOffers
+              }) => {
+                if ((window as any).__enterprisePollingInterval) return;
+
+                app.dispatch(pollPendingProofRequests());
+                app.dispatch(pollPendingCredentialOffers());
+
+                const pollingInterval = setInterval(() => {
+                  app.dispatch(pollPendingProofRequests());
+                  app.dispatch(pollPendingCredentialOffers());
+                }, 10000);
+
+                (window as any).__enterprisePollingInterval = pollingInterval;
+              });
+            }
           } else {
             console.warn('⚠️ [AutoStartAgent] ServiceConfiguration VC invalid:', validation.errors);
             clearActiveConfiguration();
@@ -74,13 +123,16 @@ export function AutoStartAgent() {
       console.error('⚠️ [AutoStartAgent] Error deriving enterprise configuration from credentials:', error);
     }
 
-    // Cleanup polling intervals on unmount
+    // Cleanup on unmount AND before every re-run (e.g. when app.credentials changes again) —
+    // paired with the `!(window as any).__enterprisePollingInterval` guard above, this makes
+    // restarting the interval on each re-run idempotent rather than stacking intervals.
     return () => {
       if ((window as any).__enterprisePollingInterval) {
         clearInterval((window as any).__enterprisePollingInterval);
+        (window as any).__enterprisePollingInterval = null;
       }
     };
-  }, [app.agent.hasStarted]); // Run once when wallet starts
+  }, [app.agent.hasStarted, serviceConfigCredentialId]); // Re-run when the ServiceConfiguration VC itself appears/changes, not on every unrelated credential
 
   // Initialize agent when database connects
   useEffect(() => {
@@ -108,39 +160,16 @@ export function AutoStartAgent() {
         .then(() => {
           setStartError(null); // Clear any previous errors
 
-          // ✅ START ENTERPRISE POLLING: Now that agent is connected and credentials are loaded
-          // Check credentials directly — config is derived from VCs, not localStorage.
-          // enterpriseAgent.activeConfiguration is not yet set at this point (config effect
-          // runs after hasStarted, which is the same tick), so check credentials instead.
-          const hasServiceConfig = (app.credentials ?? []).some(
-            (cred: any) => getCredentialType(cred) === 'ServiceConfiguration'
-          );
-          if (hasServiceConfig) {
-            // Import all polling actions
-            import('@/actions/enterpriseAgentActions').then(({
-              pollPendingProofRequests,
-              pollPendingCredentialOffers
-            }) => {
-              // Initial polls immediately
-              app.dispatch(pollPendingProofRequests());
-              app.dispatch(pollPendingCredentialOffers());
-
-              // Then poll every 10 seconds (2x slower than before)
-              const pollingInterval = setInterval(() => {
-                app.dispatch(pollPendingProofRequests());
-                app.dispatch(pollPendingCredentialOffers());
-              }, 10000);
-
-              // Store interval ID for cleanup
-              (window as any).__enterprisePollingInterval = pollingInterval;
-            });
-
-            // CredentialOfferModal (mounted globally in _app.tsx) handles DIDComm
-            // offer-credential messages and presents them to the user for manual acceptance.
-            // DO NOT auto-accept here — blind auto-acceptance of all offers causes
-            // repeated concurrent IndexedDB writes (one new PRISM DID per offer per cycle)
-            // that corrupt the credential store.
-          }
+          // Enterprise proof/credential-offer polling is started by the config-derivation effect
+          // above, which reacts to serviceConfigCredentialId (not just this one-time hasStarted
+          // flip) — it fires here too, since hasStarted flipping true re-runs that effect on the
+          // same tick, and again later if a ServiceConfiguration VC arrives mid-session.
+          //
+          // CredentialOfferModal (mounted globally in _app.tsx) handles DIDComm
+          // offer-credential messages and presents them to the user for manual acceptance.
+          // DO NOT auto-accept here — blind auto-acceptance of all offers causes
+          // repeated concurrent IndexedDB writes (one new PRISM DID per offer per cycle)
+          // that corrupt the credential store.
         })
         .catch((error) => {
           const errorMessage = error instanceof Error ? error.message : 'Unknown start error';

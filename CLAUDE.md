@@ -229,46 +229,72 @@ Current issuers baking this in:
 
 **CA access is NOT via serviceUrl** — use the DIDComm Access Request protocol instead (see below).
 
-### DIDComm Access Request Protocol
-CA-protected pages are accessed via DIDComm, not URL links in VCs.
+### DIDComm Access Request Protocol (`service-access/1.0`)
+CA-protected pages (and the company-admin employee portal, and document-service document access)
+are accessed via one shared DIDComm protocol, not URL links in VCs. Full spec:
+`packages/service-access-didcomm/PROTOCOL.md`.
+
+This replaced three independent, hand-duplicated implementations (CA's and company-admin's own
+copy-pasted `DIDCommCommandService.js`, and document-service's separate `document-access/1.0`)
+that had drifted apart — most notably, CA/company-admin trusted Cloud Agent's internal
+`PresentationVerified` state alone with no independent signature/issuer check, and the wallet's
+trust decision was a cached flag derived from a mutable, locally-editable connection display
+name rather than the sender's actual DID. All three services now share one library
+(`packages/service-access-didcomm`) with real ES256K verification, a fail-closed DID-keyed trust
+registry, and declarative claim extraction.
 
 **To request access** (from Connections tab or Chat header):
-1. User clicks **🔓 Request Access** → selects a target from dropdown
+1. User clicks **🔓 Request Access** → selects a capability from dropdown
 2. Wallet sends JSON envelope over DIDComm BasicMessage:
    ```json
-   { "type": "https://identuslabel.cz/protocols/access-request/1.0/request",
-     "id": "ar-...", "body": { "target": "security-clearance" } }
+   { "type": "https://identuslabel.cz/protocols/service-access/1.0/request",
+     "id": "ar-...", "body": { "capability": "security-clearance" } }
    ```
-3. CA sends a VP proof request; user approves in wallet
-4. CA verifies → sends grant envelope:
+3. Service sends a VP proof request; user approves in wallet
+4. Service verifies (signature + fail-closed trust registry) → sends grant envelope:
    ```json
-   { "type": "https://identuslabel.cz/protocols/access-request/1.0/grant",
-     "body": { "accessUrl": "https://.../ca/api/access?token=UUID", "label": "...", ... } }
+   { "type": "https://identuslabel.cz/protocols/service-access/1.0/grant", "thid": "ar-...",
+     "body": { "capability": "...", "mode": "redirect", "accessUrl": "https://.../api/access?token=UUID", "label": "...", ... } }
    ```
-5. `GlobalGrantWatcher` in `_app.tsx` detects the grant → auto-opens `CAPortalModal` iFrame
+   (`mode: "payload"` capabilities — e.g. document-access — carry capability-specific data in
+   `body.result` instead of `accessUrl`.)
+5. `GlobalGrantWatcher` in `idl-wallet/src/pages/_app.tsx` detects the grant, checks the
+   **sender's actual DID** against `idl-wallet/src/config/serviceTrust.ts` /
+   per-connection `capabilities` (see `connectionMetadata.ts`), and auto-opens `CAPortalModal`
+   iFrame for `mode: redirect` grants.
 
-**Adding a new CA target** — two places only:
-1. `certification-authority/server.js` — add entry to `targets` object in `DIDCommCommandService` config:
+**Adding a new capability** — two places:
+1. The service's own `server.js` (or equivalent) — add an entry to the `capabilities` object
+   passed to `new ServiceAccessService({...})` (see `certification-authority/server.js` or
+   `company-admin-portal/server.js` for examples):
    ```javascript
-   'my-target': { label: 'My Page', icon: '📄', redirectPath: '/ca/my-page',
-     proofSpec: { proofTypes: [{ schema: '...', requiredFields: [...] }], ... } }
+   'my-capability': { label: 'My Page', icon: '📄', mode: 'redirect', redirectPath: '/ca/my-page',
+     trustedIssuerVcType: 'RealPerson',
+     proofSpec: { proofs: [{ schemaId: '...', trustIssuers: [] }], goalCode: '...', goal: '...', claims: {} } }
    ```
-2. `idl-wallet/src/components/Chat.tsx` — add to `ACCESS_TARGETS` array:
-   ```typescript
-   { key: 'my-target', label: 'My Page', icon: '📄' }
-   ```
-   (Also add to `ACCESS_TARGETS` in `connections.tsx`)
+2. The wallet needs a `TrustedServiceEntry` in `idl-wallet/src/config/serviceTrust.ts` (or a
+   `capabilities` entry written to `ConnectionMetadata` at connection-establishment time) naming
+   this capability under the service's DID — see `serviceTrust.ts`'s doc comment for the two-tier
+   model (deployment-pinned vs. per-connection).
 
 **Key files:**
-- `certification-authority/lib/DIDCommCommandService.js` — standalone reusable service; copy to any Express server
-- `company-admin-portal/lib/DIDCommCommandService.js` — extended copy with `consumeGrant()` for HTTP polling
-- `idl-wallet/src/pages/_app.tsx` → `GlobalGrantWatcher` — auto-opens portal on grant
+- `packages/service-access-didcomm/` — shared library (all three services depend on it via
+  a `file:` dependency); `PROTOCOL.md` is the spec.
+- `idl-wallet/src/pages/_app.tsx` → `GlobalGrantWatcher` — auto-opens portal on trusted grant
+- `idl-wallet/src/utils/serviceAccessGrant.ts` — grant parsing + DID-keyed trust check, shared
+  by `_app.tsx`, `Chat.tsx`, and `DocumentAccessRequestor.tsx`
+- `idl-wallet/src/config/serviceTrust.ts` — wallet-side trust anchors
 - `idl-wallet/src/utils/CAPortalContext.tsx` → `pendingAccessRequest` — drives login status modal
 - `idl-wallet/src/components/AccessRequestStatusModal.tsx` — login-in-progress UI
 
 ### Enterprise Employee Portal Login
 
-The employee portal uses the same DIDComm access-request protocol but goes through the **enterprise agent** channel (not personal wallet). The `DIDCommCommandService._extractClaims` method reads **all VCs** from the VP — not just the first — and returns:
+The employee portal uses the same `service-access/1.0` protocol but goes through the **enterprise
+agent** channel (not personal wallet) — its grant is delivered via both a DIDComm message and an
+HTTP-pollable transport (`GET /api/enterprise-portal/grant-status`, backed by
+`ServiceAccessService.consumeGrant`), since the wallet's own SDK-managed DIDComm inbox can't
+observe messages on an enterprise-agent-managed connection. The shared library's
+`ClaimExtractor` reads **all VCs** from the VP — not just the first — and returns:
 
 ```javascript
 { email, role, department, prismDid,        // always present (EmployeeRole)

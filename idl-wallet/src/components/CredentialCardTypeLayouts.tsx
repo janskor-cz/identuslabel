@@ -12,6 +12,7 @@
 import React from 'react';
 import { ShieldCheckIcon, CameraIcon } from '@heroicons/react/solid';
 import { getClearanceBadgeClasses, getCredentialType, getCredentialSubject, getEnterpriseAttr } from '@/utils/credentialTypeDetector';
+import { usePhotoDID } from '../hooks/usePhotoDID';
 import { useCAPortal } from '@/utils/CAPortalContext';
 
 interface CredentialLayoutProps {
@@ -26,7 +27,6 @@ interface CredentialLayoutProps {
  * - Right: Personal details (name, DOB, gender, unique ID, dates)
  */
 export function IDCardLayout({ credential }: CredentialLayoutProps) {
-  const { openCAPortal } = useCAPortal();
   // Use helper to handle all credential formats (including SDK JWTCredential with properties Map)
   const subject = getCredentialSubject(credential);
 
@@ -37,6 +37,9 @@ export function IDCardLayout({ credential }: CredentialLayoutProps) {
   const uniqueId = subject?.uniqueId || 'N/A';
   const issuedDate = subject?.issuedDate || credential.issuanceDate || 'N/A';
   const expiryDate = subject?.expiryDate || credential.expirationDate || 'N/A';
+  const photoValue = subject?.photo || null;
+  const photo = usePhotoDID(photoValue, uniqueId !== 'N/A' ? uniqueId : undefined);
+  const photoIsDid = typeof photoValue === 'string' && photoValue.startsWith('did:');
 
   // Format dates
   const formatDate = (dateStr: string) => {
@@ -52,10 +55,23 @@ export function IDCardLayout({ credential }: CredentialLayoutProps) {
   return (
     <div className="bg-gradient-to-r from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 rounded-xl p-3">
       <div className="flex gap-3">
-        {/* Photo Placeholder */}
-        <div className="flex-shrink-0 w-14 h-18 border-2 border-cyan-500/30 rounded-lg flex flex-col items-center justify-center bg-slate-800/50 px-2 py-3">
-          <CameraIcon className="w-6 h-6 text-cyan-400 opacity-50" />
-          <div className="text-xs mt-1 text-slate-500">Photo</div>
+        {/* Photo — fixed 3:4 portrait aspect ratio (standard ID photo) */}
+        <div className="flex-shrink-0 border-2 border-cyan-500/30 rounded-lg overflow-hidden bg-slate-800/50"
+             style={{ width: '64px', height: '86px' }}>
+          {photo ? (
+            <img src={photo} alt="ID Photo"
+                 className="w-full h-full object-cover object-top" />
+          ) : photoIsDid ? (
+            <div className="flex flex-col items-center justify-center w-full h-full">
+              <CameraIcon className="w-6 h-6 text-amber-400 opacity-70" />
+              <div className="text-slate-400" style={{fontSize:'9px', textAlign:'center', padding:'2px'}}>DID<br/>linked</div>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center w-full h-full">
+              <CameraIcon className="w-6 h-6 text-cyan-400 opacity-50" />
+              <div className="text-xs mt-1 text-slate-500">Photo</div>
+            </div>
+          )}
         </div>
 
         {/* Personal Details */}
@@ -83,16 +99,6 @@ export function IDCardLayout({ credential }: CredentialLayoutProps) {
             <div><span className="text-cyan-400">Exp </span><span className="text-slate-300">{formatDate(expiryDate)}</span></div>
           </div>
 
-          {uniqueId !== 'N/A' && (
-            <div className="mt-1">
-              <button
-                onClick={() => openCAPortal(`https://identuslabel.cz/ca/login?uid=${encodeURIComponent(uniqueId)}`)}
-                className="inline-flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300 underline underline-offset-2"
-              >
-                🔐 CA Portal
-              </button>
-            </div>
-          )}
         </div>
       </div>
     </div>

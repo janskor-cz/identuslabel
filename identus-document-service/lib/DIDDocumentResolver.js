@@ -158,13 +158,17 @@ async function resolveDocumentDID(documentDID) {
   };
 }
 
-/** Extract a plain URL string from whatever shape the serviceEndpoint arrives in. */
+/** Extract a plain URL string from whatever shape the serviceEndpoint arrives in.
+ * Only https:// URLs are accepted — rejects javascript:, file:, and internal http:// to prevent SSRF. */
 function _unwrapEndpoint(ep) {
   if (!ep) return null;
-  if (typeof ep === 'string') return ep;
-  if (Array.isArray(ep))     return ep[0] || null;
-  if (typeof ep === 'object' && ep.uri) return ep.uri;
-  return null;
+  let url = null;
+  if (typeof ep === 'string') url = ep;
+  else if (Array.isArray(ep)) url = ep[0] || null;
+  else if (typeof ep === 'object' && ep.uri) url = ep.uri;
+  if (!url || typeof url !== 'string') return null;
+  if (!url.startsWith('https://')) return null;
+  return url;
 }
 
 /**

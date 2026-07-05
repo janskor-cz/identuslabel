@@ -9,7 +9,7 @@
  * Purpose: Support grouped credential display with type-specific layouts
  */
 
-export type CredentialType = 'RealPersonIdentity' | 'SecurityClearance' | 'ServiceConfiguration' | 'EmployeeRole' | 'CISTrainingCertificate' | 'DocumentCopy' | 'CertificationAuthorityIdentity' | 'CompanyIdentity' | 'DocumentMetadata' | 'Unknown';
+export type CredentialType = 'RealPersonIdentity' | 'SecurityClearance' | 'SecurityClearanceGrant' | 'ServiceConfiguration' | 'EmployeeRole' | 'CISTrainingCertificate' | 'DocumentCopy' | 'CertificationAuthorityIdentity' | 'CompanyIdentity' | 'DocumentMetadata' | 'Unknown';
 export type ClearanceLevel = 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED' | 'SECRET';
 export type ClearanceColor = 'green' | 'blue' | 'orange' | 'red' | 'gray';
 
@@ -149,6 +149,7 @@ export function getCredentialType(credential: any): CredentialType {
     console.log('[getCredentialType] Detected type:', propsType);
     if (propsType === 'RealPersonIdentity') return 'RealPersonIdentity';
     if (propsType === 'SecurityClearance') return 'SecurityClearance';
+    if (propsType === 'SecurityClearanceGrant') return 'SecurityClearanceGrant';
     if (propsType === 'ServiceConfiguration') return 'ServiceConfiguration';
     if (propsType === 'EmployeeRole') return 'EmployeeRole';
     if (propsType === 'CISTrainingCertificate') return 'CISTrainingCertificate';
@@ -162,6 +163,7 @@ export function getCredentialType(credential: any): CredentialType {
   const subjectType = credential.credentialSubject?.credentialType;
   if (subjectType === 'RealPersonIdentity') return 'RealPersonIdentity';
   if (subjectType === 'SecurityClearance') return 'SecurityClearance';
+  if (subjectType === 'SecurityClearanceGrant') return 'SecurityClearanceGrant';
   if (subjectType === 'ServiceConfiguration') return 'ServiceConfiguration';
   if (subjectType === 'EmployeeRole') return 'EmployeeRole';
   if (subjectType === 'CISTrainingCertificate') return 'CISTrainingCertificate';
@@ -173,6 +175,7 @@ export function getCredentialType(credential: any): CredentialType {
   const claimsType = credential.claims?.[0]?.credentialType;
   if (claimsType === 'RealPersonIdentity') return 'RealPersonIdentity';
   if (claimsType === 'SecurityClearance') return 'SecurityClearance';
+  if (claimsType === 'SecurityClearanceGrant') return 'SecurityClearanceGrant';
   if (claimsType === 'ServiceConfiguration') return 'ServiceConfiguration';
   if (claimsType === 'EmployeeRole') return 'EmployeeRole';
   if (claimsType === 'CISTrainingCertificate') return 'CISTrainingCertificate';
@@ -184,6 +187,7 @@ export function getCredentialType(credential: any): CredentialType {
   const vcType = credential.vc?.credentialSubject?.credentialType;
   if (vcType === 'RealPersonIdentity') return 'RealPersonIdentity';
   if (vcType === 'SecurityClearance') return 'SecurityClearance';
+  if (vcType === 'SecurityClearanceGrant') return 'SecurityClearanceGrant';
   if (vcType === 'ServiceConfiguration') return 'ServiceConfiguration';
   if (vcType === 'EmployeeRole') return 'EmployeeRole';
   if (vcType === 'CISTrainingCertificate') return 'CISTrainingCertificate';
@@ -207,6 +211,11 @@ export function getCredentialType(credential: any): CredentialType {
   // Use the already-extracted subject from getCredentialSubject() above
   if (subject?.enterpriseAgentUrl && subject?.enterpriseAgentApiKey) {
     return 'ServiceConfiguration';
+  }
+
+  // Detect SecurityClearanceGrant by field signature (clearanceLevel + holderDID + grantedAt)
+  if (subject?.clearanceLevel && subject?.holderDID && subject?.grantedAt) {
+    return 'SecurityClearanceGrant';
   }
 
   // Detect EmployeeRole by field signature (employeeId + email + role + department)

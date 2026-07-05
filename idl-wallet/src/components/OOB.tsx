@@ -22,6 +22,7 @@ import { parseCompanyCredentialFromInvitation, validateCompanyCredential, Valida
 import { isCAVerified, getPinnedCA, pinCA, verifyPinnedCA, hashCredential, isCompanyVerified, getPinnedCompany, pinCompany, verifyPinnedCompany } from '@/utils/prefixedStorage';
 import { getCloudWalletConfig, verifyServiceConfigNotRevoked, CloudWalletConfig, isCloudWalletConfigValid, getCloudWalletErrorMessage } from '@/utils/cloudWalletConfig';
 import { saveConnectionMetadata, getConnectionMetadata } from '@/utils/connectionMetadata';
+import { CA_CAPABILITIES } from '@/config/serviceTrust';
 import { EnterpriseAgentClient } from '@/utils/EnterpriseAgentClient';
 import { createLongFormPrismDID, refreshCredentials } from '@/actions';
 import QRCode from 'react-qr-code';
@@ -154,6 +155,8 @@ export const OOB: React.FC<OOBProps> = (props) => {
     // ✅ BUG FIX 3: Connection acceptance tracking flag
     // Prevents modal from reopening during connection acceptance process
     const [isAcceptingConnection, setIsAcceptingConnection] = useState<boolean>(false);
+
+    const [connectedName, setConnectedName] = useState<string | null>(null);
 
     // ✅ BUG FIX 4: Ref to track processed connection identifiers (prevents duplicates from 4x event firing)
     const processedConnectionsRef = useRef<Set<string>>(new Set());
@@ -504,8 +507,8 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     });
                 }
 
-                // Use RFC 0434 compliant field name (with safe underscore instead of tilde)
-                cleanInvitation.requests_attach = requestsAttach;
+                // DIDComm v2 OOB uses 'attachments'; 'requests_attach' is AIP 1.0 only
+                cleanInvitation.attachments = requestsAttach;
             }
 
             // Serialize the clean object to JSON
@@ -958,7 +961,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
                 const response = await client.acceptInvitation(
                     oob,
-                    alias || 'Enterprise Connection'
+                    alias || inviterLabel || 'Enterprise Connection'
                 );
 
                 if (response.success && response.data) {
@@ -971,9 +974,10 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     setParsedInvitationData(null);
                     setInviterIdentity(null);
                     setInviterLabel('');
+                    setHasVCRequest(false);
+                    setShowPreviewModal(false);
+                    setConnectedName(alias || inviterLabel || 'Enterprise Connection');
                     setIsAcceptingConnection(false);
-
-                    alert('✅ Enterprise connection created successfully!');
                     return;
                 } else {
                     throw new Error(response.error || 'Failed to accept enterprise invitation');
@@ -1004,8 +1008,6 @@ export const OOB: React.FC<OOBProps> = (props) => {
                 console.log('ℹ️ [RESPONSE] No credential selected for response');
             }
 
-            // Close preview modal if open
-            setShowPreviewModal(false);
             // Parse the invitation format (handles both raw peer DIDs and proper invitations)
             const invitation = parseProperDIDCommInvitation(oob);
             console.log("✅ Parsed invitation:", invitation);
@@ -1062,14 +1064,13 @@ export const OOB: React.FC<OOBProps> = (props) => {
                 }
             }
 
-            // ✅ PHASE 3: Mark connection request as sent
+            // ✅ PHASE 3: Mark connection request as sent (placeholder DID — actual peer DID assigned in type handler below)
             if (invitationId) {
                 try {
-                    const from = await agent.createNewPeerDID([], true);
                     const success = await invitationStateManager.markRequestSent(
                         app.wallet.walletId,
                         invitationId,
-                        from.toString()
+                        'pending'
                     );
                     if (success) {
                         console.log('✅ [INVITATION STATE] Marked invitation as ConnectionRequestSent:', invitationId);
@@ -1132,9 +1133,11 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
                         saveConnectionMetadata(from.toString(), {
                             walletType: 'local',
-                            prismDid: createdPrismDid,  // Include PRISM DID if created
+                            prismDid: createdPrismDid,
                             establishedWithVCProof: !!inviterIdentity?.vcProof,
-                            vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined
+                            vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
+                            isCAConnection: isCAInvitation || undefined,
+                            capabilities: isCAInvitation ? CA_CAPABILITIES : undefined
                         });
                         console.log('✅ [METADATA] Saved local wallet metadata for accepted connection (peer-DID path)');
                         if (createdPrismDid) {
@@ -1147,7 +1150,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
                             enterpriseAgentUrl: cloudConfig.enterpriseAgentUrl,
                             enterpriseAgentApiKey: cloudConfig.enterpriseAgentApiKey,
                             establishedWithVCProof: !!inviterIdentity?.vcProof,
-                            vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined
+                            vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
+                            isCAConnection: isCAInvitation || undefined,
+                            capabilities: isCAInvitation ? CA_CAPABILITIES : undefined
                         });
                         console.log('✅ [METADATA] Saved cloud wallet metadata for accepted connection (peer-DID path)');
                     }
@@ -1194,6 +1199,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     setParsedInvitationData(null);
                     setInviterIdentity(null);
                     setInviterLabel('');
+                    setHasVCRequest(false);
+                    setShowPreviewModal(false);
+                    setConnectedName(connectionLabel);
                 } catch (error) {
                     if (error.message?.includes('already exists')) {
                         console.log("ℹ️ Connection already exists, skipping duplicate storage");
@@ -1224,6 +1232,16 @@ export const OOB: React.FC<OOBProps> = (props) => {
                             app.dispatch({ type: 'Connection/success', payload: connection });
                             console.log('✅ [LAYER 2] Connection added to Redux state:', connection.name);
 
+                            // LAYER 2.5: Register peer DID with mediator so incoming messages are routable
+                            try {
+                                if (agent.connectionManager?.mediationHandler && connection.host) {
+                                    await agent.connectionManager.mediationHandler.updateKeyListWithDIDs([connection.host]);
+                                    console.log('✅ [MEDIATOR] Peer DID registered with mediator keylist:', connection.host.toString().substring(0, 40) + '...');
+                                }
+                            } catch (mediatorError) {
+                                console.warn('⚠️ [MEDIATOR] Failed to register peer DID with mediator (incoming messages may not route):', mediatorError);
+                            }
+
                             // LAYER 3: Save connection metadata (with PRISM DID for local wallet)
                             if (walletType === 'local') {
                                 // 🆕 Create PRISM DID with X25519 for this connection (enables Security Clearance)
@@ -1248,9 +1266,11 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
                                 saveConnectionMetadata(connection.host.toString(), {
                                     walletType: 'local',
-                                    prismDid: createdPrismDid,  // Include PRISM DID if created
+                                    prismDid: createdPrismDid,
                                     establishedWithVCProof: !!inviterIdentity?.vcProof,
-                                    vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined
+                                    vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
+                                    isCAConnection: isCAInvitation || undefined,
+                            capabilities: isCAInvitation ? CA_CAPABILITIES : undefined
                                 });
                                 console.log('✅ [METADATA] Saved local wallet metadata for accepted connection (Cloud Agent path)');
                                 if (createdPrismDid) {
@@ -1263,7 +1283,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     enterpriseAgentUrl: cloudConfig.enterpriseAgentUrl,
                                     enterpriseAgentApiKey: cloudConfig.enterpriseAgentApiKey,
                                     establishedWithVCProof: !!inviterIdentity?.vcProof,
-                                    vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined
+                                    vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
+                                    isCAConnection: isCAInvitation || undefined,
+                            capabilities: isCAInvitation ? CA_CAPABILITIES : undefined
                                 });
                                 console.log('✅ [METADATA] Saved cloud wallet metadata for accepted connection (Cloud Agent path)');
                             }
@@ -1379,6 +1401,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
                             setParsedInvitationData(null);
                             setInviterIdentity(null);
                             setInviterLabel('');
+                            setHasVCRequest(false);
+                            setShowPreviewModal(false);
+                            setConnectedName(connectionLabel);
                         } catch (error) {
                             if (error.message?.includes('already exists')) {
                                 console.log("ℹ️ [CLOUD AGENT] Connection already exists");
@@ -1419,78 +1444,110 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     }));
                 }
 
-                // ✅ FIX: Manual connection request with VC attachment
+                // Step 1: always accept via SDK — it creates the peer DID, registers it with the
+                // mediator, sends the connection-request, and stores the DIDPair internally.
+                // Trying to call agent.sendMessage() with a freshly-created peer DID before this
+                // step causes a mediator 500 because the DID is not yet known to the mediator.
                 try {
-                    // Create invitee's peer DID for this connection (true = update mediator keylist for message routing)
-                    // NOTE: This DID is only used in the VC-proof branch. In the no-VC branch, acceptInvitation()
-                    // creates its own internal peer DID — we must NOT also call addConnection() with this DID.
-                    const inviteePeerDID = await agent.createNewPeerDID([], true);
-                    const inviterDID = SDK.Domain.DID.fromString(rfc0434Invitation.from);
+                    console.log('🔗 [RFC 0434] Accepting invitation via SDK...');
 
-                    console.log("🔑 [RFC 0434] Invitee's DID:", inviteePeerDID.toString());
-                    console.log("🔑 [RFC 0434] Inviter's DID:", inviterDID.toString());
+                    const parsedInvitation = await agent.parseInvitation(oob);
 
-                    // Track whether the SDK handled connection storage internally
-                    let sdkHandledStorage = false;
+                    // SDK's HandleOOBInvitation deserializes the first attachment as a DIDComm
+                    // message via Message.fromJson(). Our VC proof { jwt, disclosedFields, proofLevel }
+                    // has no 'body' field → InvalidMessageError("undefined or wrong body").
+                    // Clear attachments on the parsed object so the SDK takes the no-attachment
+                    // handshake path and sends a proper connection-request to the inviter.
+                    // The VC proof is sent as a follow-up DIDComm message below after connection.
+                    if ((parsedInvitation as any).attachments?.length > 0) {
+                        console.log(`🔧 [RFC 0434] Stripped ${(parsedInvitation as any).attachments.length} attachment(s) from parsed invitation for SDK compatibility`);
+                        (parsedInvitation as any).attachments = [];
+                    }
+                    const inviterDIDStr = rfc0434Invitation.from;
 
-                    // ✅ NEW: Create connection request with VC proof attachment if selected
-                    if (vcProofData) {
-                        console.log('📤 [RESPONSE] Creating connection request WITH VC proof attachment...');
+                    // Snapshot all peer DIDs before acceptInvitation using getAllPeerDIDs().
+                    // We diff against this to find the exact new peer DID created by acceptInvitation.
+                    // The SDK's HandleOOBInvitation creates the DIDPair immediately (no inviter
+                    // response needed), so getAllDidPairs() will show it quickly after the call.
+                    // getAllPeerDIDs() is checked first as it's available even before the pair is stored.
+                    const peerDIDsBeforeSet = new Set(
+                        (await agent.pluto.getAllPeerDIDs()).map((p: any) => (p.did || p).toString())
+                    );
 
-                        // Create connection request body with VC proof in requests_attach
-                        const connectionRequestBody = {
-                            goal_code: "connect-with-credential",
-                            goal: "Connect and share my credential",
-                            accept: ["didcomm/v2"],
-                            requests_attach: [{
-                                "@id": "vc-proof-response",
-                                "mime-type": "application/json",
-                                "data": {
-                                    "json": vcProofData
-                                }
-                            }]
-                        };
+                    await agent.acceptInvitation(parsedInvitation, connectionLabel);
+                    console.log('✅ [RFC 0434] SDK accepted invitation (SDK handles peer-DID + mediator + storage)');
 
-                        // Create DIDComm connection request message with attachment
-                        const connectionRequestMessage = new SDK.Domain.Message(
-                            JSON.stringify(connectionRequestBody),
-                            undefined, // id - let SDK generate
-                            "https://didcomm.org/didexchange/1.0/request",
-                            inviteePeerDID, // from (invitee)
-                            inviterDID, // to (inviter)
-                            [], // attachments (empty - we put them in body)
-                            rfc0434Invitation.id // thid - thread ID from invitation
-                        );
+                    // Verify mediator registration for the new peer DID.
+                    // The SDK's acceptInvitation handles keylist registration internally.
+                    // We do a MongoDB check-and-repair as a safety net for the cases where
+                    // the Identus mediator's ZIO fiber fails to persist the write.
+                    try {
+                        let newPeerDID: SDK.Domain.DID | undefined;
+                        for (let i = 0; i < 10; i++) {
+                            await new Promise(r => setTimeout(r, 500));
+                            const allPeerDIDs = await agent.pluto.getAllPeerDIDs();
+                            const found = allPeerDIDs.find(
+                                (p: any) => !peerDIDsBeforeSet.has((p.did || p).toString())
+                            );
+                            if (found) { newPeerDID = (found as any).did || found; break; }
+                        }
 
-                        await agent.sendMessage(connectionRequestMessage);
-                        console.log('✅ [RESPONSE] Connection request with VC proof sent successfully');
-                    } else {
-                        console.log('ℹ️ [RESPONSE] No VC selected - using standard SDK acceptance');
-                        // No VC proof - use standard SDK method.
-                        // acceptInvitation() creates its own internal peer DID and calls addConnection() internally.
-                        // We must NOT call addConnection() again after this — it would create a duplicate connection
-                        // with the orphaned inviteePeerDID that was created above but never used in this path.
-                        const parsedInvitation = await agent.parseInvitation(oob);
-                        await agent.acceptInvitation(parsedInvitation, connectionLabel);
-                        console.log("✅ [RFC 0434] Standard connection request sent (SDK handles storage)");
-                        sdkHandledStorage = true;
+                        if (newPeerDID) {
+                            const peerDidStr = newPeerDID.toString();
+                            // Collect all OTHER known peer DIDs so the API can find the right account
+                            const allPeerDIDs = await agent.pluto.getAllPeerDIDs();
+                            const existingPeerDids = allPeerDIDs
+                                .map((p: any) => (p.did || p).toString())
+                                .filter((d: string) => d !== peerDidStr);
+
+                            const dbResp = await fetch('/wallet/api/mediator/register-peer-did', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ peerDid: peerDidStr, existingPeerDids }),
+                            });
+                            const dbData = await dbResp.json();
+                            if (dbData.alreadyRegistered) {
+                                console.log('✅ [MEDIATOR] Peer DID already registered by SDK:', peerDidStr.substring(0, 50) + '...');
+                            } else if (dbData.success) {
+                                console.log('✅ [MEDIATOR-DB] Peer DID written to mediator (account:', dbData.accountDid?.substring(0, 40) + '...)');
+                            } else {
+                                console.warn('⚠️ [MEDIATOR-DB] Registration check failed:', dbData.error);
+                            }
+                        }
+                    } catch (mediatorError) {
+                        console.warn('⚠️ [MEDIATOR] Registration check error:', mediatorError);
                     }
 
-                    if (!sdkHandledStorage) {
-                        // VC-proof path: SDK did NOT store the connection — we must do it manually
-                        const didPair = new SDK.Domain.DIDPair(inviteePeerDID, inviterDID, connectionLabel);
+                    // Step 2: if the user also selected a VC to share back, send it as a follow-up
+                    // BasicMessage once the DIDPair has been persisted by the SDK (up to ~10 s).
+                    if (vcProofData) {
+                        console.log('📤 [RESPONSE] VC proof selected — waiting for connection then sending...');
+                        let ourConnection: SDK.Domain.DIDPair | undefined;
+                        for (let attempt = 0; attempt < 10; attempt++) {
+                            await new Promise(r => setTimeout(r, 1000));
+                            const allConns = await agent.pluto.getAllDidPairs();
+                            ourConnection = allConns.find(p => p.receiver.toString() === inviterDIDStr);
+                            if (ourConnection) break;
+                            console.log(`🔄 [RESPONSE] Waiting for connection... attempt ${attempt + 1}/10`);
+                        }
 
-                        // LAYER 1: Database Write
-                        await agent.connectionManager.addConnection(didPair);
-                        console.log('✅ [LAYER 1] Connection stored to IndexedDB:', didPair.name);
-
-                        // LAYER 2: State Update
-                        // Note: addConnection() already emits ListenerKey.CONNECTION which updates Redux via event listener.
-                        // The explicit dispatch here is a belt-and-suspenders redundancy for the VC-proof path.
-                        app.dispatch({ type: 'Connection/success', payload: didPair });
-                        console.log('✅ [LAYER 2] Connection added to Redux state:', didPair.name);
-                    } else {
-                        console.log('✅ [SDK PATH] SDK handled connection storage and Redux event internally - skipping manual addConnection');
+                        if (ourConnection) {
+                            try {
+                                const vcMessage = new SDK.Domain.Message(
+                                    JSON.stringify({ vcProof: vcProofData }),
+                                    undefined,
+                                    "https://identuslabel.cz/protocols/vc-proof-sharing/1.0/proof",
+                                    ourConnection.host,
+                                    ourConnection.receiver,
+                                );
+                                await agent.sendMessage(vcMessage);
+                                console.log('✅ [RESPONSE] VC proof sent to inviter as follow-up message');
+                            } catch (vcError: any) {
+                                console.warn('⚠️ [RESPONSE] VC proof send failed (non-fatal — connection still established):', vcError.message);
+                            }
+                        } else {
+                            console.warn('⚠️ [RESPONSE] Could not find new connection in pluto after 10 s — VC proof not sent');
+                        }
                     }
 
                     // ✅ PHASE 3: Mark connection as established
@@ -1514,6 +1571,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     setParsedInvitationData(null);
                     setInviterIdentity(null);
                     setInviterLabel('');
+                    setHasVCRequest(false);
+                    setShowPreviewModal(false);
+                    setConnectedName(connectionLabel);
                     // ✅ NEW: Also clear response VC selection
                     setSelectedVCForResponse(null);
                     setResponseFields([]);
@@ -1536,6 +1596,16 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     app.dispatch({ type: 'Connection/success', payload: didPair });
                     console.log('✅ [LAYER 2] Connection added to Redux state:', didPair.name);
 
+                    // Register the new peer DID with the mediator keylist
+                    try {
+                        if (agent.connectionManager?.mediationHandler && from) {
+                            await agent.connectionManager.mediationHandler.updateKeyListWithDIDs([from]);
+                            console.log('✅ [MEDIATOR] Peer DID registered with mediator keylist (RFC 0434 fallback)');
+                        }
+                    } catch (mediatorError) {
+                        console.warn('⚠️ [MEDIATOR] Failed to register peer DID with mediator:', mediatorError);
+                    }
+
                     // ✅ PHASE 3: Mark connection as established (fallback path)
                     if (invitationId) {
                         try {
@@ -1557,6 +1627,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     setParsedInvitationData(null);
                     setInviterIdentity(null);
                     setInviterLabel('');
+                    setHasVCRequest(false);
+                    setShowPreviewModal(false);
+                    setConnectedName(connectionLabel);
                 }
             } else if (invitation.invitation) {
                 // Handle other invitation formats (legacy, manual)
@@ -1601,6 +1674,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
                         setParsedInvitationData(null);
                         setInviterIdentity(null);
                         setInviterLabel('');
+                        setHasVCRequest(false);
+                        setShowPreviewModal(false);
+                        setConnectedName(connectionLabel);
                     } catch (error) {
                         if (error.message?.includes('already exists')) {
                             console.log("ℹ️ Connection already exists, skipping duplicate storage");
@@ -1740,11 +1816,11 @@ export const OOB: React.FC<OOBProps> = (props) => {
                         const invitation = parseResult.data;
                         console.log("🔍 Checking invitation for VC proof attachments:", invitation);
 
-                    // ✅ FIX: Check BOTH requests_attach (RFC 0434) AND attachments (legacy) for maximum compatibility
-                    const attachments = invitation.requests_attach || invitation.attachments;
+                    // Check BOTH field names: 'attachments' (DIDComm v2) and 'requests_attach' (AIP 1.0 legacy)
+                    const attachments = invitation.attachments || invitation.requests_attach;
                     if (attachments && attachments.length > 0) {
-                        console.log("📎 Found RFC-compliant attachments:", attachments.length);
-                        console.log("📎 Attachment field used:", invitation.requests_attach ? 'requests_attach (RFC 0434)' : 'attachments (legacy)');
+                        console.log("📎 Found OOB attachments:", attachments.length);
+                        console.log("📎 Attachment field used:", invitation.attachments ? 'attachments (DIDComm v2)' : 'requests_attach (AIP 1.0 legacy)');
 
                         // Process each attachment
                         for (const attachment of attachments) {
@@ -1871,8 +1947,6 @@ export const OOB: React.FC<OOBProps> = (props) => {
             });
         }
     };
-
-    const connection = connections.at(0);
 
     return (
         <div className="space-y-6">
@@ -2058,16 +2132,6 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     </div>
                                 )}
 
-                                {/* Accept Connection Button */}
-                                <div className="flex justify-end">
-                                    <button
-                                        className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 text-white font-semibold rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
-                                        onClick={onConnectionHandleClick}
-                                        disabled={!oob || oob.trim() === ""}
-                                    >
-                                        📨 Accept Invitation
-                                    </button>
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -2234,24 +2298,26 @@ export const OOB: React.FC<OOBProps> = (props) => {
                 )}
             </AgentRequire>
 
-            {/* Success Feedback */}
-            {!!connection && (
-                <div className="bg-emerald-500/20 border border-emerald-500/30 rounded-2xl p-6">
-                    <div className="flex items-center space-x-3">
-                        <div className="w-8 h-8 bg-emerald-500/30 rounded-full flex items-center justify-center">
-                            <span className="text-emerald-400">✅</span>
+            {/* Connection Established Overlay */}
+            {connectedName && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                    <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-8 max-w-sm w-full mx-4 text-center shadow-2xl">
+                        <div className="w-16 h-16 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <span className="text-3xl">✅</span>
                         </div>
-                        <div>
-                            <h3 className="text-lg font-semibold text-emerald-300">
-                                Connection Established!
-                            </h3>
-                            <p className="text-emerald-200">
-                                Successfully connected as <strong>"{connection.name || 'Unnamed Connection'}"</strong>
-                            </p>
-                            <p className="text-sm text-emerald-300/80 mt-1">
-                                You can now securely exchange messages and credentials with this connection.
-                            </p>
-                        </div>
+                        <h3 className="text-xl font-bold text-emerald-300 mb-2">Connection Established!</h3>
+                        <p className="text-slate-300 mb-2">
+                            Successfully connected as <strong>"{connectedName}"</strong>
+                        </p>
+                        <p className="text-sm text-slate-400 mb-6">
+                            You can now securely exchange messages and credentials with this connection.
+                        </p>
+                        <button
+                            onClick={() => setConnectedName(null)}
+                            className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 text-white font-semibold rounded-xl transition-all duration-200"
+                        >
+                            OK
+                        </button>
                     </div>
                 </div>
             )}

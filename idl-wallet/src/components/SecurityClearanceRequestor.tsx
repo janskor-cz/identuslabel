@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Box } from "@/app/Box";
 import { AgentRequire } from "@/components/AgentRequire";
 import { useMountedApp } from "@/reducers/store";
+import { getSecurityClearanceKeys } from "@/utils/securityKeyStorage";
 
 interface SecurityClearanceRequestorProps {}
 
@@ -9,9 +10,20 @@ export function SecurityClearanceRequestor(props: SecurityClearanceRequestorProp
     const app = useMountedApp();
     const [selectedLevel, setSelectedLevel] = useState<string>('confidential');
     const [publicKey, setPublicKey] = useState<string>('');
+    const [x25519PublicKey, setX25519PublicKey] = useState<string>('');
+    const [autoLoadedLabel, setAutoLoadedLabel] = useState<string>('');
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [result, setResult] = useState<any>(null);
     const [error, setError] = useState<string>('');
+
+    useEffect(() => {
+        const keys = getSecurityClearanceKeys();
+        if (keys?.ed25519PublicKey) {
+            setPublicKey(keys.ed25519PublicKey);
+            setX25519PublicKey(keys.x25519PublicKey);
+            setAutoLoadedLabel(`Auto-loaded from wallet (Ed25519: ${keys.ed25519Fingerprint?.substring(0, 17)}…)`);
+        }
+    }, []);
 
     const clearanceLevels = [
         { value: 'internal', label: 'Internal', description: 'Basic internal access level' },
@@ -60,7 +72,7 @@ export function SecurityClearanceRequestor(props: SecurityClearanceRequestorProp
             console.log('   👤 Wallet DID:', walletDID.substring(0, 60) + '...');
 
             // Make DIDComm Security Clearance request to CA
-            const requestPayload = {
+            const requestPayload: Record<string, any> = {
                 walletDID: walletDID,
                 clearanceLevel: selectedLevel,
                 publicKey: publicKey.trim(),
@@ -69,6 +81,9 @@ export function SecurityClearanceRequestor(props: SecurityClearanceRequestorProp
                     walletId: "idl"
                 }
             };
+            if (x25519PublicKey) {
+                requestPayload.x25519PublicKey = x25519PublicKey;
+            }
 
             console.log('📤 Sending request to CA:', requestPayload);
 
@@ -146,9 +161,15 @@ export function SecurityClearanceRequestor(props: SecurityClearanceRequestorProp
                                     rows={3}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white font-mono text-sm"
                                 />
-                                <p className="text-sm text-gray-500 mt-1">
-                                    Use the Security Clearance Key Manager above to generate an Ed25519 key pair.
-                                </p>
+                                {autoLoadedLabel ? (
+                                    <p className="text-sm text-green-600 mt-1">
+                                        ✅ {autoLoadedLabel}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm text-gray-500 mt-1">
+                                        Use the Security Clearance Key Manager above to generate an Ed25519 key pair.
+                                    </p>
+                                )}
                             </div>
 
                             {/* Request Button */}

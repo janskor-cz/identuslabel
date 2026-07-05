@@ -482,7 +482,7 @@
             }
         }
 
-        function displayAuthenticatedPortal(authData) {
+        async function displayAuthenticatedPortal(authData) {
             // Hide access denied and show authenticated content
             document.getElementById('accessDenied').style.display = 'none';
             document.getElementById('authenticatedContent').style.display = 'block';
@@ -500,6 +500,43 @@
             document.getElementById('dateOfBirth').textContent = personalInfo.dateOfBirth || '-';
             document.getElementById('gender').textContent = personalInfo.gender || '-';
             document.getElementById('uniqueId').textContent = personalInfo.uniqueId || '-';
+
+            // Display photo if present in credential
+            const photoEl = document.querySelector('.id-photo');
+            if (photoEl) {
+                if (personalInfo.photo) {
+                    let photoSrc = null;
+                    if (personalInfo.photo.startsWith('did:')) {
+                        // DID-based photo: resolve via CA proxy-url endpoint
+                        try {
+                            const proxyResp = await fetch(`/ca/api/photos/proxy-url/${encodeURIComponent(personalInfo.uniqueId)}`);
+                            if (proxyResp.ok) {
+                                const proxyData = await proxyResp.json();
+                                photoSrc = proxyData.proxyUrl;
+                            }
+                        } catch (e) {
+                            console.warn('[PORTAL] Photo DID resolution failed:', e);
+                        }
+                    } else {
+                        // Legacy base64 photo
+                        photoSrc = personalInfo.photo;
+                    }
+                    if (photoSrc) {
+                        photoEl.innerHTML = '';
+                        photoEl.style.padding = '0';
+                        photoEl.style.overflow = 'hidden';
+                        const img = document.createElement('img');
+                        img.src = photoSrc;
+                        img.style.cssText = 'width:100%; height:100%; object-fit:cover; border-radius:3px; display:block;';
+                        img.alt = 'ID Photo';
+                        photoEl.appendChild(img);
+                    } else {
+                        photoEl.textContent = '📷 Verified Identity';
+                    }
+                } else {
+                    photoEl.textContent = '📷 Verified Identity';
+                }
+            }
 
             // Display session information
             document.getElementById('connectionId').textContent =
@@ -1182,6 +1219,14 @@
             initializeMessaging();
         }
 
+        // Build security-clearance URL
+        function buildSecurityClearanceUrl({ connectionId }) {
+            const params = new URLSearchParams();
+            if (connectionId) params.set('connectionId', connectionId);
+            const qs = params.toString();
+            return '/security-clearance' + (qs ? '?' + qs : '');
+        }
+
         // Navigate to Security Clearance page with auto-passed connectionId
         function navigateToSecurityClearance() {
             console.log('🔐 Navigating to Security Clearance page...');
@@ -1216,7 +1261,7 @@
                     }
                 }
 
-                window.location.href = `/security-clearance?connectionId=${authenticatedConnectionId}`;
+                window.location.href = buildSecurityClearanceUrl({ connectionId: authenticatedConnectionId });
             } else {
                 // Fallback: Try to get from session storage
                 const authData = sessionStorage.getItem('ca_auth');
@@ -1225,7 +1270,7 @@
                         const auth = JSON.parse(authData);
                         if (auth.connectionId) {
                             console.log(`✅ Using connectionId from session: ${auth.connectionId}`);
-                            window.location.href = `/security-clearance?connectionId=${auth.connectionId}`;
+                            window.location.href = buildSecurityClearanceUrl({ connectionId: auth.connectionId });
                             return;
                         }
                     } catch (error) {
@@ -1236,7 +1281,7 @@
                 // If no connectionId available, show warning but still navigate
                 console.warn('⚠️ No authenticated connectionId found. User will need to select connection manually.');
                 alert('Warning: No authenticated connection found. You may need to select your connection manually on the next page.');
-                window.location.href = '/security-clearance';
+                window.location.href = buildSecurityClearanceUrl({});
             }
         }
     </script>

@@ -411,6 +411,12 @@ const appSlice = createSlice({
         ) => {
             state.username = action.payload;
         },
+        setWalletId: (
+            state,
+            action: PayloadAction<string>
+        ) => {
+            state.wallet.walletId = action.payload;
+        },
         setDefaultSeed: (
             state,
             action: PayloadAction<SDK.Domain.Seed>
@@ -422,6 +428,9 @@ const appSlice = createSlice({
             action: PayloadAction<{ status: IagonBackupStatus; error?: string }>
         ) => {
             state.iagonBackup = action.payload;
+        },
+        messageRemoved: (state, action: PayloadAction<string>) => {
+            state.messages = state.messages.filter(m => m.id !== action.payload);
         },
     },
     extraReducers: (builder) => {

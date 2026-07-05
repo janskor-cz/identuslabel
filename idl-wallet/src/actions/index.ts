@@ -22,6 +22,7 @@ import { getCredentialType } from '../utils/credentialTypeDetector';
 
 // SecureDashboardBridge agent setter for Pluto fallback
 import { setSecureDashboardAgent } from '../utils/SecureDashboardBridge';
+import { setDocumentStorageWalletId } from '../utils/documentStorage';
 
 // Track pending VC requests to prevent duplicates
 const pendingVCRequests: Map<string, Promise<{ vc: any, connectionDID: string }>> = new Map();
@@ -240,20 +241,8 @@ export const rejectCredentialOffer = createAsyncThunk<
         const { message, pluto } = options;
         const credentialOffer = OfferCredential.fromMessage(message);
 
-        // Delete offer message from IndexedDB
         await pluto.deleteMessage(message.id);
-        console.log('🗑️ [CREDENTIAL OFFER] Attempting to delete offer message:', message.id);
-
-        // CRITICAL: Verify message was actually deleted from IndexedDB
-        const allMessages = await pluto.getAllMessages();
-        const stillExists = allMessages.find(m => m.id === message.id);
-
-        if (stillExists) {
-            console.error('❌ [CREDENTIAL OFFER] Message deletion FAILED - message still exists in IndexedDB:', message.id);
-            throw new Error(`Failed to delete credential offer message from IndexedDB: ${message.id}`);
-        }
-
-        console.log('✅ [CREDENTIAL OFFER] Message successfully deleted from IndexedDB:', message.id);
+        console.log('✅ [CREDENTIAL OFFER] Offer message deleted from IndexedDB:', message.id);
         return api.fulfillWithValue(credentialOffer);
     } catch (err) {
         return api.rejectWithValue(err as Error);
@@ -315,20 +304,8 @@ export const acceptCredentialOffer = createAsyncThunk<
             const requestMessage = requestCredential.makeMessage()
             await agent.sendMessage(requestMessage);
 
-            // Delete offer message from IndexedDB
             await agent.pluto.deleteMessage(message.id);
-            console.log('🗑️ [CREDENTIAL OFFER] Attempting to delete offer message:', message.id);
-
-            // CRITICAL: Verify message was actually deleted from IndexedDB
-            const allMessages = await agent.pluto.getAllMessages();
-            const stillExists = allMessages.find(m => m.id === message.id);
-
-            if (stillExists) {
-                console.error('❌ [CREDENTIAL OFFER] Message deletion FAILED - message still exists in IndexedDB:', message.id);
-                throw new Error(`Failed to delete credential offer message from IndexedDB: ${message.id}`);
-            }
-
-            console.log('✅ [CREDENTIAL OFFER] Message successfully deleted from IndexedDB:', message.id);
+            console.log('✅ [CREDENTIAL OFFER] Offer message deleted from IndexedDB:', message.id);
 
             // Refresh PRISM DIDs list so newly created DID appears in DID Management page
             api.dispatch(refreshPrismDIDs({ agent }));
@@ -546,10 +523,39 @@ async function handleMessages(
                 // The SDK's RequestPresentation.fromMessage() removes claims from body
                 let schemaId: string | undefined;
                 const rawBody = requestMessage.body; // Move outside try-catch for debug logging access
+
+                // Parse once up front — reused below both for the domain-based schema hint
+                // and for the later presentation_definition field extraction.
+                const requestPresentation = RequestPresentation.fromMessage(requestMessage);
+
                 try {
+                    // The Cloud Agent (verified live, 2026-07) does NOT forward goalCode/goal/
+                    // comment/claims/proofTypes into the actual DIDComm wire message for JWT-format
+                    // present-proof requests — presentation_definition.input_descriptors is always
+                    // empty and requestMessage.body carries none of those fields, so every check
+                    // below this one has nothing to match against and schemaId ends up undefined.
+                    // `options.domain` is the one request-configurable field confirmed (via a live
+                    // GET on the Cloud Agent's own presentation record) to survive to the wire
+                    // message unmodified, so the server side encodes the requested schema into it
+                    // (see certification-authority/server.js and company-admin-portal/server.js).
+                    const attachmentOptions = (requestPresentation.decodedAttachments?.at(0) as any)?.options;
+                    const requestDomain = attachmentOptions?.domain;
+                    if (requestDomain && typeof requestDomain === 'string') {
+                        const DOMAIN_SCHEMA_HINTS: Array<[string, string]> = [
+                            ['realperson', 'RealPerson'],
+                            ['clearance', 'SecurityClearance'],
+                            ['employeerole', 'EmployeeRole'],
+                        ];
+                        const lowerDomain = requestDomain.toLowerCase();
+                        const hint = DOMAIN_SCHEMA_HINTS.find(([token]) => lowerDomain.includes(token));
+                        if (hint) {
+                            schemaId = hint[1];
+                        }
+                    }
+
                     // Access RAW message body before SDK parsing
 
-                    if (rawBody && typeof rawBody === 'object') {
+                    if (!schemaId && rawBody && typeof rawBody === 'object') {
                         // Check for explicit schema field in message body
                         schemaId = (rawBody as any).schemaId || (rawBody as any).credentialSchema;
 
@@ -573,15 +579,18 @@ async function handleMessages(
                             }
                         }
 
-                        // Fallback: Try goal_code field (authentication.identity → RealPerson)
-                        if (!schemaId && (rawBody as any).goal_code) {
+                        // Fallback: Try goal_code field. The CA sends goalCode as "schema:RealPerson" /
+                        // "schema:SecurityClearance" (same convention as the goal/comment fields above),
+                        // so try that pattern here too — not just the older literal goal codes below.
+                        if (!schemaId && (rawBody as any).goal_code && typeof (rawBody as any).goal_code === 'string') {
                             const goalCode = (rawBody as any).goal_code;
-                            if (goalCode === 'authentication.identity') {
+                            const goalCodeSchemaMatch = goalCode.match(/schema:([A-Za-z0-9_-]+)/);
+                            if (goalCodeSchemaMatch) {
+                                schemaId = goalCodeSchemaMatch[1];
+                            } else if (goalCode === 'authentication.identity') {
                                 schemaId = 'RealPerson';
                             } else if (goalCode === 'authentication.clearance') {
                                 schemaId = 'SecurityClearance';
-                            } else if (goalCode === 'schema:EmployeeRole') {
-                                schemaId = 'EmployeeRole';
                             }
                         }
 
@@ -626,9 +635,6 @@ async function handleMessages(
                 } catch (err) {
                     console.warn('⚠️ [VC-HANDSHAKE] Could not extract schema ID:', err);
                 }
-
-                // NOW parse with SDK (this will strip claims, but we already have schemaId)
-                const requestPresentation = RequestPresentation.fromMessage(requestMessage);
 
                 // Dispatch to Redux state
                 dispatch(
@@ -945,10 +951,15 @@ async function initiateVCHandshake(
     console.log(`🤝 [VC-HANDSHAKE] Recipient: ${recipientDID.toString().substring(0, 50)}...`);
 
     // STEP 1: Send presentation request for Security Clearance VC
-    // Using empty claims object to accept any credential
-    // We'll validate the received VC using validateSecurityClearanceVC() instead
+    // Using empty claims object to accept any credential — validateSecurityClearanceVC()
+    // does the real issuer/schema/clearanceLevel checks after receipt.
+    // NOTE: requesting a claim with an empty filter object (e.g. `{ clearanceLevel: {} }`)
+    // triggers a bug in the SDK's Pollux.validateInputDescriptor: an empty filter `{}` is
+    // truthy but has no .pattern/.enum/.const, so that code path can never mark the field
+    // valid even when it genuinely exists in the credential — agent.handlePresentation()
+    // would then always reject the presentation. Keep this claims filter empty.
     const presentationClaims: PresentationClaims<SDK.Domain.CredentialType> = {
-        claims: {}  // Required field - empty object accepts any credential
+        claims: {}
     };
 
     console.log('🔍 [HANDSHAKE-SEND] About to call agent.initiatePresentationRequest()...');
@@ -1039,8 +1050,46 @@ async function initiateVCHandshake(
 
                     console.log('🔑 [VC-HANDSHAKE] Connection DID extracted:', connectionDID.substring(0, 50) + '...');
 
+                    // 🔒 SECURITY: Reject multi-attachment responses outright. agent.handlePresentation()
+                    // (below) only cryptographically verifies attachments[0]'s descriptor-mapped credential
+                    // (SDK's HandlePresentation.run() reads presentation.attachments.at(0) only) — if we
+                    // let extraction scan the full attachments array afterward, a forged extra attachment
+                    // could ride along unverified and still be picked up as "the" recipient VC. A legitimate
+                    // single-VC presentation_submission only ever carries one attachment.
+                    if (!presentationResponse.attachments || presentationResponse.attachments.length !== 1) {
+                        clearInterval(checkInterval);
+                        reject(new Error('Recipient presentation has an unexpected number of attachments — rejecting as potentially forged.'));
+                        return;
+                    }
+
+                    // 🔒 SECURITY: Cryptographically verify the presentation BEFORE trusting
+                    // any of its claims (clearanceLevel, x25519PublicKey). Without this, the
+                    // fields below are parsed from an unsigned JSON payload — any peer could
+                    // fabricate a fake Security Clearance VC claiming arbitrary clearance.
+                    // Reuses the same SDK verification path as the "Verify the Proof" button
+                    // in components/Message.tsx (agent.handlePresentation resolves the issuer
+                    // DID and checks the JWS signature via Pollux; it throws or returns false
+                    // on any forged/unsigned/tampered presentation).
+                    console.log('🔒 [VC-HANDSHAKE] Verifying presentation signature via agent.handlePresentation()...');
+                    try {
+                        const verified = await agent.handlePresentation(SDK.Presentation.fromMessage(presentationResponse));
+                        if (!verified) {
+                            clearInterval(checkInterval);
+                            reject(new Error('Recipient presentation failed cryptographic verification — cannot trust claimed clearance.'));
+                            return;
+                        }
+                        console.log('✅ [VC-HANDSHAKE] Presentation cryptographically verified');
+                    } catch (verifyError: any) {
+                        clearInterval(checkInterval);
+                        reject(new Error(`Recipient presentation verification failed: ${verifyError.message || 'invalid or forged credential'}`));
+                        return;
+                    }
+
                     // ✅ FIX: Extract VC directly from presentation response attachments
                     // instead of searching database (avoids DID type mismatch issues)
+                    // (attachments.length is guaranteed 1 here, so this extracts exactly the
+                    // attachment that was just cryptographically verified above — not a scan
+                    // of an independently-untrusted array)
                     console.log('🔍 [VC-HANDSHAKE] Extracting VC from presentation response attachments');
 
                     // Fetch fresh credentials from database to find newly-received VCs
@@ -1222,8 +1271,10 @@ async function ensureSenderVC(
     console.log(`🔄 [ensureSenderVC] Sender: ${senderDID.toString().substring(0, 50)}...`);
 
     // STEP 1: Send presentation request for sender's Security Clearance VC
+    // Empty claims filter — see rationale in initiateVCHandshake() above (a non-empty
+    // but pattern/enum/const-less filter object breaks Pollux's validateInputDescriptor).
     const presentationClaims: PresentationClaims<SDK.Domain.CredentialType> = {
-        claims: {}  // Accept any credential - will validate on receipt
+        claims: {}
     };
 
     console.log('📤 [ensureSenderVC] Sending presentation request to sender...');
@@ -1275,6 +1326,34 @@ async function ensureSenderVC(
                     }
 
                     console.log('🔑 [ensureSenderVC] Connection DID extracted:', connectionDID.substring(0, 50) + '...');
+
+                    // 🔒 SECURITY: Reject multi-attachment responses — see identical guard and
+                    // rationale in initiateVCHandshake() above (handlePresentation only verifies
+                    // attachments[0]; extraction must not scan a wider, unverified array).
+                    if (!presentationResponse.attachments || presentationResponse.attachments.length !== 1) {
+                        clearInterval(checkInterval);
+                        reject(new Error('Sender presentation has an unexpected number of attachments — rejecting as potentially forged.'));
+                        return;
+                    }
+
+                    // 🔒 SECURITY: Cryptographically verify the presentation BEFORE trusting any of
+                    // its claims (clearanceLevel), same rationale and API as initiateVCHandshake()
+                    // above — this function previously trusted SDK.JWTCredential.fromJWS() output
+                    // (no signature check) gated only by a plain string/field match.
+                    console.log('🔒 [ensureSenderVC] Verifying presentation signature via agent.handlePresentation()...');
+                    try {
+                        const verified = await agent.handlePresentation(SDK.Presentation.fromMessage(presentationResponse));
+                        if (!verified) {
+                            clearInterval(checkInterval);
+                            reject(new Error('Sender presentation failed cryptographic verification — cannot trust claimed clearance.'));
+                            return;
+                        }
+                        console.log('✅ [ensureSenderVC] Presentation cryptographically verified');
+                    } catch (verifyError: any) {
+                        clearInterval(checkInterval);
+                        reject(new Error(`Sender presentation verification failed: ${verifyError.message || 'invalid or forged credential'}`));
+                        return;
+                    }
 
                     // ✅ FIX: Extract VC directly from presentation response attachments
                     console.log('🔍 [ensureSenderVC] Extracting VC from presentation response attachments');
@@ -1805,10 +1884,11 @@ export const sendMessage = createAsyncThunk<
 })
 
 /**
- * Send a DIDComm access-request protocol message to a connection.
+ * Send a DIDComm service-access/1.0 request message to a connection.
  * The body is a JSON protocol envelope transported inside a BasicMessage,
  * because the Cloud Agent only fires webhooks for BasicMessage piuri.
- * Protocol: https://identuslabel.cz/protocols/access-request/1.0/request
+ * Protocol: https://identuslabel.cz/protocols/service-access/1.0/request
+ * (see packages/service-access-didcomm/PROTOCOL.md)
  */
 export const sendProtocolAccessRequest = createAsyncThunk<
     void,
@@ -1817,9 +1897,9 @@ export const sendProtocolAccessRequest = createAsyncThunk<
     const requestId = `ar-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
     const protocolEnvelope = JSON.stringify({
-        type: 'https://identuslabel.cz/protocols/access-request/1.0/request',
+        type: 'https://identuslabel.cz/protocols/service-access/1.0/request',
         id: requestId,
-        body: { target }
+        body: { capability: target }
     });
 
     // Wrap in StandardMessageBody (matches the format the CA unwraps)
@@ -1839,6 +1919,126 @@ export const sendProtocolAccessRequest = createAsyncThunk<
         if (!existing) await agent.pluto.storeMessage(finalMessage);
     } catch (_) { /* non-fatal */ }
 
+    api.dispatch(reduxActions.messageSuccess([finalMessage]));
+});
+
+// ── Document Service DIDComm Protocol Thunks ────────────────────────────────
+
+/**
+ * Send a document upload request to the document service connection.
+ * File is base64-encoded in the attachment; the service will request VP proof next.
+ */
+export const sendDocumentUploadRequest = createAsyncThunk<
+    void,
+    {
+        agent: SDK.Agent;
+        connection: SDK.Domain.DIDPair;
+        title: string;
+        clearanceLevel: string;
+        releasableTo: string[];
+        fileBuffer: ArrayBuffer;
+        filename: string;
+        mimeType: string;
+    }
+>('sendDocumentUploadRequest', async ({ agent, connection, title, clearanceLevel, releasableTo, fileBuffer, filename, mimeType }, api) => {
+    const requestId = `dup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const base64Data = Buffer.from(fileBuffer).toString('base64');
+
+    const protocolEnvelope = JSON.stringify({
+        type: 'https://identuslabel.cz/protocols/document-upload/1.0/request',
+        id: requestId,
+        body: { title, clearanceLevel, releasableTo, filename, department: null },
+        attachments: [{ id: 'file', mediaType: mimeType, data: { base64: base64Data } }]
+    });
+
+    const basicMsgBody = { content: protocolEnvelope };
+    const finalMessage = new BasicMessage(
+        basicMsgBody as any,
+        connection.host,
+        connection.receiver
+    ).makeMessage();
+
+    await agent.sendMessage(finalMessage);
+    try {
+        const existing = await agent.pluto.getMessage(finalMessage.id);
+        if (!existing) await agent.pluto.storeMessage(finalMessage);
+    } catch (_) { /* non-fatal */ }
+    api.dispatch(reduxActions.messageSuccess([finalMessage]));
+});
+
+/**
+ * Send a document branch (update/fork) request to the document service connection.
+ */
+export const sendDocumentBranchRequest = createAsyncThunk<
+    void,
+    {
+        agent: SDK.Agent;
+        connection: SDK.Domain.DIDPair;
+        parentDocumentDID: string;
+        title: string;
+        clearanceLevel?: string;
+        releasableTo?: string[];
+        fileBuffer: ArrayBuffer;
+        filename: string;
+        mimeType: string;
+    }
+>('sendDocumentBranchRequest', async ({ agent, connection, parentDocumentDID, title, clearanceLevel, releasableTo, fileBuffer, filename, mimeType }, api) => {
+    const requestId = `dbr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const base64Data = Buffer.from(fileBuffer).toString('base64');
+
+    const protocolEnvelope = JSON.stringify({
+        type: 'https://identuslabel.cz/protocols/document-upload/1.0/branch',
+        id: requestId,
+        body: { parentDocumentDID, title, clearanceLevel, releasableTo, filename },
+        attachments: [{ id: 'file', mediaType: mimeType, data: { base64: base64Data } }]
+    });
+
+    const basicMsgBody = { content: protocolEnvelope };
+    const finalMessage = new BasicMessage(
+        basicMsgBody as any,
+        connection.host,
+        connection.receiver
+    ).makeMessage();
+
+    await agent.sendMessage(finalMessage);
+    try {
+        const existing = await agent.pluto.getMessage(finalMessage.id);
+        if (!existing) await agent.pluto.storeMessage(finalMessage);
+    } catch (_) { /* non-fatal */ }
+    api.dispatch(reduxActions.messageSuccess([finalMessage]));
+});
+
+/**
+ * Send a DIDComm document access request. Service will request VP, then deliver a DEK via a
+ * service-access/1.0 grant (capability: "document-access", mode: "payload") — see
+ * packages/service-access-didcomm/PROTOCOL.md. `documentDID` rides along as a capability-
+ * specific field in `body` (the protocol's `request` message allows extra fields beyond
+ * `capability` itself for exactly this).
+ */
+export const sendDocumentAccessRequest = createAsyncThunk<
+    void,
+    { agent: SDK.Agent; connection: SDK.Domain.DIDPair; documentDID: string }
+>('sendDocumentAccessRequest', async ({ agent, connection, documentDID }, api) => {
+    const requestId = `dar-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const protocolEnvelope = JSON.stringify({
+        type: 'https://identuslabel.cz/protocols/service-access/1.0/request',
+        id: requestId,
+        body: { capability: 'document-access', documentDID }
+    });
+
+    const basicMsgBody = { content: protocolEnvelope };
+    const finalMessage = new BasicMessage(
+        basicMsgBody as any,
+        connection.host,
+        connection.receiver
+    ).makeMessage();
+
+    await agent.sendMessage(finalMessage);
+    try {
+        const existing = await agent.pluto.getMessage(finalMessage.id);
+        if (!existing) await agent.pluto.storeMessage(finalMessage);
+    } catch (_) { /* non-fatal */ }
     api.dispatch(reduxActions.messageSuccess([finalMessage]));
 });
 
@@ -1994,6 +2194,12 @@ export const connectDatabase = createAsyncThunk<
 
         if (options.username) {
             api.dispatch(reduxActions.setUsername(options.username));
+            // Scope the 4 hand-rolled per-user IndexedDB stores (connection requests,
+            // invitation states, message rejections, classified documents) to this user —
+            // same derivation as the Pluto dbName suffix above, so it's consistent.
+            const walletId = options.username.toLowerCase();
+            api.dispatch(reduxActions.setWalletId(walletId));
+            setDocumentStorageWalletId(walletId);
         }
 
         const apollo = new SDK.Apollo();

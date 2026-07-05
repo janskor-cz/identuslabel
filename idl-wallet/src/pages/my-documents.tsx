@@ -217,19 +217,25 @@ export default function MyDocumentsPage() {
 
   const [showExpired, setShowExpired] = useState(true);
 
-  // Load documents on mount
+  // Load documents on mount.
+  // Gated on db connection so this never reads the classified-documents store before
+  // login has scoped it to the current user (see setDocumentStorageWalletId in connectDatabase).
   useEffect(() => {
-    dispatch(loadDocuments(true));
-  }, [dispatch]);
+    if (app.db.instance && app.db.connected) {
+      dispatch(loadDocuments(true));
+    }
+  }, [dispatch, app.db.instance, app.db.connected]);
 
   // Auto-refresh every 30 seconds
   useEffect(() => {
     const interval = setInterval(() => {
-      dispatch(loadDocuments(showExpired));
+      if (app.db.instance && app.db.connected) {
+        dispatch(loadDocuments(showExpired));
+      }
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [dispatch, showExpired]);
+  }, [dispatch, showExpired, app.db.instance, app.db.connected]);
 
   // Handle view document
   const handleView = useCallback((ephemeralDID: string) => {

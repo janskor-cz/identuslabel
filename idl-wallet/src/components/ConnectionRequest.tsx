@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { usePhotoDID } from '@/hooks/usePhotoDID';
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { useMountedApp } from '@/reducers/store';
 import { refreshConnections, initiatePresentationRequest, refreshCredentials } from '@/actions';
@@ -34,6 +35,10 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
 
   // Identity extraction from credential
   const [senderIdentity, setSenderIdentity] = useState<any>(null);
+
+  // Photo resolution for ID card display
+  const photoValue = verificationResult?.credentialSubject?.photo || null;
+  const resolvedPhoto = usePhotoDID(photoValue, verificationResult?.credentialSubject?.uniqueId as string | undefined);
 
   // Rejection state
   const [isRejecting, setIsRejecting] = useState(false);
@@ -74,6 +79,25 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
         credentialSubject = firstClaim.credentialData || firstClaim.credential || firstClaim;
         if (credentialSubject && credentialSubject.credentialSubject) {
           credentialSubject = credentialSubject.credentialSubject;
+        }
+      }
+
+      // Unwrap { jwt, disclosedFields, proofLevel } — vc-proof-sharing messages deliver
+      // the credential as a compact JWT wrapper; credentialSubject lives inside the encoded jwt.
+      if (!credentialSubject && typeof credential?.jwt === 'string') {
+        try {
+          const parts = credential.jwt.split('.');
+          if (parts.length === 3) {
+            const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+            const payload = JSON.parse(atob(padded));
+            const vc = payload.vc ?? payload;
+            if (vc?.credentialSubject) {
+              credentialSubject = vc.credentialSubject;
+            }
+          }
+        } catch (jwtErr) {
+          console.warn('⚠️ [IDENTITY EXTRACTION] Failed to decode JWT wrapper:', jwtErr);
         }
       }
 
@@ -136,7 +160,7 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
         const invitationKeys = getKeysByPattern('invitation-');
         for (const key of invitationKeys) {
           try {
-            const invitationData = JSON.parse(getItem(key) || '{}');
+            const invitationData = getItem(key) || {};
             console.log(`🔍 [THREAD CORRELATION] Checking invitation: ${key}`, {
               from: invitationData.from?.substring(0, 50) + '...',
               hasVCRequest: invitationData.includeVCRequest
@@ -489,6 +513,29 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
     }
   };
 
+  // Decode a compact JWT's payload (base64url -> JSON).
+  // Identus/Veridian wallets often deliver credentials as { jwt, disclosedFields, proofLevel }
+  // wrappers (SD-JWT style) rather than already-parsed JSON-LD VCs. The credentialSubject
+  // and other VC claims live inside the still-encoded `jwt` string under the `vc` claim
+  // (per W3C "Securing VCs using JOSE and COSE"), so callers must decode it before doing
+  // any structural validation on the wrapper object itself.
+  const decodeJwtPayload = (jwt: string): any => {
+    try {
+      const parts = jwt.split('.');
+      if (parts.length !== 3) {
+        throw new Error('Not a valid compact JWT (expected 3 dot-separated segments)');
+      }
+      // base64url -> base64, with padding restored
+      const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+      const json = atob(padded);
+      return JSON.parse(json);
+    } catch (err) {
+      console.error('❌ [JWT DECODE] Failed to decode JWT payload:', err);
+      throw err;
+    }
+  };
+
   // Verify attached credential
   const verifyAttachedCredential = async (credential: any) => {
     if (!app.agent.instance) {
@@ -516,6 +563,24 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
       }
 
       console.log('🔐 [CREDENTIAL VERIFICATION] Extracted credential for verification:', actualCredential);
+
+      // ✅ FIX: Unwrap SD-JWT style { jwt, disclosedFields, proofLevel } wrappers.
+      // The VC claims (including credentialSubject) live inside the encoded `jwt`
+      // string under the `vc` claim and were not being decoded here, causing
+      // cryptographically valid credentials to fail this structural check and
+      // be shown to the user as "Invalid" even though validateVerifiableCredential()
+      // (vcValidation.ts) had already verified the signature successfully.
+      if (
+        !actualCredential?.credentialSubject &&
+        !actualCredential?.vc?.credentialSubject &&
+        typeof actualCredential?.jwt === 'string'
+      ) {
+        console.log('🔧 [CREDENTIAL VERIFICATION] Wrapper has no top-level credentialSubject, decoding embedded JWT...');
+        const decodedPayload = decodeJwtPayload(actualCredential.jwt);
+        // The VC Data Model payload is typically nested under the `vc` claim for VC-JWT
+        actualCredential = decodedPayload.vc ?? decodedPayload;
+        console.log('✅ [CREDENTIAL VERIFICATION] Decoded JWT payload, unwrapped credential:', actualCredential);
+      }
 
       // Basic validation - check for required credential fields
       const hasValidStructure = actualCredential &&
@@ -565,10 +630,15 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
       setVerificationStatus(isRevoked || isSuspended ? 'invalid' : 'verified');
 
     } catch (error) {
-      console.error('❌ [CREDENTIAL VERIFICATION] Verification failed:', error);
+      // Log message + stack explicitly -- bare Error objects often serialize as {}
+      // in console output since their properties live on the prototype, not as
+      // own-enumerable properties, which made this failure mode hard to diagnose.
+      const errMessage = error instanceof Error ? error.message : String(error);
+      const errStack = error instanceof Error ? error.stack : undefined;
+      console.error('❌ [CREDENTIAL VERIFICATION] Verification failed:', errMessage, errStack ? `\n${errStack}` : '');
       setVerificationResult({
         isValid: false,
-        errors: [error.message || 'Verification failed'],
+        errors: [errMessage || 'Verification failed'],
         credentialSubject: null,
         issuer: null,
         type: null
@@ -661,9 +731,18 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
     try {
       console.log('🤝 Accepting connection request from:', message.from?.toString());
 
-      // Create Alice's response DID with mediator service endpoints
-      const responseDID = await app.agent.instance.createNewPeerDID([], true);
-      console.log('✅ Alice response DID created:', responseDID.toString().substring(0, 60) + '...');
+      // Use the OOB invitation DID (message.to) as host — it already exists in Pluto
+      // and is registered with the mediator. This is the DID the invitee addressed
+      // the connection request to, so both sides are consistent.
+      let hostDID: SDK.Domain.DID;
+      if (message.to && typeof message.to === 'object' && 'toString' in message.to) {
+        hostDID = SDK.Domain.DID.fromString(message.to.toString());
+      } else if (typeof message.to === 'string') {
+        hostDID = SDK.Domain.DID.fromString(message.to);
+      } else {
+        throw new Error('Cannot determine host DID: message.to is missing');
+      }
+      console.log('✅ [ConnectionRequest] Host DID (from invitation):', hostDID.toString().substring(0, 60) + '...');
 
       // Create connection response message
       const responseBody = {
@@ -687,14 +766,22 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
         JSON.stringify(responseBody),
         uuid(),
         SDK.ProtocolType.DidcommconnectionResponse,
-        responseDID,
+        hostDID,
         toDID,
         [],
         message.id
       );
 
       console.log('📤 Sending connection response...');
-      await app.agent.instance.sendMessage(responseMessage);
+      try {
+        await app.agent.instance.sendMessage(responseMessage);
+        console.log('✅ Connection response sent successfully');
+      } catch (sendErr: any) {
+        // Non-fatal: the DIDPair is stored locally regardless.
+        // The invitee already has the connection from their OOB acceptance,
+        // so both sides are connected even without the response delivery.
+        console.warn('⚠️ [ConnectionRequest] Connection response failed to deliver (non-fatal):', sendErr?.message);
+      }
 
       // Create and store the DIDPair connection
       // Use verified identity name if available, otherwise fall back to request label
@@ -705,21 +792,21 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
       console.log(`💾 Storing connection with name: "${connectionName}"`);
 
       const didPair = new SDK.Domain.DIDPair(
-        responseDID,  // Alice's DID (host)
-        toDID,        // Bob's ephemeral DID (receiver)
-        connectionName  // Use verified identity name or request label
+        hostDID,       // inviter's OOB DID (host)
+        toDID,         // invitee's DID (receiver)
+        connectionName
       );
 
-      // 🔧 FIX: Check if connection already exists before storing (prevent duplicates)
+      // Check if connection already exists before storing (prevent duplicates)
       const existingConnections = await app.agent.instance.pluto.getAllDidPairs();
       const connectionExists = existingConnections.some((conn) => {
-        return conn.host.toString() === responseDID.toString() &&
+        return conn.host.toString() === hostDID.toString() &&
                conn.receiver.toString() === toDID.toString();
       });
 
       if (connectionExists) {
         console.log('ℹ️ [ConnectionRequest] Connection already exists, skipping storage');
-        console.log('   Host DID:', responseDID.toString());
+        console.log('   Host DID:', hostDID.toString());
         console.log('   Receiver DID:', toDID.toString());
       } else {
         console.log('💾 Storing connection using connectionManager...');
@@ -731,30 +818,41 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
       try {
         const walletId = app.wallet.walletId;
 
-        // Find the invitation ID that corresponds to this connection request
-        // Search through localStorage for invitations matching this sender
+        // Find the invitation ID that corresponds to this connection request.
+        // Primary: message.pthid is the DIDComm parent-thread-id that points to the invitation.
+        // Fallback: most-recent by timestamp (handles SDKs that don't propagate pthid).
         let invitationId = null;
         const senderDID = message.from?.toString();
 
-        if (typeof window !== 'undefined' && senderDID) {
-          console.log('🔍 [INVITATION STATE] Searching for invitation matching sender DID:', senderDID.substring(0, 50) + '...');
+        if (typeof window !== 'undefined') {
+          console.log('🔍 [INVITATION STATE] Looking up invitation for connection request...');
 
-          // Look through all stored invitations
           const invitationKeys = getKeysByPattern('invitation-');
-          for (const key of invitationKeys) {
-            try {
-              const invitationData = JSON.parse(getItem(key) || '{}');
+          const pthid = (message as any).pthid;
 
-              // For now, use the most recent invitation
-              // In production, you'd implement more sophisticated matching based on DID correlation
-              if (invitationData.id) {
-                invitationId = invitationData.id;
-                console.log('🎯 [INVITATION STATE] Found invitation ID:', invitationId);
-                break; // Use the first (most recent) invitation for now
-              }
-            } catch (e) {
-              console.warn('⚠️ [INVITATION STATE] Could not parse invitation data for key:', key);
+          // Primary: pthid directly identifies the invitation
+          if (pthid && typeof pthid === 'string') {
+            const stored = getItem(`invitation-${pthid}`);
+            if (stored?.id) {
+              invitationId = stored.id;
+              console.log('🎯 [INVITATION STATE] Matched by pthid:', invitationId);
             }
+          }
+
+          // Fallback: most-recent invitation by timestamp
+          if (!invitationId) {
+            let bestTs = -1;
+            for (const key of invitationKeys) {
+              try {
+                const invitationData = getItem(key) || {};
+                if (!invitationData.id) continue;
+                const ts = invitationData.timestamp || 0;
+                if (ts > bestTs) { bestTs = ts; invitationId = invitationData.id; }
+              } catch (e) {
+                console.warn('⚠️ [INVITATION STATE] Could not parse invitation data for key:', key);
+              }
+            }
+            if (invitationId) console.log('🎯 [INVITATION STATE] Fallback match (most-recent):', invitationId);
           }
         }
 
@@ -776,28 +874,6 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
       } catch (stateError) {
         console.error('❌ [INVITATION STATE] Failed to update invitation state:', stateError);
         // Don't throw - connection should still proceed
-      }
-
-      // ✅ PEER VC PERSISTENCE: Store vc-proof-response VC to Pluto
-      if (attachedCredential) {
-        try {
-          const vcString = typeof attachedCredential === 'string'
-            ? attachedCredential
-            : JSON.stringify(attachedCredential);
-          const credData = Uint8Array.from(Buffer.from(vcString));
-          const parsedCredential = await app.agent.instance.pollux.parseCredential(credData, {
-            type: SDK.Domain.CredentialType.JWT
-          });
-          const existingCreds = await app.agent.instance.pluto.getAllCredentials();
-          const alreadyExists = existingCreds.some((c) => c.id === parsedCredential.id);
-          if (!alreadyExists) {
-            await app.agent.instance.pluto.storeCredential(parsedCredential);
-            app.dispatch(refreshCredentials());
-          }
-        } catch (e) {
-          console.error('❌ [PEER VC] Failed to store vc-proof-response VC:', e);
-          // Non-fatal — connection continues
-        }
       }
 
       // Refresh connections state
@@ -872,25 +948,33 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
         let invitationId = null;
         const senderDID = message.from?.toString();
 
-        if (typeof window !== 'undefined' && senderDID) {
-          console.log('🔍 [INVITATION STATE] Searching for invitation to reject, sender DID:', senderDID.substring(0, 50) + '...');
+        if (typeof window !== 'undefined') {
+          console.log('🔍 [INVITATION STATE] Looking up invitation to reject...');
 
-          // Look through all stored invitations
           const invitationKeys = getKeysByPattern('invitation-');
-          for (const key of invitationKeys) {
-            try {
-              const invitationData = JSON.parse(getItem(key) || '{}');
+          const pthid = (message as any).pthid;
 
-              // For now, use the most recent invitation
-              // In production, you'd implement more sophisticated matching based on DID correlation
-              if (invitationData.id) {
-                invitationId = invitationData.id;
-                console.log('🎯 [INVITATION STATE] Found invitation ID to reject:', invitationId);
-                break; // Use the first (most recent) invitation for now
-              }
-            } catch (e) {
-              console.warn('⚠️ [INVITATION STATE] Could not parse invitation data for key:', key);
+          if (pthid && typeof pthid === 'string') {
+            const stored = getItem(`invitation-${pthid}`);
+            if (stored?.id) {
+              invitationId = stored.id;
+              console.log('🎯 [INVITATION STATE] Matched by pthid for reject:', invitationId);
             }
+          }
+
+          if (!invitationId) {
+            let bestTs = -1;
+            for (const key of invitationKeys) {
+              try {
+                const invitationData = getItem(key) || {};
+                if (!invitationData.id) continue;
+                const ts = invitationData.timestamp || 0;
+                if (ts > bestTs) { bestTs = ts; invitationId = invitationData.id; }
+              } catch (e) {
+                console.warn('⚠️ [INVITATION STATE] Could not parse invitation data for key:', key);
+              }
+            }
+            if (invitationId) console.log('🎯 [INVITATION STATE] Fallback reject match (most-recent):', invitationId);
           }
         }
 
@@ -992,36 +1076,23 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
       let credentialType;
 
       if (vcRequestType === 'RealPerson') {
+        // issuer constraint is baked into the SDK Presentation Exchange definition,
+        // so the holder must present a VC actually issued by the CA.
         presentationClaims = {
-          "uniqueId": {
-            type: "string",
-            pattern: ".*"
+          issuer: 'did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c',
+          claims: {
+            uniqueId:  { type: 'string', pattern: '.*' },
+            firstName: { type: 'string', pattern: '.*' },
+            lastName:  { type: 'string', pattern: '.*' },
           },
-          "firstName": {
-            type: "string",
-            pattern: ".*"
-          },
-          "lastName": {
-            type: "string",
-            pattern: ".*"
-          }
         };
         credentialType = SDK.Domain.CredentialType.JWT;
       } else {
         // SecurityClearance VC request
         presentationClaims = {
-          "clearanceLevel": {
-            type: "string",
-            pattern: ".*"
+          claims: {
+            clearanceLevel: { type: 'string', pattern: '.*' },
           },
-          "clearanceId": {
-            type: "string",
-            pattern: ".*"
-          },
-          "publicKeyFingerprint": {
-            type: "string",
-            pattern: ".*"
-          }
         };
         credentialType = SDK.Domain.CredentialType.JWT;
       }
@@ -1081,93 +1152,126 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6 mb-4 shadow-lg">
+    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 mb-4 shadow-lg">
       {/* Header */}
       <div className="flex items-center mb-4">
-        <div className="w-12 h-12 bg-blue-100 dark:bg-blue-900 rounded-full flex items-center justify-center mr-4">
+        <div className="w-12 h-12 bg-cyan-500/20 rounded-full flex items-center justify-center mr-4">
           <span className="text-2xl">🤝</span>
         </div>
         <div className="flex-1">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-            {senderIdentity && senderIdentity.hasIdentity
-              ? `Connection Request from ${senderIdentity.fullName}`
-              : 'Connection Request'
+          <h3 className="text-lg font-semibold text-white">
+            {attachedCredential && senderIdentity?.hasIdentity
+              ? `${senderIdentity.fullName} accepted your invitation`
+              : senderIdentity?.hasIdentity
+                ? `Connection Request from ${senderIdentity.fullName}`
+                : 'Connection Request'
             }
           </h3>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
+          <p className="text-sm text-slate-400">
             {formatTime(message.createdTime)}
           </p>
         </div>
-        <div className="px-3 py-1 bg-orange-100 dark:bg-orange-900 text-orange-800 dark:text-orange-200 text-sm rounded-full">
-          Pending
-        </div>
+        {attachedCredential ? (
+          verificationStatus === 'verifying' ? (
+            <span className="px-3 py-1 bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs rounded-full flex items-center space-x-1">
+              <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+              <span>Verifying...</span>
+            </span>
+          ) : verificationStatus === 'verified' && verificationResult?.isValid ? (
+            <span className="px-3 py-1 bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs rounded-full">
+              ✅ Identity Verified
+            </span>
+          ) : verificationStatus === 'invalid' ? (
+            <span className="px-3 py-1 bg-red-500/20 border border-red-500/30 text-red-300 text-xs rounded-full">
+              ❌ Verification Failed
+            </span>
+          ) : (
+            <span className="px-3 py-1 bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-xs rounded-full">
+              📋 Credential Attached
+            </span>
+          )
+        ) : null}
       </div>
 
       {/* Request Details */}
       <div className="mb-6 space-y-3">
-        <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
-            <strong>From:</strong>
-          </p>
-          {senderIdentity && senderIdentity.hasIdentity ? (
-            <div className="space-y-2">
-              <div className="flex items-center space-x-2">
-                <span className="text-lg">👤</span>
-                <p className="text-base font-semibold text-gray-900 dark:text-white">
-                  {senderIdentity.fullName}
+        {!attachedCredential && (
+          <div className="bg-slate-800/30 rounded-xl p-4">
+            <p className="text-sm text-slate-400 mb-2">
+              <strong>From:</strong>
+            </p>
+            {senderIdentity && senderIdentity.hasIdentity ? (
+              <div className="space-y-2">
+                <div className="flex items-center space-x-2">
+                  <span className="text-lg">👤</span>
+                  <p className="text-base font-semibold text-white">
+                    {senderIdentity.fullName}
+                  </p>
+                  <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-emerald-500/20 text-emerald-300">
+                    ✅ Verified Identity
+                  </span>
+                </div>
+                {senderIdentity.uniqueId && (
+                  <p className="text-xs text-slate-400">
+                    ID: {senderIdentity.uniqueId}
+                  </p>
+                )}
+                <p className="text-xs font-mono text-slate-500 break-all">
+                  {message.from?.toString()}
                 </p>
-                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-                  ✅ Verified Identity
-                </span>
               </div>
-              {senderIdentity.uniqueId && (
-                <p className="text-xs text-gray-600 dark:text-gray-400">
-                  ID: {senderIdentity.uniqueId}
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center space-x-2">
+                  <span className="text-lg">🔗</span>
+                  <p className="text-sm text-slate-400">
+                    Unknown Contact
+                  </p>
+                  <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-slate-700/50 text-slate-400">
+                    No Identity Verification
+                  </span>
+                </div>
+                <p className="text-xs font-mono text-slate-300 break-all">
+                  {message.from?.toString()}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="bg-slate-800/30 rounded-xl p-4">
+          {attachedCredential ? (
+            <p className="text-sm text-slate-300">
+              {senderIdentity?.hasIdentity ? senderIdentity.fullName : 'Someone'} accepted your invitation.
+              Do you want to confirm the connection?
+            </p>
+          ) : (
+            <>
+              <p className="text-sm text-slate-400 mb-2">
+                <strong>Request:</strong>
+              </p>
+              <p className="text-sm text-slate-300">
+                "{requestDetails.label}" wants to connect with you.
+              </p>
+              {requestDetails.goal && (
+                <p className="text-xs text-slate-400 mt-1">
+                  Goal: {requestDetails.goal}
                 </p>
               )}
-              <p className="text-xs font-mono text-gray-500 dark:text-gray-500 break-all">
-                {message.from?.toString()}
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <div className="flex items-center space-x-2">
-                <span className="text-lg">🔗</span>
-                <p className="text-sm text-gray-600 dark:text-gray-400">
-                  Unknown Contact
-                </p>
-                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
-                  No Identity Verification
-                </span>
-              </div>
-              <p className="text-xs font-mono text-gray-800 dark:text-gray-200 break-all">
-                {message.from?.toString()}
-              </p>
-            </div>
-          )}
-        </div>
-
-        <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
-            <strong>Request:</strong>
-          </p>
-          <p className="text-sm text-gray-800 dark:text-gray-200">
-            "{requestDetails.label}" wants to connect with you.
-          </p>
-          {requestDetails.goal && (
-            <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-              Goal: {requestDetails.goal}
-            </p>
+            </>
           )}
         </div>
 
         {/* Attached Credential Display */}
         {attachedCredential && (
-          <div className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-900 dark:to-purple-900 border border-blue-200 dark:border-blue-700 rounded-lg p-4">
+          <div className="bg-gradient-to-r from-cyan-500/10 to-purple-500/10 border border-cyan-500/30 rounded-xl p-4">
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center space-x-2">
-                <span className="text-blue-600 dark:text-blue-400 text-lg">💳</span>
-                <h4 className="text-sm font-semibold text-blue-800 dark:text-blue-200">
+                <span className="text-cyan-400 text-lg">💳</span>
+                <h4 className="text-sm font-semibold text-cyan-300">
                   Attached Credential Presentation
                 </h4>
               </div>
@@ -1195,56 +1299,92 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
                 )}
                 <button
                   onClick={() => setShowCredentialDetails(!showCredentialDetails)}
-                  className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-xs font-medium"
+                  className="text-cyan-400 hover:text-cyan-300 text-xs font-medium"
                 >
                   {showCredentialDetails ? 'Hide Details' : 'View Details'}
                 </button>
               </div>
             </div>
 
-            <p className="text-sm text-blue-700 dark:text-blue-300 mb-3">
+            <p className="text-sm text-slate-300 mb-3">
               This connection request includes identity verification. Review the credential details below before accepting.
             </p>
 
-            {/* Quick Identity Summary */}
-            {verificationResult && verificationResult.isValid && (
-              <div className="bg-white dark:bg-gray-800 rounded-lg p-3 mb-3 border border-blue-200 dark:border-blue-600">
-                <h5 className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Identity Summary:</h5>
-                <div className="space-y-1">
-                  {verificationResult.credentialSubject && Object.entries(verificationResult.credentialSubject).map(([key, value]) => {
-                    if (key === 'id' || !value) return null;
-                    return (
-                      <div key={key} className="flex justify-between text-xs">
-                        <span className="text-gray-600 dark:text-gray-400 capitalize">{key.replace(/([A-Z])/g, ' $1')}:</span>
-                        <span className="text-gray-900 dark:text-gray-100 font-medium">{String(value)}</span>
+            {/* ID Card Identity Summary — only disclosed fields */}
+            {verificationResult && verificationResult.isValid && (() => {
+              const cs = verificationResult.credentialSubject || {};
+              // Only display fields the holder consented to share
+              const disclosed: string[] | null = attachedCredential?.disclosedFields ?? null;
+              const has = (field: string) => !disclosed || disclosed.includes(field);
+              const firstName = has('firstName') ? (cs.firstName || '') : null;
+              const lastName = has('lastName') ? (cs.lastName || '') : null;
+              const dateOfBirth = has('dateOfBirth') ? (cs.dateOfBirth || 'N/A') : null;
+              const gender = has('gender') ? (cs.gender || 'N/A') : null;
+              const uniqueId = has('uniqueId') ? (cs.uniqueId || '') : null;
+              const showPhoto = has('photo');
+              const photoIsDid = typeof photoValue === 'string' && photoValue.startsWith('did:');
+              return (
+                <div className="bg-gradient-to-r from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 rounded-xl p-3 mb-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs text-cyan-400 font-semibold">Identity</div>
+                    {disclosed && (
+                      <div className="text-[9px] text-slate-500 italic">
+                        Holder disclosed {disclosed.length} field{disclosed.length !== 1 ? 's' : ''}
                       </div>
-                    );
-                  })}
-                  {verificationResult.type && (
-                    <div className="flex justify-between text-xs">
-                      <span className="text-gray-600 dark:text-gray-400">Credential Type:</span>
-                      <span className="text-gray-900 dark:text-gray-100 font-medium">
-                        {Array.isArray(verificationResult.type)
-                          ? verificationResult.type.filter(t => t !== 'VerifiableCredential').join(', ') || 'Standard'
-                          : verificationResult.type
-                        }
-                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-3">
+                    {/* Photo — only if disclosed */}
+                    {showPhoto && (
+                      <div className="flex-shrink-0 rounded-lg overflow-hidden bg-slate-700/50 border border-cyan-500/30"
+                           style={{ width: '64px', height: '86px' }}>
+                        {resolvedPhoto ? (
+                          <img src={resolvedPhoto} alt="ID Photo"
+                               className="w-full h-full object-cover object-top" />
+                        ) : photoIsDid ? (
+                          <div className="w-full h-full flex flex-col items-center justify-center gap-1">
+                            <span className="text-xs text-cyan-400">🔗</span>
+                            <span className="text-[8px] text-slate-400 text-center px-1">DID Photo</span>
+                          </div>
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <span className="text-2xl">👤</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {/* Personal details — only disclosed */}
+                    <div className="flex-1 min-w-0">
+                      {(firstName !== null || lastName !== null) && (
+                        <div className="text-base font-bold text-white truncate">
+                          {[firstName, lastName].filter(Boolean).join(' ') || '—'}
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-x-2 gap-y-1 mt-1">
+                        {dateOfBirth !== null && (
+                          <div>
+                            <div className="text-[9px] text-slate-400 uppercase">DOB</div>
+                            <div className="text-xs text-slate-200">{dateOfBirth}</div>
+                          </div>
+                        )}
+                        {gender !== null && (
+                          <div>
+                            <div className="text-[9px] text-slate-400 uppercase">Gender</div>
+                            <div className="text-xs text-slate-200">{gender}</div>
+                          </div>
+                        )}
+                        {uniqueId && (
+                          <div className="col-span-2">
+                            <div className="text-[9px] text-slate-400 uppercase">ID</div>
+                            <div className="text-xs text-slate-200 font-mono truncate">{uniqueId}</div>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  )}
-                  {verificationResult.issuer && (
-                    <div className="flex justify-between text-xs">
-                      <span className="text-gray-600 dark:text-gray-400">Issued by:</span>
-                      <span className="text-gray-900 dark:text-gray-100 font-medium font-mono text-xs">
-                        {typeof verificationResult.issuer === 'string'
-                          ? verificationResult.issuer.substring(0, 30) + '...'
-                          : verificationResult.issuer?.id?.substring(0, 30) + '...' || 'Unknown'
-                        }
-                      </span>
-                    </div>
-                  )}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Detailed Credential View */}
             {showCredentialDetails && (
@@ -1264,20 +1404,31 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
 
                 <div className="space-y-3">
                   <div>
-                    <h6 className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">Raw Credential Data:</h6>
-                    <pre className="text-xs bg-gray-100 dark:bg-gray-700 p-2 rounded border overflow-x-auto max-h-40">
-                      {JSON.stringify(attachedCredential, null, 2)}
-                    </pre>
+                    <h6 className="text-xs font-semibold text-slate-300 mb-1">Disclosed Fields:</h6>
+                    {(() => {
+                      const disclosed: string[] | null = attachedCredential?.disclosedFields ?? null;
+                      const cs = verificationResult?.credentialSubject || {};
+                      const filtered = disclosed
+                        ? Object.fromEntries(
+                            disclosed
+                              .filter((f: string) => f in cs)
+                              .map((f: string) => [f, cs[f]])
+                          )
+                        : cs;
+                      return (
+                        <>
+                          {disclosed && (
+                            <p className="text-[10px] text-amber-400 mb-1">
+                              ⚠️ UI-level filtering only — full JWT travels on wire (not SD-JWT)
+                            </p>
+                          )}
+                          <pre className="text-xs bg-slate-900/50 text-slate-300 p-2 rounded border border-slate-700/50 overflow-x-auto max-h-40">
+                            {JSON.stringify(filtered, null, 2)}
+                          </pre>
+                        </>
+                      );
+                    })()}
                   </div>
-
-                  {verificationResult && (
-                    <div>
-                      <h6 className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">Verification Result:</h6>
-                      <pre className="text-xs bg-gray-100 dark:bg-gray-700 p-2 rounded border overflow-x-auto max-h-32">
-                        {JSON.stringify(verificationResult, null, 2)}
-                      </pre>
-                    </div>
-                  )}
                 </div>
               </div>
             )}

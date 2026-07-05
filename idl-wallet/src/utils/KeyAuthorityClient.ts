@@ -76,73 +76,84 @@ function decodeJWTPayload(jwt: string): Record<string, any> | null {
 }
 
 /**
- * Build a minimal Verifiable Presentation from wallet credentials.
- * Includes EmployeeRole and SecurityClearance VCs (as raw JWT strings).
- *
- * Security: only VCs whose JWT `sub` field matches the first credential's subject
- * are included. This prevents a holder from accidentally bundling peer credentials
- * (received during OOB connection) belonging to a different subject — which would
- * be a holder-binding violation and rejected by the server anyway.
+ * Compare two PRISM DIDs by their short-form hash segment only.
+ * Handles long-form (did:prism:<hash>:<key-material>) vs short-form (did:prism:<hash>) mismatch.
  */
-function buildVP(credentials: any[]): { vp: object; hasCredentials: boolean } {
-  const jwtStrings: string[] = [];
-  let holderSubject: string | null = null;
+function prismDIDsMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const shortForm = (did: string) =>
+    did.startsWith('did:prism:') ? did.split(':').slice(0, 3).join(':') : did;
+  return shortForm(a) === shortForm(b);
+}
+
+/** Extract a raw JWT string from any credential storage format. */
+function extractJWTString(cred: any): string | null {
+  if (typeof cred === 'string') {
+    if (cred.includes('.')) return cred;
+    try {
+      const b64Pad = cred.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = b64Pad + '='.repeat((4 - (b64Pad.length % 4)) % 4);
+      const decoded = atob(padded);
+      if (decoded.includes('.')) return decoded;
+    } catch { /* not base64 */ }
+    return null;
+  }
+  if (cred?.properties && typeof cred.properties.get === 'function') {
+    try {
+      const jti = cred.properties.get('jti');
+      if (typeof jti === 'string' && jti.split('.').length === 3) return jti;
+    } catch { /* Map.get failed */ }
+    return null;
+  }
+  if (cred?.jwt && typeof cred.jwt === 'string') return cred.jwt;
+  if (cred?.credential && typeof cred.credential === 'string') return cred.credential;
+  if (cred?.id && typeof cred.id === 'string') {
+    const raw = cred.rawCredential || cred.vcJwt || cred.encodedSignedCredential;
+    if (raw && typeof raw === 'string') return raw;
+  }
+  return null;
+}
+
+/**
+ * Build a minimal Verifiable Presentation from wallet credentials.
+ * Only includes EmployeeRole, SecurityClearance, and SecurityClearanceGrant VCs.
+ *
+ * Subject consistency: a VP must not mix credentials from different subjects or
+ * most servers will reject it with "mixed credential subjects". When the wallet
+ * holds both enterprise credentials (EmployeeRole) and personal credentials
+ * (SecurityClearance from CA) with different payload.sub values, this function
+ * filters to only include VCs that share the same subject as the EmployeeRole VC.
+ * Non-enterprise VCs whose subject matches the enterprise DID are still included.
+ */
+export function buildVP(credentials: any[]): { vp: object; hasCredentials: boolean } {
+  // Phase 1: collect all eligible JWT candidates with their decoded sub
+  const candidates: { jwt: string; sub: string | null; type: string }[] = [];
 
   for (const cred of credentials) {
     const type = getCredentialType(cred);
     if (type !== 'EmployeeRole' && type !== 'SecurityClearance' && type !== 'SecurityClearanceGrant') continue;
 
-    // Credentials may be stored as raw JWT string, base64-encoded JWT, or object with .jwt / .credential field
-    let jwtStr: string | null = null;
-    if (typeof cred === 'string') {
-      if (cred.includes('.')) {
-        // Already a raw JWT (header.payload.signature)
-        jwtStr = cred;
-      } else {
-        // Try base64-decoding to get the raw JWT
-        try {
-          const b64Pad = cred.replace(/-/g, '+').replace(/_/g, '/');
-          const padded = b64Pad + '='.repeat((4 - (b64Pad.length % 4)) % 4);
-          const decoded = atob(padded);
-          if (decoded.includes('.')) jwtStr = decoded;
-        } catch { /* not base64 */ }
-      }
-    } else if (cred?.properties && typeof cred.properties.get === 'function') {
-      // SDK JWTCredential (Map-based) — raw JWS is stored under 'jti' key
-      try {
-        const jti = cred.properties.get('jti');
-        if (typeof jti === 'string' && jti.split('.').length === 3) {
-          jwtStr = jti;
-        }
-      } catch { /* Map.get failed */ }
-    } else if (cred?.jwt && typeof cred.jwt === 'string') {
-      jwtStr = cred.jwt;
-    } else if (cred?.credential && typeof cred.credential === 'string') {
-      jwtStr = cred.credential;
-    } else if (cred?.id && typeof cred.id === 'string') {
-      // Packed credential object — try to extract the raw JWT from common fields
-      const raw = cred.rawCredential || cred.vcJwt || cred.encodedSignedCredential;
-      if (raw && typeof raw === 'string') jwtStr = raw;
-    }
-
+    const jwtStr = extractJWTString(cred);
     if (!jwtStr) continue;
 
-    // Holder-binding guard: all VCs must share the same credential subject (JWT sub).
-    // If this credential belongs to a different subject (e.g. a peer VC received
-    // during OOB connection that was accidentally stored in Pluto), skip it.
     const payload = decodeJWTPayload(jwtStr);
-    const vcSubject = payload?.sub || payload?.vc?.credentialSubject?.id || null;
-    if (vcSubject) {
-      if (holderSubject === null) {
-        holderSubject = vcSubject;
-      } else if (vcSubject !== holderSubject) {
-        console.warn(`[buildVP] Skipping credential with mismatched subject (${vcSubject} ≠ ${holderSubject}) — holder-binding protection`);
-        continue;
-      }
-    }
-
-    jwtStrings.push(jwtStr);
+    // Prefer credentialSubject.id over payload.sub: when a VC is issued via DIDComm
+    // without an explicit subjectId, payload.sub is set to the connection peer DID
+    // (did:peer:...) rather than the holder's PRISM DID.  credentialSubject.id is always
+    // set to the holder's PRISM DID by the agent.
+    const sub = payload?.vc?.credentialSubject?.id || payload?.sub || null;
+    candidates.push({ jwt: jwtStr, sub, type });
   }
+
+  // Phase 2: pick the canonical subject from the EmployeeRole VC (required for enterprise access)
+  const employeeRoleCandidate = candidates.find(c => c.type === 'EmployeeRole');
+  const canonicalSub = employeeRoleCandidate?.sub ?? null;
+
+  // Phase 3: filter to credentials that share the canonical subject (PRISM DID-normalised)
+  const jwtStrings = candidates
+    .filter(c => !canonicalSub || !c.sub || prismDIDsMatch(c.sub, canonicalSub))
+    .map(c => c.jwt);
 
   const vp = {
     '@context': ['https://www.w3.org/2018/credentials/v1'],
@@ -392,12 +403,15 @@ export async function requestDocumentAccessDIDComm(
   documentDID: string,
   credentials: any[],
   keyPair: nacl.BoxKeyPair,
-  opts?: { baseUrl?: string; timeoutMs?: number }
+  opts?: { baseUrl?: string; timeoutMs?: number; employeeIdentifier?: string }
 ): Promise<AccessGateResponse> {
   const base             = opts?.baseUrl ?? COMPANY_ADMIN_BASE;
   const timeoutMs        = opts?.timeoutMs ?? 3 * 60 * 1000;   // 3 min default
   const ephemeralPublicKey = Buffer.from(keyPair.publicKey).toString('base64');
-  const employeeIdentifier = extractEmployeeIdentifier(credentials);
+  // Use caller-supplied identifier (from enterpriseDIDs / storedDID / auto-detect)
+  // before falling back to credential-subject extraction, which fails for
+  // SecurityClearance VCs that don't embed email/prismDid in their subject.
+  const employeeIdentifier = opts?.employeeIdentifier ?? extractEmployeeIdentifier(credentials);
 
   // Step 1: Initiate — server creates DIDComm proof request; wallet will receive it shortly
   const initRes = await fetch(`${base}/api/document-access/initiate`, {

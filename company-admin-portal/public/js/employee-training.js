@@ -18,6 +18,16 @@ let completionCheck;
 let submitButton;
 let statusMessage;
 
+// Accept session token from URL param (DIDComm access-request grant flow)
+(function() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const sessionFromUrl = urlParams.get('session');
+  if (sessionFromUrl) {
+    localStorage.setItem('employee_session_token', sessionFromUrl);
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+})();
+
 // Session token from localStorage
 const sessionToken = localStorage.getItem('employee_session_token');
 console.log('[Training] Session token RAW value:', sessionToken);

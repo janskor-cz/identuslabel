@@ -83,12 +83,15 @@ Users with a DIDComm connection to the CA can request access to protected CA pag
 5. `GlobalGrantWatcher` detects the grant in any message poll cycle → **automatically opens** the CA dashboard in the wallet iFrame
 6. Status modal disappears; the token is single-use and expires in 5 minutes
 
-**Command protocol** — all messages are carried as JSON inside DIDComm BasicMessage:
+**Command protocol** — all messages are carried as JSON inside DIDComm BasicMessage. Now
+`service-access/1.0`, shared across CA, company-admin-portal, and identus-document-service (see
+`packages/service-access-didcomm/PROTOCOL.md`) — was previously three independent, drifted
+per-service implementations:
 
 | Direction | Type URI | Purpose |
 |-----------|----------|---------|
-| Wallet → CA | `…/access-request/1.0/request` | Request access to a named target |
-| CA → Wallet | `…/access-request/1.0/grant` | Access URL + expiry metadata |
+| Wallet → CA | `…/service-access/1.0/request` | Request access to a named capability |
+| CA → Wallet | `…/service-access/1.0/grant` | Access URL + expiry metadata |
 
 **Access targets** (defined in `certification-authority/server.js`):
 

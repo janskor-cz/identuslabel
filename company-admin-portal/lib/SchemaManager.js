@@ -59,44 +59,35 @@ class SchemaManager {
 
         const schemaDefinition = {
             name: 'EmployeeRole',
-            version: '1.2.0',
-            description: 'Employee role and position within organization (with issuer DID for document releasability)',
+            version: '1.4.0',
+            description: 'Employee role and position within organization (with identity link, service URL, and DIDComm access targets)',
             type: 'https://w3c-ccg.github.io/vc-json-schemas/schema/2.0/schema.json',
             author: authorDID,
             authored: new Date().toISOString(),
             tags: ['employee', 'role', 'hr', 'techcorp', 'issuer-based'],
             schema: {
                 '$schema': 'https://json-schema.org/draft/2020-12/schema',
-                '$id': 'https://identuslabel.cz/schemas/EmployeeRole/1.2.0',
+                '$id': 'https://identuslabel.cz/schemas/EmployeeRole/1.4.0',
                 'type': 'object',
                 'properties': {
-                    'prismDid': {
-                        'type': 'string'
-                    },
-                    'employeeId': {
-                        'type': 'string'
-                    },
-                    'email': {
-                        'type': 'string'
-                    },
-                    'issuerDID': {
-                        'type': 'string'
-                    },
-                    'role': {
-                        'type': 'string'
-                    },
-                    'department': {
-                        'type': 'string'
-                    },
-                    'hireDate': {
-                        'type': 'string'
-                    },
-                    'effectiveDate': {
-                        'type': 'string'
-                    },
-                    'expiryDate': {
-                        'type': 'string'
-                    }
+                    'prismDid': { 'type': 'string' },
+                    'employeeId': { 'type': 'string' },
+                    'email': { 'type': 'string' },
+                    'issuerDID': { 'type': 'string' },
+                    'role': { 'type': 'string' },
+                    'department': { 'type': 'string' },
+                    'hireDate': { 'type': 'string' },
+                    'effectiveDate': { 'type': 'string' },
+                    'expiryDate': { 'type': 'string' },
+                    'uniqueId': { 'type': 'string' },
+                    'lastName': { 'type': 'string' },
+                    'photo': { 'type': 'string' },
+                    'serviceUrl': { 'type': 'string' },
+                    'serviceName': { 'type': 'string' },
+                    'serviceIcon': { 'type': 'string' },
+                    'accessTarget': { 'type': 'string' },
+                    'accessTargetLabel': { 'type': 'string' },
+                    'accessTargetIcon': { 'type': 'string' }
                 },
                 'required': [
                     'prismDid',
@@ -127,7 +118,7 @@ class SchemaManager {
                 const errorText = await response.text();
                 if (response.status === 409) {
                     // Schema already exists, try to find it
-                    const existing = await this.findSchemaByNameAndVersion('EmployeeRole', '1.2.0');
+                    const existing = await this.findSchemaByNameAndVersion('EmployeeRole', '1.4.0');
                     if (existing) {
                         cache.employeeRoleSchemaGuid = existing.guid;
                         await this.saveCache(cache);

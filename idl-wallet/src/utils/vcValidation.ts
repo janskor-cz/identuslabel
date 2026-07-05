@@ -1,5 +1,8 @@
 import { VCValidationResult } from '../types/invitations';
 
+// Trusted issuer DID for RealPerson VCs — issued exclusively by the Certification Authority
+const TRUSTED_REALPERSON_ISSUER = 'did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c';
+
 // Enhanced base64 decoding with automatic padding for RFC 0434 compliance
 export function safeBase64Decode(base64String: string): { isValid: boolean; data?: string; error?: string } {
   try {
@@ -258,6 +261,51 @@ export async function validateVerifiableCredential(
     }
 
     // ============================================================
+    // PRE-PROCESSING: Expand JWT-embedded format
+    // ============================================================
+    // createVCProofAttachment embeds the raw JWS so the ES256K signature can
+    // be verified. Two formats exist:
+    //   new: vcProof.jwt = "eyJ..." (raw 3-part JWS)
+    //   old: vcProof.jwt = JSON string of { id: "eyJ...", vc: {...}, iss: "...", ... }
+    // Extract the JWS from either format, decode the payload, and flatten it
+    // onto vcProof so downstream phases see a standard VC-shaped object.
+    if (typeof vcProof?.jwt === 'string') {
+      let jws: string | null = null;
+      const isRawJws = (s: any): s is string =>
+        typeof s === 'string' && s.startsWith('eyJ') && s.split('.').length === 3;
+
+      if (isRawJws(vcProof.jwt)) {
+        jws = vcProof.jwt;
+      }
+      // JSON-wrapper fallback intentionally removed: extracting a JWS from
+      // an unauthenticated JSON envelope allows JWS substitution attacks.
+      // Senders now always embed the raw JWS directly.
+
+      if (jws) {
+        try {
+          const b64 = jws.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+          const payload = JSON.parse(atob(b64));
+          vcProof = {
+            ...(payload.vc || {}),
+            issuer: payload.iss || payload.vc?.issuer,
+            issuanceDate: payload.iat
+              ? new Date(payload.iat * 1000).toISOString()
+              : payload.vc?.issuanceDate,
+            expirationDate: payload.exp
+              ? new Date(payload.exp * 1000).toISOString()
+              : payload.vc?.expirationDate,
+            _embeddedJwt: jws,
+            disclosedFields: vcProof.disclosedFields,
+          };
+          console.log('🔍 [NON-BLOCKING-VALIDATION] Decoded embedded JWT for validation');
+        } catch (_) {
+          result.errors.push('Embedded JWT is malformed and cannot be decoded');
+          return result;
+        }
+      }
+    }
+
+    // ============================================================
     // PHASE 1: BASIC STRUCTURE VALIDATION (informational only)
     // ============================================================
 
@@ -308,6 +356,21 @@ export async function validateVerifiableCredential(
     }
 
     // ============================================================
+    // ISSUER PINNING: RealPerson VCs must come from the trusted CA
+    // ============================================================
+    if (knownSchemas.includes('RealPerson')) {
+      const rawIssuer = vcProof.issuer
+        ? (typeof vcProof.issuer === 'string' ? vcProof.issuer : vcProof.issuer?.id)
+        : null;
+      if (rawIssuer && rawIssuer !== TRUSTED_REALPERSON_ISSUER) {
+        console.log('❌ [NON-BLOCKING-VALIDATION] RealPerson VC from untrusted issuer:', rawIssuer);
+        result.errors.push(`RealPerson VC issuer not trusted: expected CA DID, got ${rawIssuer}`);
+        result.isValid = false;
+        return result;
+      }
+    }
+
+    // ============================================================
     // PHASE 3: METADATA EXTRACTION (always succeeds)
     // ============================================================
 
@@ -338,59 +401,65 @@ export async function validateVerifiableCredential(
     }
 
     // ============================================================
-    // PHASE 4: CRYPTOGRAPHIC VERIFICATION (optional, non-blocking)
+    // PHASE 4: CRYPTOGRAPHIC VERIFICATION
     // ============================================================
 
-    // Perform cryptographic verification if agent is available
     if (agent && agent.pollux && result.issuer) {
       console.log('🔍 [NON-BLOCKING-VALIDATION] Attempting cryptographic verification...');
       try {
-        // Check if this is a JWT credential that can be verified
-        if (typeof vcProof === 'object' && vcProof.issuer) {
-          // Try to get the raw JWS if available
+        // Primary path: raw JWT preserved by createVCProofAttachment — verify ES256K signature
+        if (typeof vcProof._embeddedJwt === 'string') {
+          console.log('🔍 [NON-BLOCKING-VALIDATION] Found embedded JWT, verifying ES256K signature...');
+          const issuerDID = agent.castor.parseDID(result.issuer);
+          const isSignatureValid = await (agent.pollux as any).JWT.verify({
+            jws: vcProof._embeddedJwt,
+            issuerDID,
+          });
+          if (!isSignatureValid) {
+            console.log('❌ [NON-BLOCKING-VALIDATION] ES256K signature verification FAILED');
+            result.errors.push('Invalid cryptographic signature — credential may be forged');
+            result.isValid = false;
+          } else {
+            console.log('✅ [NON-BLOCKING-VALIDATION] ES256K signature verified');
+            if (result.errors.length === 0) result.isValid = true;
+          }
+        } else if (vcProof._unverifiable) {
+          // Fallback blob from old createVCProofAttachment — no signature to verify
+          console.log('⚠️ [NON-BLOCKING-VALIDATION] Credential is display-only (no verifiable JWT)');
+          result.warnings.push('No cryptographic signature available for verification');
+        } else {
+          // Legacy path: _jws or dot-separated id field
           let jws: string | undefined;
-
-          // Check if vcProof has a JWT/JWS format
           if (typeof vcProof._jws === 'string') {
             jws = vcProof._jws;
-          } else if (typeof vcProof.id === 'string' && vcProof.id.includes('.')) {
-            // Sometimes the JWS is stored in the id field
+          } else if (typeof vcProof.id === 'string' && vcProof.id.split('.').length === 3) {
             jws = vcProof.id;
           }
-
           if (jws) {
-            console.log('🔍 [NON-BLOCKING-VALIDATION] Found JWS, verifying signature...');
+            console.log('🔍 [NON-BLOCKING-VALIDATION] Found legacy JWS, verifying signature...');
             const issuerDID = agent.castor.parseDID(result.issuer);
-
-            const isSignatureValid = await agent.pollux.JWT.verify({
-              jws: jws,
-              issuerDID: issuerDID
-            });
-
+            const isSignatureValid = await (agent.pollux as any).JWT.verify({ jws, issuerDID });
             if (!isSignatureValid) {
-              console.log('❌ [NON-BLOCKING-VALIDATION] Cryptographic signature verification failed');
+              console.log('❌ [NON-BLOCKING-VALIDATION] Signature verification failed');
               result.errors.push('Invalid cryptographic signature');
+              result.isValid = false;
             } else {
-              console.log('✅ [NON-BLOCKING-VALIDATION] Cryptographic signature verified successfully');
-              // If crypto is valid and no blocking errors, mark as valid
-              if (result.errors.length === 0) {
-                result.isValid = true;
-              }
+              console.log('✅ [NON-BLOCKING-VALIDATION] Signature verified');
+              if (result.errors.length === 0) result.isValid = true;
             }
           } else {
             console.log('⚠️ [NON-BLOCKING-VALIDATION] No JWS found for cryptographic verification');
             result.warnings.push('No cryptographic signature available for verification');
-            // For credentials without signatures, we treat them as "displayable but unverified"
-            // This is common for demo credentials or credentials using different signature schemes
           }
         }
       } catch (cryptoError) {
-        console.log('❌ [NON-BLOCKING-VALIDATION] Cryptographic verification failed:', cryptoError.message);
-        result.warnings.push(`Cryptographic verification failed: ${cryptoError.message}`);
-        // NOT added to errors - crypto failure doesn't block display
+        console.log('❌ [NON-BLOCKING-VALIDATION] Cryptographic verification error:', cryptoError.message);
+        // Any exception during verify() means no cryptographic assurance — must block.
+        result.errors.push(`Cryptographic signature verification failed: ${cryptoError.message}`);
+        result.isValid = false;
       }
     } else {
-      console.log('ℹ️ [NON-BLOCKING-VALIDATION] Skipping cryptographic verification - agent or issuer not available');
+      console.log('ℹ️ [NON-BLOCKING-VALIDATION] Skipping crypto verification — agent or issuer not available');
       result.warnings.push('Cryptographic verification not performed');
     }
 
@@ -425,8 +494,8 @@ export async function validateVerifiableCredential(
     return result;
   } catch (error) {
     console.log('❌ [NON-BLOCKING-VALIDATION] Validation error:', error.message);
-    // Even on error, we return a result that allows display
-    result.warnings.push(`Validation error: ${error.message}`);
+    result.errors.push(`Validation error: ${error.message}`);
+    result.isValid = false;
     return result;
   }
 }
@@ -531,12 +600,45 @@ export function isCredentialRevoked(credential: any): boolean {
 }
 
 export function parseInviterIdentity(vcProof: any, validationResult: VCValidationResult, agent?: any, pluto?: any): any {
-  const credentialSubject = extractCredentialSubject(vcProof);
+  let credentialSubject = extractCredentialSubject(vcProof);
+
+  // vcProof from OOB attachment is { jwt: rawJWS, disclosedFields: [...] }.
+  // extractCredentialSubject can't find credentialSubject there — decode the JWT directly.
+  if (Object.keys(credentialSubject).length === 0 && typeof vcProof?.jwt === 'string') {
+    try {
+      const isRawJws = (s: any): s is string =>
+        typeof s === 'string' && s.startsWith('eyJ') && s.split('.').length === 3;
+      if (isRawJws(vcProof.jwt)) {
+        const b64 = vcProof.jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(atob(b64));
+        const fullSubject = payload.vc?.credentialSubject || payload.credentialSubject || {};
+        const disclosedFields: string[] | undefined = vcProof.disclosedFields;
+        if (disclosedFields && disclosedFields.length > 0) {
+          const filtered: any = {};
+          disclosedFields.forEach((field: string) => {
+            if (fullSubject[field] !== undefined) filtered[field] = fullSubject[field];
+          });
+          // Always include credentialType — it's non-PII metadata needed for UI type detection
+          if (fullSubject.credentialType && !filtered.credentialType) {
+            filtered.credentialType = fullSubject.credentialType;
+          }
+          credentialSubject = filtered;
+        } else {
+          credentialSubject = fullSubject;
+        }
+      }
+    } catch (_) {}
+  }
+
+  // Attach credentialSubject to vcProof so InvitationPreviewModal can detect type via getCredentialType()
+  const vcProofWithSubject = Object.keys(credentialSubject).length > 0
+    ? { ...vcProof, credentialSubject }
+    : vcProof;
 
   const identity = {
     isVerified: validationResult.isValid,
     revealedData: credentialSubject,
-    vcProof: vcProof, // ✅ PHASE 1 FIX: Always include raw VC proof for display
+    vcProof: vcProofWithSubject,
     validationResult
   };
 

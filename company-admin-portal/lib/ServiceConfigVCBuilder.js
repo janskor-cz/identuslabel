@@ -23,7 +23,7 @@ class ServiceConfigVCBuilder {
      * @param {string} employeeData.connectionId - DIDComm connection ID
      * @returns {Promise<Object>} { credentialSubject, employeeWallet }
      */
-    static async buildServiceConfigClaims(employeeData, company = null) {
+    static async buildServiceConfigClaims(employeeData, company = null, realPersonClaims = null) {
         try {
             console.log(`\n🏗️  [ServiceConfigVCBuilder] Building ServiceConfig claims for: ${employeeData.name}`);
 
@@ -33,7 +33,7 @@ class ServiceConfigVCBuilder {
                 email: employeeData.email,
                 name: employeeData.name,
                 department: employeeData.department
-            }, company?.did);
+            }, company?.did, realPersonClaims);
 
             console.log(`  ✅ Employee wallet created:`);
             console.log(`     Wallet ID: ${employeeWallet.walletId}`);

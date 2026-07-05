@@ -18,15 +18,42 @@
 
 const fetch = require('node-fetch');
 
+// Throws at require-time if a required secret is missing — no silent fallback to committed values.
+function requireEnv(name) {
+  const val = process.env[name];
+  if (!val) throw new Error(`Required environment variable ${name} is not set`);
+  return val;
+}
+
 // Employee Cloud Agent configuration (port 8300)
 const EMPLOYEE_CLOUD_AGENT_URL = process.env.EMPLOYEE_CLOUD_AGENT_URL || 'https://identuslabel.cz/enterprise';
-const ADMIN_API_KEY = process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu';
+const ADMIN_API_KEY = requireEnv('ENTERPRISE_ADMIN_TOKEN');
 
 // TechCorp Company Wallet configuration (port 8200 - Multitenancy Cloud Agent)
 const TECHCORP_CLOUD_AGENT_URL = process.env.TECHCORP_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
-const TECHCORP_API_KEY = process.env.TECHCORP_API_KEY || 'b45cde041306c6bceafee5b1da755e49635ad1cd132b26964136a81dda3e0aa2';
-const TECHCORP_WALLET_ID = process.env.TECHCORP_WALLET_ID || '40e3db59-afcb-46f7-ae39-47417ad894d9';
-const TECHCORP_PRISM_DID = process.env.TECHCORP_PRISM_DID || 'did:prism:6ee757c2913a76aa4eb2f09e9cd3cc40ead73cfaffc7d712c303ee5bc38f21bf';
+const TECHCORP_API_KEY    = requireEnv('TECHCORP_API_KEY');
+const TECHCORP_WALLET_ID  = requireEnv('TECHCORP_WALLET_ID');
+const TECHCORP_PRISM_DID  = process.env.TECHCORP_PRISM_DID || 'did:prism:6ee757c2913a76aa4eb2f09e9cd3cc40ead73cfaffc7d712c303ee5bc38f21bf';
+
+// Shared PostgreSQL connection pool (lazy-initialised, reused for the module lifetime).
+let _dbPool = null;
+function getDbPool() {
+  if (!_dbPool) {
+    if (!process.env.ENTERPRISE_DB_PASSWORD) {
+      throw new Error('ENTERPRISE_DB_PASSWORD environment variable is required');
+    }
+    const { Pool } = require('pg');
+    _dbPool = new Pool({
+      host:     process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
+      port:     parseInt(process.env.ENTERPRISE_DB_PORT || '5434'),
+      database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
+      user:     process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
+      password: process.env.ENTERPRISE_DB_PASSWORD,
+      max: 5
+    });
+  }
+  return _dbPool;
+}
 
 /**
  * Create individual employee wallet with PRISM DID
@@ -44,7 +71,7 @@ const TECHCORP_PRISM_DID = process.env.TECHCORP_PRISM_DID || 'did:prism:6ee757c2
  * @param {string} employeeData.department - Department (for metadata)
  * @returns {Promise<Object>} Created wallet details
  */
-async function createEmployeeWallet(employeeData, companyDID = null) {
+async function createEmployeeWallet(employeeData, companyDID = null, preloadedRealPersonClaims = null) {
   const { email, name, department } = employeeData;
 
   console.log(`🏗️  [EmployeeWalletMgr] Creating wallet for: ${name} (${email})`);
@@ -120,7 +147,9 @@ async function createEmployeeWallet(employeeData, companyDID = null) {
       throw new Error(`API key registration failed: ${apiKeyResponse.status} ${error}`);
     }
 
-    console.log(`  ✅ API key registered: ${partialData.apiKey.substring(0, 16)}...`);
+    const { createHash } = require('crypto');
+    const keyFp = createHash('sha256').update(partialData.apiKey).digest('hex').substring(0, 16);
+    console.log(`  ✅ API key registered (fingerprint: sha256:${keyFp}...)`);
 
     // STEP 4: Create PRISM DID using employee's registered API key
     console.log('  → Step 4/12: Creating PRISM DID...');
@@ -136,9 +165,7 @@ async function createEmployeeWallet(employeeData, companyDID = null) {
             { id: 'auth-key-1', purpose: 'authentication' },
             { id: 'assertion-key-1', purpose: 'assertionMethod' }
           ],
-          services: [
-            { id: 'employee-contact', type: 'LinkedDomains', serviceEndpoint: [`mailto:${email}`] }
-          ]
+          services: []
         }
       })
     });
@@ -161,6 +188,16 @@ async function createEmployeeWallet(employeeData, companyDID = null) {
     partialData.canonicalDid = await waitForPublicationComplete(partialData.prismDid, partialData.apiKey);
     console.log(`  ✅ DID published: ${partialData.canonicalDid}`);
 
+    // Register enterprise webhook for this wallet so BasicMessageReceived fires to the portal
+    const COMPANY_PORTAL_BASE_URL = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
+    const enterpriseWebhookUrl = `${COMPANY_PORTAL_BASE_URL}/api/enterprise-messages-webhook`;
+    await fetch(`${EMPLOYEE_CLOUD_AGENT_URL}/events/webhooks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': partialData.apiKey },
+      body: JSON.stringify({ url: enterpriseWebhookUrl })
+    }).catch(e => console.warn(`  ⚠️ Enterprise webhook registration skipped: ${e.message}`));
+    console.log(`  ✅ Enterprise webhook registered for new wallet`);
+
     // STEP 7: Create TechCorp invitation
     console.log('  → Step 7/12: Creating TechCorp invitation...');
     const { invitationUrl, connectionId: techCorpConnectionId } = await createTechCorpInvitation(name, email);
@@ -178,11 +215,16 @@ async function createEmployeeWallet(employeeData, companyDID = null) {
     console.log('  → Step 10/12: Waiting for TechCorp connection...');
     await waitForConnectionComplete(partialData.techCorpConnectionId, TECHCORP_API_KEY, TECHCORP_CLOUD_AGENT_URL);
 
-    // STEP 11: TechCorp connection established
-    console.log('  ✅ Step 11/12: TechCorp connection established');
+    // STEP 11: Use pre-loaded RealPerson claims (provided externally) or skip
+    let realPersonClaims = preloadedRealPersonClaims || null;
+    if (realPersonClaims) {
+      console.log(`  ✅ Step 11/13: Using pre-loaded RealPerson claims: uniqueId=${realPersonClaims.uniqueId}, lastName=${realPersonClaims.lastName}`);
+    } else {
+      console.log('  ℹ️ Step 11/13: No RealPerson claims provided — identity fields will be omitted from EmployeeRole VC');
+    }
 
     // STEP 12: Issue EmployeeRole VC to employee
-    console.log('  → Step 12/12: Issuing EmployeeRole VC...');
+    console.log('  → Step 12/13: Issuing EmployeeRole VC...');
 
     // Prepare credential subject for EmployeeRole VC
     const employeeId = email.split('@')[0]; // Extract "alice" from "alice@techcorp.com"
@@ -193,13 +235,26 @@ async function createEmployeeWallet(employeeData, companyDID = null) {
       issuerDID: companyDID || TECHCORP_PRISM_DID, // DID of the credential issuer (company-specific) - enables document releasability filtering
       role: employeeData.role || "Engineer",
       department: employeeData.department || department || "Engineering",
-      serviceUrl: `https://identuslabel.cz/company-admin/employee-portal-login.html?email=${encodeURIComponent(email)}`,
+      serviceUrl: `https://identuslabel.cz/company-admin/employee-portal-login.html?user=${encodeURIComponent(employeeId)}`,
       serviceName: 'Employee Portal',
       serviceIcon: '🏢',
+      accessTarget: 'techcorp-employee-portal',
+      accessTargetLabel: 'TechCorp Employee Portal',
+      accessTargetIcon: '🏢',
       hireDate: new Date().toISOString(),
       effectiveDate: new Date().toISOString(),
       expiryDate: new Date(Date.now() + 365*24*60*60*1000).toISOString() // 1 year from now
     };
+
+    // Embed identity fields from RealPerson VC if proof was provided
+    if (realPersonClaims) {
+      credentialSubject.uniqueId = realPersonClaims.uniqueId;
+      credentialSubject.lastName = realPersonClaims.lastName;
+      // Only include photo if non-null — schema type is string and rejects null values
+      if (realPersonClaims.photo) {
+        credentialSubject.photo = realPersonClaims.photo;
+      }
+    }
 
     // Issue EmployeeRole VC using TechCorp Cloud Agent
     partialData.employeeRoleCredentialId = await issueEmployeeRoleVC(
@@ -215,24 +270,9 @@ async function createEmployeeWallet(employeeData, companyDID = null) {
     console.log(`  ✅ EmployeeRole VC issued: ${partialData.employeeRoleCredentialId}`);
 
     // STEP 13: Store employee record in database
-    console.log('  → Step 13/13: Storing employee record in database...');
-    const { Pool } = require('pg');
+    console.log('  → Step 13/14: Storing employee record in database...');
     const EmployeePortalDatabase = require('./EmployeePortalDatabase');
-
-    // SECURITY: Database password MUST be set via ENTERPRISE_DB_PASSWORD environment variable
-    if (!process.env.ENTERPRISE_DB_PASSWORD) {
-      throw new Error('ENTERPRISE_DB_PASSWORD environment variable is required for database connection');
-    }
-
-    const dbPool = new Pool({
-      host: process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
-      port: process.env.ENTERPRISE_DB_PORT || 5434,
-      database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
-      user: process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
-      password: process.env.ENTERPRISE_DB_PASSWORD,
-    });
-
-    const employeeDb = new EmployeePortalDatabase(dbPool);
+    const employeeDb = new EmployeePortalDatabase(getDbPool());
 
     // Create employee account with basic info
     const employeeRecord = await employeeDb.createEmployeeAccount({
@@ -275,11 +315,33 @@ async function createEmployeeWallet(employeeData, companyDID = null) {
 
     console.log(`  ✅ EmployeeRole VC recorded in database`);
 
-    // Close database connection
-    await dbPool.end();
+    // STEP 14: Connect enterprise wallet to Document Service (best-effort)
+    console.log('  → Step 14/14: Connecting to Document Service...');
+    try {
+      const docServiceUrl = process.env.DOCUMENT_SERVICE_URL || 'https://identuslabel.cz/document-service';
+      const docInviteResp = await fetch(`${docServiceUrl}/connect`);
+      if (docInviteResp.ok) {
+        const docInviteData = await docInviteResp.json();
+        const invitationUrl = docInviteData.invitation?.invitation?.invitationUrl
+          || docInviteData.invitation?.invitationUrl
+          || docInviteData.invitation;
+        if (invitationUrl && typeof invitationUrl === 'string') {
+          partialData.docServiceConnectionId = await acceptInvitationAsEmployee(
+            invitationUrl, partialData.apiKey, 'Document Service'
+          );
+          console.log(`  ✅ Step 14/14: Document Service connection established: ${partialData.docServiceConnectionId}`);
+        } else {
+          console.warn('  ⚠️ Step 14/14: Document Service returned no invitation URL');
+        }
+      } else {
+        console.warn(`  ⚠️ Step 14/14: Document Service /connect returned ${docInviteResp.status} — skipping`);
+      }
+    } catch (e) {
+      console.warn(`  ⚠️ Step 14/14: Document Service connection skipped: ${e.message}`);
+    }
 
     // SUCCESS - Return complete employee wallet details
-    console.log('\n✅ All 13 steps completed successfully!');
+    console.log('\n✅ All 14 steps completed successfully!');
     const employeeWallet = {
       email,
       name,
@@ -302,7 +364,9 @@ async function createEmployeeWallet(employeeData, companyDID = null) {
     console.log(`   TechCorp Connection: ${employeeWallet.techCorpConnectionId}`);
     console.log(`   Employee Connection: ${employeeWallet.employeeConnectionId}`);
     console.log(`   EmployeeRole VC: ${employeeWallet.employeeRoleCredentialId}`);
-    console.log(`   API Key: ${employeeWallet.apiKey.substring(0, 20)}... (SAVE THIS!)\n`);
+    const { createHash: _ch } = require('crypto');
+    const _fp = _ch('sha256').update(employeeWallet.apiKey).digest('hex').substring(0, 16);
+    console.log(`   API Key fingerprint: sha256:${_fp}... (stored in ServiceConfiguration VC)\n`);
 
     return employeeWallet;
 
@@ -473,6 +537,113 @@ async function publishPrismDid(longFormDid, apiKey) {
  * @param {number} intervalMs - Polling interval in milliseconds (default: 2000)
  * @returns {Promise<string>} Canonical DID
  */
+/**
+ * Helper: Request RealPersonIdentity proof from employee via TechCorp connection
+ * Returns the presentationId to poll for results.
+ */
+async function requestRealPersonProof(techCorpConnectionId) {
+  const { randomBytes } = require('crypto');
+  const challenge = randomBytes(32).toString('hex');
+
+  const response = await fetch(`${TECHCORP_CLOUD_AGENT_URL}/present-proof/presentations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': TECHCORP_API_KEY },
+    body: JSON.stringify({
+      connectionId: techCorpConnectionId,
+      proofs: [],
+      options: { challenge, domain: 'identuslabel.cz' },
+      goalCode: 'present-vp',
+      goal: 'Share your RealPersonIdentity credential for employee onboarding',
+      credentialFormat: 'JWT'
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to send proof request: ${response.status} ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  // Return both presentationId and challenge — caller must pass challenge to
+  // waitForPresentationAndExtract for replay-attack prevention.
+  return { presentationId: data.presentationId || data.thid, challenge };
+}
+
+/**
+ * Helper: Poll TechCorp agent for PresentationVerified, then extract RealPerson claims.
+ * Returns { uniqueId, lastName, photo } or throws on timeout/missing credential.
+ */
+async function waitForPresentationAndExtract(
+  presentationId,
+  originalChallenge,
+  maxAttempts = 150,
+  intervalMs = 2000
+) {
+  console.log(`[EmployeeWalletMgr] Waiting for RealPerson proof (max ${maxAttempts * intervalMs / 1000}s)...`);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+
+    const response = await fetch(
+      `${TECHCORP_CLOUD_AGENT_URL}/present-proof/presentations/${presentationId}`,
+      { method: 'GET', headers: { 'Content-Type': 'application/json', 'apikey': TECHCORP_API_KEY } }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to poll presentation: ${response.status}`);
+    }
+
+    const data = await response.json();
+    console.log(`[EmployeeWalletMgr] Proof attempt ${attempt}/${maxAttempts} - State: ${data.status}`);
+
+    // Only trust PresentationVerified — Cloud Agent has already verified the VP signature.
+    // PresentationReceived means signature not yet checked; do not extract claims from it.
+    if (data.status === 'PresentationVerified') {
+      const jwtVP = data.data?.[0] || data.jwt || (Array.isArray(data.data) ? data.data[0] : null);
+      if (!jwtVP || typeof jwtVP !== 'string') {
+        throw new Error('No JWT VP found in verified presentation');
+      }
+
+      const parts = jwtVP.split('.');
+      if (parts.length < 2) throw new Error('Invalid JWT VP format');
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+
+      // Replay-attack prevention: VP nonce must match the challenge we sent.
+      if (originalChallenge && payload.nonce && payload.nonce !== originalChallenge) {
+        throw new Error('VP challenge mismatch — possible replay attack');
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      const vcs = payload?.vp?.verifiableCredential || [];
+      for (const vcJwt of vcs) {
+        if (typeof vcJwt !== 'string') continue;
+        const vcParts = vcJwt.split('.');
+        if (vcParts.length < 2) continue;
+        const vcPayload = JSON.parse(Buffer.from(vcParts[1], 'base64url').toString('utf8'));
+
+        // Validity window checks on the VC itself.
+        if (vcPayload.exp && vcPayload.exp < now) continue; // expired — skip
+        if (vcPayload.nbf && vcPayload.nbf > now) continue; // not yet valid — skip
+
+        const claims = vcPayload?.vc?.credentialSubject || vcPayload?.credentialSubject || {};
+        if (claims.credentialType === 'RealPersonIdentity') {
+          return {
+            uniqueId: claims.uniqueId || null,
+            lastName: claims.lastName || null,
+            photo: claims.photo || null
+          };
+        }
+      }
+      throw new Error('RealPersonIdentity credential not found in presented VP');
+    }
+
+    if (data.status === 'PresentationRejected' || data.status === 'RequestRejected') {
+      throw new Error('Employee rejected the proof request');
+    }
+  }
+
+  throw new Error(`RealPerson proof not received after ${maxAttempts * intervalMs / 1000} seconds`);
+}
+
 async function waitForPublicationComplete(
   longFormDid,
   apiKey,
@@ -548,11 +719,18 @@ async function createTechCorpInvitation(employeeName, employeeEmail) {
 
 /**
  * Helper: Accept OOB invitation as employee
+ *
+ * CUSTODIAL PROVISIONING: The server accepts this DIDComm invitation on behalf of the employee.
+ * This is a deliberate enterprise onboarding pattern — not user-sovereign SSI.
+ * The employee has no running wallet agent at this stage; the server acts as a custodial agent
+ * to establish the DIDComm channel. The employee receives their VCs via this channel and
+ * controls their wallet independently from that point forward.
+ *
  * @param {string} invitationUrl - OOB invitation URL or payload
  * @param {string} employeeApiKey - Employee's API key
  * @returns {Promise<string>} Employee's connectionId
  */
-async function acceptInvitationAsEmployee(invitationUrl, employeeApiKey) {
+async function acceptInvitationAsEmployee(invitationUrl, employeeApiKey, label = 'TechCorp Internal') {
   console.log(`[EmployeeWalletMgr] Employee accepting TechCorp invitation...`);
 
   // Extract _oob parameter if it's a full URL
@@ -575,7 +753,7 @@ async function acceptInvitationAsEmployee(invitationUrl, employeeApiKey) {
     },
     body: JSON.stringify({
       invitation: oobPayload,
-      label: 'TechCorp Internal'
+      label
     })
   });
 
@@ -674,8 +852,8 @@ async function issueEmployeeRoleVC(
   const employeeDid = credentialSubject.prismDid;
 
   // EmployeeRole schema GUID
-  // NOTE: v1.2.0 includes issuerDID field required for document discovery
-  const EMPLOYEE_ROLE_SCHEMA_GUID = 'e603776b-cada-32c5-8580-310181bf10d4'; // v1.2.0 (with issuerDID field)
+  // NOTE: v1.3.0 adds uniqueId, lastName, photo, serviceUrl, serviceName, serviceIcon fields
+  const EMPLOYEE_ROLE_SCHEMA_GUID = '028358d2-1f3b-37cc-ad1c-b8ca48d1e6c3'; // v1.4.0 — adds accessTarget, accessTargetLabel, accessTargetIcon
 
   // Step 1: Create credential offer from TechCorp side
   const offerResponse = await fetch(`${techCorpCloudAgentUrl}/issue-credentials/credential-offers`, {
@@ -812,6 +990,28 @@ async function rollbackEmployeeWallet(employeeData) {
 
   const errors = [];
 
+  // Step 0: Delete TechCorp-side DIDComm connection (if established)
+  if (employeeData.techCorpConnectionId) {
+    try {
+      console.log(`[EmployeeWalletMgr] Deleting TechCorp connection ${employeeData.techCorpConnectionId}...`);
+      await fetch(
+        `${TECHCORP_CLOUD_AGENT_URL}/connections/${employeeData.techCorpConnectionId}`,
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', 'apikey': TECHCORP_API_KEY }
+        }
+      );
+      console.log(`✅ [EmployeeWalletMgr] TechCorp connection deleted`);
+    } catch (error) {
+      errors.push(`TechCorp connection deletion: ${error.message}`);
+    }
+  }
+
+  // Note: CredentialOffer records (employeeData.employeeRoleCredentialId) become orphaned
+  // when the wallet is deleted. Full StatusList2021 revocation takes 30min+ and is not
+  // appropriate here. Wallet deletion removes the holder side; connection deletion above
+  // prevents future interactions on the issuer side.
+
   // Step 1: Delete API key authentication (if exists)
   if (employeeData.entityId && employeeData.apiKey) {
     try {
@@ -891,88 +1091,52 @@ async function rollbackEmployeeWallet(employeeData) {
 async function getEmployeeTechCorpConnection(employeeEmail) {
   console.log(`[EmployeeWalletMgr] Retrieving TechCorp connection for ${employeeEmail}...`);
 
-  // SECURITY: Database password MUST be set via ENTERPRISE_DB_PASSWORD environment variable
-  if (!process.env.ENTERPRISE_DB_PASSWORD) {
-    throw new Error('ENTERPRISE_DB_PASSWORD environment variable is required for database connection');
-  }
-
-  const { Pool } = require('pg');
   const EmployeePortalDatabase = require('./EmployeePortalDatabase');
+  const employeeDb = new EmployeePortalDatabase(getDbPool());
 
-  const dbPool = new Pool({
-    host: process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
-    port: process.env.ENTERPRISE_DB_PORT || 5434,
-    database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
-    user: process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
-    password: process.env.ENTERPRISE_DB_PASSWORD,
-  });
-
-  try {
-    const employeeDb = new EmployeePortalDatabase(dbPool);
-
-    // Get employee data from database
-    const employeeData = await employeeDb.getEmployeeByEmail(employeeEmail);
-    if (!employeeData) {
-      throw new Error(`Employee not found: ${employeeEmail}`);
-    }
-
-    if (!employeeData.techcorp_connection_id) {
-      throw new Error(`No TechCorp connection found for employee: ${employeeEmail}`);
-    }
-
-    console.log(`[EmployeeWalletMgr] Found TechCorp connection: ${employeeData.techcorp_connection_id}`);
-    console.log(`[EmployeeWalletMgr] Connection state: ${employeeData.techcorp_connection_state}`);
-
-    // Validate connection exists on TechCorp side
-    const techCorpConnectionResponse = await fetch(
-      `${TECHCORP_CLOUD_AGENT_URL}/connections/${employeeData.techcorp_connection_id}`,
-      {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': TECHCORP_API_KEY
-        }
-      }
-    );
-
-    if (!techCorpConnectionResponse.ok) {
-      throw new Error(`TechCorp connection not found: ${employeeData.techcorp_connection_id}`);
-    }
-
-    const techCorpConnection = await techCorpConnectionResponse.json();
-    console.log(`[EmployeeWalletMgr] TechCorp connection validated (state: ${techCorpConnection.state})`);
-
-    // Validate connection exists on Employee side
-    const employeeConnectionResponse = await fetch(
-      `${EMPLOYEE_CLOUD_AGENT_URL}/connections`,
-      {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': employeeData.api_key_hash  // Note: This won't work, we need the actual API key
-        }
-      }
-    );
-
-    // Note: We can't validate employee side without the actual API key
-    // The API key is hashed in the database for security
-    // This is acceptable - if credential delivery fails, we'll detect it during issuance
-
-    return {
-      techCorpConnectionId: employeeData.techcorp_connection_id,
-      employeeData: {
-        walletId: employeeData.wallet_id,
-        entityId: employeeData.entity_id,
-        prismDid: employeeData.prism_did,
-        email: employeeData.email,
-        fullName: employeeData.full_name,
-        department: employeeData.department
-      }
-    };
-
-  } finally {
-    await dbPool.end();
+  // Get employee data from database
+  const employeeData = await employeeDb.getEmployeeByEmail(employeeEmail);
+  if (!employeeData) {
+    throw new Error(`Employee not found: ${employeeEmail}`);
   }
+
+  if (!employeeData.techcorp_connection_id) {
+    throw new Error(`No TechCorp connection found for employee: ${employeeEmail}`);
+  }
+
+  console.log(`[EmployeeWalletMgr] Found TechCorp connection: ${employeeData.techcorp_connection_id}`);
+  console.log(`[EmployeeWalletMgr] Connection state: ${employeeData.techcorp_connection_state}`);
+
+  // Validate connection exists on TechCorp side
+  const techCorpConnectionResponse = await fetch(
+    `${TECHCORP_CLOUD_AGENT_URL}/connections/${employeeData.techcorp_connection_id}`,
+    {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': TECHCORP_API_KEY
+      }
+    }
+  );
+
+  if (!techCorpConnectionResponse.ok) {
+    throw new Error(`TechCorp connection not found: ${employeeData.techcorp_connection_id}`);
+  }
+
+  const techCorpConnection = await techCorpConnectionResponse.json();
+  console.log(`[EmployeeWalletMgr] TechCorp connection validated (state: ${techCorpConnection.state})`);
+
+  return {
+    techCorpConnectionId: employeeData.techcorp_connection_id,
+    employeeData: {
+      walletId: employeeData.wallet_id,
+      entityId: employeeData.entity_id,
+      prismDid: employeeData.prism_did,
+      email: employeeData.email,
+      fullName: employeeData.full_name,
+      department: employeeData.department
+    }
+  };
 }
 
 /**
@@ -999,8 +1163,9 @@ async function issueCISTrainingCredential(employeeEmail, credentialData) {
   console.log(`[EmployeeWalletMgr] Employee PRISM DID: ${employeeData.prismDid}`);
 
   // Step 2: Prepare credential subject
-  const employeeId = employeeEmail.split('@')[0]; // Extract "alice.private" from email
-  const certificateNumber = `CIS-${Date.now()}-${employeeId}`;
+  const employeeId = employeeEmail.split('@')[0];
+  const { randomUUID } = require('crypto');
+  const certificateNumber = `CIS-${randomUUID()}`;
 
   const credentialSubject = {
     prismDid: employeeData.prismDid, // W3C DID standards compliance
@@ -1043,38 +1208,65 @@ async function issueCISTrainingCredential(employeeEmail, credentialData) {
   console.log(`✅ [EmployeeWalletMgr] CISTraining VC offer created (recordId: ${recordId})`);
 
   // Step 4: Record credential issuance in database
-  const { Pool } = require('pg');
   const EmployeePortalDatabase = require('./EmployeePortalDatabase');
+  const employeeDb = new EmployeePortalDatabase(getDbPool());
+  const employee = await employeeDb.getEmployeeByEmail(employeeEmail);
 
-  const dbPool = new Pool({
-    host: process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
-    port: process.env.ENTERPRISE_DB_PORT || 5434,
-    database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
-    user: process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
-    password: process.env.ENTERPRISE_DB_PASSWORD,
-  });
+  await employeeDb.recordCredentialIssuance(
+    employee.id,
+    'CISTraining',
+    recordId,
+    {
+      ...credentialSubject,
+      issuedBy: 'TechCorp'
+    }
+  );
 
-  try {
-    const employeeDb = new EmployeePortalDatabase(dbPool);
-    const employee = await employeeDb.getEmployeeByEmail(employeeEmail);
-
-    await employeeDb.recordCredentialIssuance(
-      employee.id,
-      'CISTraining',
-      recordId,
-      {
-        ...credentialSubject,
-        issuedBy: 'TechCorp'
-      }
-    );
-
-    console.log(`[EmployeeWalletMgr] CISTraining VC recorded in database`);
-
-  } finally {
-    await dbPool.end();
-  }
+  console.log(`[EmployeeWalletMgr] CISTraining VC recorded in database`);
 
   return recordId;
+}
+
+/**
+ * Connect an existing employee's enterprise wallet to the Document Service.
+ *
+ * The original API key is hashed and unrecoverable from the DB. We generate a
+ * fresh key, register it via the admin credential, use it to accept the OOB
+ * invitation, then leave it in place (the employee can use it going forward).
+ *
+ * @param {string} entityId   - From employee_portal_accounts.entity_id
+ * @param {string} [docServiceUrl] - Defaults to DOCUMENT_SERVICE_URL env or production URL
+ * @returns {Promise<string>} New connectionId
+ */
+async function connectExistingEmployeeToDocService(entityId, docServiceUrl) {
+  const svcUrl = docServiceUrl || process.env.DOCUMENT_SERVICE_URL || 'https://identuslabel.cz/document-service';
+
+  // 1. Issue a fresh API key for the entity using admin credentials
+  const freshApiKey = generateApiKey();
+  const keyResp = await fetch(`${EMPLOYEE_CLOUD_AGENT_URL}/iam/apikey-authentication`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-api-key': ADMIN_API_KEY },
+    body: JSON.stringify({ entityId, apiKey: freshApiKey })
+  });
+  if (!keyResp.ok) {
+    const err = await keyResp.text();
+    throw new Error(`Failed to register fresh API key for entity ${entityId}: ${keyResp.status} ${err}`);
+  }
+
+  // 2. Get OOB invitation from document service
+  const inviteResp = await fetch(`${svcUrl}/connect`);
+  if (!inviteResp.ok) {
+    throw new Error(`Document service /connect returned ${inviteResp.status}`);
+  }
+  const inviteData = await inviteResp.json();
+  const invitationUrl = inviteData.invitation?.invitation?.invitationUrl
+    || inviteData.invitation?.invitationUrl
+    || inviteData.invitation;
+  if (!invitationUrl || typeof invitationUrl !== 'string') throw new Error('Document service returned no invitation URL');
+
+  // 3. Accept the invitation using the fresh key
+  const connectionId = await acceptInvitationAsEmployee(invitationUrl, freshApiKey, 'Document Service');
+  return connectionId;
 }
 
 module.exports = {
@@ -1083,5 +1275,6 @@ module.exports = {
   listEmployeeWallets,
   deleteEmployeeWallet,
   getEmployeeTechCorpConnection,
-  issueCISTrainingCredential
+  issueCISTrainingCredential,
+  connectExistingEmployeeToDocService
 };

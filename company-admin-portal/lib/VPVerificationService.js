@@ -49,6 +49,17 @@ function decodeCredentialJWT(credentialJWT) {
 }
 
 /**
+ * Compare two PRISM DIDs by their short-form hash segment only.
+ * Handles long-form (did:prism:<hash>:<key-material>) vs short-form mismatch.
+ */
+function prismDIDsMatch(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const shortForm = did => did.startsWith('did:prism:') ? did.split(':').slice(0, 3).join(':') : did;
+  return shortForm(a) === shortForm(b);
+}
+
+/**
  * Return true if claims look like an EmployeeRole credential.
  */
 function isEmployeeRoleCred(claims) {
@@ -93,12 +104,17 @@ function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
     const decoded = decodeCredentialJWT(vp.verifiableCredential[i]);
     if (!decoded) continue;
 
-    // Subject consistency check: all VCs in a VP must belong to the same subject
-    const vcSubject = decoded.payload.sub || decoded.payload.vc?.credentialSubject?.id || null;
+    // Subject consistency check: all VCs in a VP must belong to the same subject.
+    // Uses PRISM DID normalization (short-form comparison) to tolerate long-form vs
+    // short-form representations of the same underlying DID.
+    // Prefer credentialSubject.id over payload.sub: VCs issued via DIDComm without an
+    // explicit subjectId have payload.sub set to the connection peer DID (did:peer:…),
+    // while credentialSubject.id is always the holder's PRISM DID.
+    const vcSubject = decoded.payload.vc?.credentialSubject?.id || decoded.payload.sub || null;
     if (vcSubject) {
       if (sharedSubjectDID === null) {
         sharedSubjectDID = vcSubject;
-      } else if (vcSubject !== sharedSubjectDID) {
+      } else if (!prismDIDsMatch(vcSubject, sharedSubjectDID)) {
         console.error(`[VPVerificationService] HOLDER BINDING: Mixed credential subjects detected — index ${i} subject=${vcSubject} differs from expected=${sharedSubjectDID}`);
         return {
           success: false,
@@ -122,9 +138,11 @@ function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
       console.log(`[VPVerificationService] Found EmployeeRole credential at index ${i}`);
       employeeRoleCred = decoded;
     } else if (isSecurityClearanceCred(decoded.claims)) {
-      console.log(`[VPVerificationService] Found SecurityClearance credential at index ${i} (issuer: ${decoded.issuer?.substring(0, 30)}...)`);
-      // Only keep if issuer is trusted; keep whichever has the highest clearance level
-      if (acceptedIssuerDIDs.includes(decoded.issuer)) {
+      console.log(`[VPVerificationService] Found SecurityClearance/Grant credential at index ${i} (issuer: ${decoded.issuer?.substring(0, 50)}...)`);
+      // Accept clearance if the issuer matches any trusted DID (PRISM short-form normalised).
+      // SecurityClearanceGrant VCs are issued by the same company agent that issues EmployeeRole,
+      // so their JWT iss may carry the long-form DID while ACCEPTED_ISSUER_DIDS stores short-form.
+      if (acceptedIssuerDIDs.some(trusted => prismDIDsMatch(trusted, decoded.issuer))) {
         const incoming = CLEARANCE_ORDER.indexOf((decoded.claims.clearanceLevel || '').toUpperCase());
         const existing = securityClearanceCred
           ? CLEARANCE_ORDER.indexOf((securityClearanceCred.claims.clearanceLevel || '').toUpperCase())
@@ -153,8 +171,8 @@ function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
   const issuerDID  = employeeRoleCred.claims?.issuerDID || employeeRoleCred.issuer;
   const companyDID = issuerDID;  // the company that issued the enterprise VC IS the companyDID
 
-  // Verify issuer is trusted
-  if (!acceptedIssuerDIDs.includes(issuerDID)) {
+  // Verify EmployeeRole issuer is trusted (PRISM short-form normalised)
+  if (!acceptedIssuerDIDs.some(trusted => prismDIDsMatch(trusted, issuerDID))) {
     console.error(`[VPVerificationService] Untrusted issuer: ${issuerDID}`);
     return {
       success: false,

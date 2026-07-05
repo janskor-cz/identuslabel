@@ -294,6 +294,20 @@ identuslabel.cz {
         }
     }
 
+    # SSI Agent MCP Server (/ssi-agent -> port 8420)
+    # Remote MCP connector for claude.ai — SSI/KERI knowledge, TypeScript code
+    # review, and security review tools (RAG over Qdrant Cloud + Together AI).
+    # Separate from the Claude Code bridge above (/mcp -> 3031); this is a
+    # distinct FastMCP server managed by ssi-agent.service.
+    handle_path /ssi-agent* {
+        reverse_proxy 127.0.0.1:8420 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
     # Document Service (/document-service -> port 3020)
     # Stateless VP-gated document access microservice (identus-document-service)
     handle_path /document-service* {

@@ -106,6 +106,24 @@ function displayProfile(profile) {
         prismDid: formatDID(employee.prismDid) || 'Not assigned'
     };
 
+    // Display photo
+    const photoEl = document.getElementById('employeePhoto');
+    const photoPlaceholder = document.getElementById('employeePhotoPlaceholder');
+    if (profile.photoUrl && photoEl) {
+        photoEl.src = profile.photoUrl;
+        photoEl.style.display = 'block';
+        if (photoPlaceholder) photoPlaceholder.style.display = 'none';
+    }
+
+    // Display lastName mismatch warning
+    const warningEl = document.getElementById('lastNameWarning');
+    if (profile.lastNameMismatch && warningEl) {
+        warningEl.hidden = false;
+        warningEl.style.display = 'flex';
+        const nameDisplay = document.getElementById('lastNameCurrentDisplay');
+        if (nameDisplay) nameDisplay.textContent = profile.lastNameCurrent || '';
+    }
+
     Object.entries(fields).forEach(([id, value]) => {
         const element = document.getElementById(id);
         if (element) {
@@ -206,7 +224,7 @@ async function initiateClearanceVerification() {
     showClearanceWaitingState();
 
     try {
-        // Initiate DIDComm proof request to personal wallet via CA
+        // Initiate DIDComm proof request via enterprise agent to IDL Wallet
         const response = await fetch(`${API_BASE}/clearance/initiate`, {
             method: 'POST',
             headers: {
@@ -219,15 +237,13 @@ async function initiateClearanceVerification() {
 
         if (!response.ok || !data.success) {
             // Handle specific error cases
-            if (data.error === 'NoDirectConnection') {
-                showClearanceError('No Direct Connection',
-                    'No DIDComm connection found from your company to your personal wallet. ' +
-                    'Please ensure your personal wallet is connected to TechCorp before verifying clearance.');
+            if (data.error === 'NoPersonalWalletConnection' || data.error === 'NoDirectConnection' || data.error === 'NoEnterpriseConnection') {
+                showPersonalWalletConnectionRequired(data);
                 return;
             }
             if (data.error === 'NoCAConnection') {
                 showClearanceError('No CA Connection',
-                    'You must first connect to the Certification Authority via Alice Wallet to receive your Security Clearance credential.');
+                    'You must first connect to the Certification Authority via your IDL Wallet to receive your Security Clearance credential.');
                 return;
             }
             throw new Error(data.message || 'Failed to initiate clearance verification');
@@ -239,7 +255,7 @@ async function initiateClearanceVerification() {
         console.log('[Clearance] Instructions:', data.instructions);
 
         // Update modal with instructions
-        updateClearanceInstructions(data.instructions, data.aliceWalletUrl);
+        updateClearanceInstructions(data.instructions, data.walletUrl || data.aliceWalletUrl);
 
         // Start polling for verification status
         startClearancePolling();
@@ -279,7 +295,7 @@ function showClearanceWaitingState() {
                 <div style="text-align: center; padding: 20px;">
                     <div class="spinner" style="margin: 0 auto 15px;"></div>
                     <h3>Proof Request Sent</h3>
-                    <p id="clearanceWaitingMessage">A proof request has been sent to your personal wallet. Please approve it there.</p>
+                    <p id="clearanceWaitingMessage">A proof request has been sent to your personal IDL Wallet. Please open your wallet and approve the proof request — select your Security Clearance credential.</p>
                     <p id="clearancePollingStatus" style="margin-top: 15px; color: #718096; font-size: 0.9em;">
                         Waiting for wallet response...
                     </p>
@@ -379,6 +395,49 @@ async function pollClearanceStatus() {
         console.error('[Clearance] Poll error:', error);
         // Don't stop polling on transient errors
     }
+}
+
+// Show UI when personal wallet is not connected to the company — provides OOB invitation link
+function showPersonalWalletConnectionRequired(data) {
+    const modal = document.getElementById('clearanceVerificationModal');
+    if (!modal) return;
+
+    const content = modal.querySelector('.modal-body') || modal;
+    const oobUrl = data.oobUrl;
+
+    const oobHtml = oobUrl
+        ? `<div style="margin-top:16px;padding:12px;background:#1a2744;border-radius:8px;border:1px solid #3b82f6;">
+             <p style="margin:0 0 8px;color:#93c5fd;font-size:0.85em;font-weight:600;">📋 Personal Wallet Connection Invitation</p>
+             <p style="margin:0 0 10px;color:#cbd5e1;font-size:0.8em;">Copy this link and paste it in your IDL Wallet → Connections → Connect:</p>
+             <div style="display:flex;gap:8px;align-items:center;">
+               <input id="oobLinkInput" readonly value="${oobUrl}" style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px 8px;color:#e2e8f0;font-size:0.75em;font-family:monospace;" />
+               <button onclick="navigator.clipboard.writeText(document.getElementById('oobLinkInput').value).then(()=>this.textContent='✅').catch(()=>{})" style="padding:6px 10px;background:#3b82f6;border:none;border-radius:6px;color:white;cursor:pointer;font-size:0.8em;white-space:nowrap;">Copy</button>
+             </div>
+             <p style="margin:10px 0 0;color:#94a3b8;font-size:0.75em;">After connecting, click "Verify Clearance" again.</p>
+           </div>`
+        : '<p style="color:#94a3b8;margin-top:12px;font-size:0.85em;">Contact your administrator to receive a connection invitation.</p>';
+
+    const html = `
+      <div style="padding:20px;text-align:center;">
+        <div style="font-size:2em;margin-bottom:12px;">🔗</div>
+        <h3 style="color:#f1f5f9;margin:0 0 8px;">Connect Your Personal Wallet</h3>
+        <p style="color:#94a3b8;margin:0 0 4px;font-size:0.9em;">${data.message}</p>
+        ${oobHtml}
+        <div style="margin-top:16px;display:flex;gap:8px;justify-content:center;">
+          <button onclick="closeClearanceModal()" style="padding:8px 16px;background:#374151;border:none;border-radius:8px;color:white;cursor:pointer;">Cancel</button>
+          <button onclick="closeClearanceModal();openClearanceVerificationModal();" style="padding:8px 16px;background:#10b981;border:none;border-radius:8px;color:white;cursor:pointer;">Try Again</button>
+        </div>
+      </div>`;
+
+    // Replace modal content
+    const existingInner = modal.querySelector('.modal-content');
+    if (existingInner) {
+        existingInner.innerHTML = html;
+    } else {
+        modal.innerHTML = html;
+    }
+    modal.classList.remove('hidden');
+    modal.style.display = 'flex';
 }
 
 // Stop clearance polling
@@ -2084,8 +2143,12 @@ async function initializeDashboard() {
         displayProfile(profile);
         displayTrainingStatus(profile);
 
-        // Clear any leftover clearance_prompt_pending flag (modal is now user-initiated)
+        // If no SecurityClearance VC was provided during login, auto-prompt via personal wallet
+        const clearancePending = sessionStorage.getItem('clearance_prompt_pending') === '1';
         sessionStorage.removeItem('clearance_prompt_pending');
+        if (clearancePending) {
+            setTimeout(() => openClearanceModal(), 600);
+        }
 
         // Load and display available documents
         await loadDocuments(profile);
@@ -2125,6 +2188,15 @@ function startAutoRefresh() {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
+    // Accept session token from URL param (DIDComm access-request grant flow)
+    const urlParams = new URLSearchParams(window.location.search);
+    const sessionFromUrl = urlParams.get('session');
+    if (sessionFromUrl) {
+        localStorage.setItem('employee_session_token', sessionFromUrl);
+        // Clean the URL so the token isn't visible or re-processed on refresh
+        window.history.replaceState({}, '', window.location.pathname);
+    }
+
     checkSessionExpiry();
     initializeDashboard();
     startAutoRefresh();

@@ -27,6 +27,20 @@ export interface ConnectionMetadata {
   // VC Proof tracking for connections established with identity verification
   establishedWithVCProof?: boolean;
   vcProofType?: 'RealPerson' | 'SecurityClearance' | string;
+  // @deprecated — superseded by `capabilities` below. Kept (write + read) only during the
+  // service-access/1.0 migration window; removed once every reader is repointed (see
+  // packages/service-access-didcomm and idl-wallet/src/utils/serviceAccessGrant.ts).
+  isCAConnection?: boolean;
+  // service-access/1.0 capability keys this connection's peer is trusted to grant (e.g.
+  // ['portal','login','security-clearance'] for a CA connection). Set at connection-
+  // establishment time from real evidence (e.g. fetched directly from a pinned HTTPS
+  // well-known-invitation endpoint), not from a locally-editable display name — see
+  // packages/service-access-didcomm/PROTOCOL.md "Trust model".
+  capabilities?: string[];
+  // Access targets discovered from VCs received through this connection
+  supportedTargets?: Array<{ key: string; label: string; icon: string }>;
+  // Peer DID used by the remote party for this connection (resolved at credential issuance time)
+  remotePartyDid?: string;
 }
 
 /**

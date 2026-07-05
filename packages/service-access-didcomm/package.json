@@ -1,0 +1,13 @@
+{
+  "name": "service-access-didcomm",
+  "version": "1.0.0",
+  "description": "Shared DIDComm service-access/1.0 grant issuance library — VP verification, DID-keyed trust registry, declarative claim extraction, and capability-driven grant issuance.",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/trustRegistry.test.js && node test/claimExtractor.test.js && node test/jwtCrypto.test.js && node test/verifyPresentation.test.js && node test/serviceAccessService.test.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  }
+}

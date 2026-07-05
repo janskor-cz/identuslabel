@@ -26,7 +26,6 @@ export const SYSTEM_CREDENTIAL_BLOCKLIST: CredentialType[] = [
 export const SHAREABLE_CREDENTIAL_TYPES: CredentialType[] = [
   'RealPersonIdentity',
   'SecurityClearance',
-  'EmployeeRole',
   'CISTrainingCertificate',
   'DocumentCopy',
 ];
@@ -38,7 +37,7 @@ export const PURPOSE_TO_CREDENTIAL_MAP: Record<string, CredentialType[]> = {
   // Identity verification requests
   'authentication.identity': ['RealPersonIdentity'],
   'identity-verification': ['RealPersonIdentity'],
-  'present-vp': ['RealPersonIdentity', 'SecurityClearance', 'EmployeeRole'],
+  'present-vp': ['RealPersonIdentity', 'SecurityClearance'],
 
   // Security clearance requests
   'authentication.clearance': ['SecurityClearance'],
@@ -56,7 +55,7 @@ export const PURPOSE_TO_CREDENTIAL_MAP: Record<string, CredentialType[]> = {
   // Document access requests
   'document-access': ['DocumentCopy'],
 
-  // Generic - show all shareable types
+  // Generic - show all shareable types (EmployeeRole excluded — handled via enterprise DIDComm only)
   'connect': SHAREABLE_CREDENTIAL_TYPES,
   'issue-vc': SHAREABLE_CREDENTIAL_TYPES,
 };

@@ -1,4 +1,5 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
+import { ensureSecurityClearanceKeys } from '@/utils/ensureSecurityKeys';
 import { XIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/solid';
 
 interface CAPortalModalProps {
@@ -54,13 +55,25 @@ export function CAPortalModal({ url, isMinimized, hasPendingRequests = false, on
     }
   }, [historyIndex]);
 
-  // Listen for postMessages from the iframe (e.g. document open requests)
+  // Listen for postMessages from the iframe (e.g. document open requests, key generation requests)
   useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
+    const handleMessage = async (event: MessageEvent) => {
       if (event.origin !== 'https://identuslabel.cz' && event.origin !== 'http://localhost:3010') return;
       if (event.data?.type === 'OPEN_DOCUMENT' && event.data?.documentDID) {
         onMinimize();
         onOpenDocument(event.data.documentDID);
+      }
+      if (event.data?.type === 'REQUEST_WALLET_KEYS') {
+        console.log('[Wallet] REQUEST_WALLET_KEYS received from', event.origin);
+        const keys = await ensureSecurityClearanceKeys();
+        console.log('[Wallet] ensureSecurityClearanceKeys result:', keys ? 'ok' : 'null');
+        const payload = {
+          type: 'WALLET_KEYS',
+          ed25519PublicKey: keys?.ed25519PublicKey ?? null,
+          x25519PublicKey: keys?.x25519PublicKey ?? null,
+        };
+        console.log('[Wallet] Posting WALLET_KEYS to iframe:', !!payload.ed25519PublicKey, !!payload.x25519PublicKey);
+        iframeRef.current?.contentWindow?.postMessage(payload, 'https://identuslabel.cz');
       }
     };
     window.addEventListener('message', handleMessage);

@@ -7,7 +7,7 @@
  *   Create  — encrypt → Iagon upload → PRISM DID creation + publication
  *   Read    — thin wrapper over DIDDocumentResolver
  *   List    — Iagon-backed JSON index (DOCUMENT_INDEX_FILE_ID)
- *   Update  — new DID version + annotate old DID with #superseded-by
+ *   Update  — new DID version with backward previousVersion link (parent DID immutable, not patched)
  *   Delete  — Iagon file removal + DID soft-tombstone
  *
  * Stateless by design: all persistent state lives in PRISM DIDs and Iagon.
@@ -63,7 +63,8 @@ class DocumentService {
       clearanceLevel,
       releasableTo,
       department,
-      auditWebhookUrl
+      auditWebhookUrl,
+      previousVersion  // optional: DID of the parent version (for branching)
     } = params;
 
     // Validate inputs
@@ -119,7 +120,8 @@ class DocumentService {
       clearanceLevel:    level,
       releasableTo:      releasable,
       iagonEncManifestId,
-      auditWebhookUrl:   auditWebhookUrl || this.config.AUDIT_FALLBACK_URL || null
+      auditWebhookUrl:   auditWebhookUrl || this.config.AUDIT_FALLBACK_URL || null,
+      previousVersion:   previousVersion || null
     });
 
     // Step 6: Create PRISM DID
@@ -151,6 +153,7 @@ class DocumentService {
       operationId,
       iagonFileId:        iagonResult.fileId,
       iagonEncManifestId,
+      encryptionInfo,
       clearanceLevel:     level,
       releasableTo:       releasable,
       title:              title.trim(),
@@ -197,45 +200,33 @@ class DocumentService {
       ...params
     };
 
-    // Create the new version
-    const newResult      = await this.createDocument(mergedParams);
+    // Create the new version with a backward previousVersion link.
+    // The parent DID is left completely untouched — no forward-link patch.
+    const newResult      = await this.createDocument({ ...mergedParams, previousVersion: oldDocumentDID });
     const newDocumentDID = newResult.documentDID;
 
-    // Annotate old DID with #superseded-by (fire-and-forget — non-fatal)
-    this._patchDIDService(oldDocumentDID, 'ADD_SERVICE', {
-      id:              'superseded-by',
-      type:            'LinkedDomains',
-      serviceEndpoint: [newDocumentDID]
-    })
-    .then(() => this._publishDID(oldDocumentDID))
-    .catch(err => console.warn(`[DocumentService] superseded-by patch failed (non-fatal): ${err.message}`));
-
-    // Update index: mark old superseded, add new active entry
+    // Update index: append new entry with parentDID; parent entry is unchanged
     await this._withIndex(entries =>
-      entries
-        .map(e => e.documentDID === oldDocumentDID
-          ? { ...e, status: 'superseded', supersededBy: newDocumentDID }
-          : e
-        )
-        .concat([{
-          documentDID:    newDocumentDID,
-          title:          newResult.title,
-          clearanceLevel: newResult.clearanceLevel,
-          department:     mergedParams.department || null,
-          createdAt:      newResult.createdAt,
-          status:         'active'
-        }])
+      entries.concat([{
+        documentDID:    newDocumentDID,
+        title:          newResult.title,
+        clearanceLevel: newResult.clearanceLevel,
+        department:     mergedParams.department || null,
+        parentDID:      oldDocumentDID,
+        publisherDID:   mergedParams.publisherDID || null,
+        createdAt:      newResult.createdAt,
+        status:         'active'
+      }])
     ).catch(err => console.warn('[DocumentService] Index update failed (non-fatal):', err.message));
 
     return {
       success:        true,
       newDocumentDID,
-      oldDocumentDID,
+      parentDocumentDID: oldDocumentDID,
       operationId:    newResult.operationId,
       iagonFileId:    newResult.iagonFileId,
-      supersedes:     oldDocumentDID,
       createdAt:      newResult.createdAt,
-      note: 'New DID created. Old DID annotated with #superseded-by service (fire-and-forget).'
+      note: 'New version DID created with previousVersion backward link. Parent DID left immutable.'
     };
   }
 
@@ -316,7 +307,7 @@ class DocumentService {
 
   // ── PRIVATE: DID BUILDER ─────────────────────────────────────────────────────
 
-  _buildServices({ iagonFileId, iagonFilename, originalFilename, mimeType, clearanceLevel, releasableTo, iagonEncManifestId, auditWebhookUrl }) {
+  _buildServices({ iagonFileId, iagonFilename, originalFilename, mimeType, clearanceLevel, releasableTo, iagonEncManifestId, auditWebhookUrl, previousVersion }) {
     const services = [
       {
         id:   'metadata',
@@ -338,6 +329,26 @@ class DocumentService {
         id:              'access',
         type:            'DocumentAccessGate',
         serviceEndpoint: `${serviceUrl}/access`
+      });
+    }
+
+    // Add the company-admin redaction challenge endpoint so wallets route DOCX access
+    // through the server-side DocxRedactionService instead of the raw access path.
+    const companyAdminPublicUrl = (this.config.COMPANY_ADMIN_PUBLIC_URL || '').replace(/\/$/, '');
+    if (companyAdminPublicUrl) {
+      services.push({
+        id:              'document-access-gate',
+        type:            'DocumentAccessGate',
+        serviceEndpoint: `${companyAdminPublicUrl}/api/access-gate/challenge`
+      });
+    }
+
+    // Backward version link — only for branched versions, never patched onto the parent
+    if (previousVersion) {
+      services.push({
+        id:              'previousVersion',
+        type:            'DocumentVersion',
+        serviceEndpoint: previousVersion
       });
     }
 

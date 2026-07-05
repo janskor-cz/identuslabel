@@ -19,6 +19,7 @@ import { CERTIFICATION_AUTHORITY } from '@/config/certificationAuthority';
 import { CACredentialConfirmationModal } from './CACredentialConfirmationModal';
 import { getItem, setItem, removeItem, getKeysByPattern } from '@/utils/prefixedStorage';
 import { getConnectionMetadata, saveConnectionMetadata } from '@/utils/connectionMetadata';
+import { CA_CAPABILITIES } from '@/config/serviceTrust';
 import { createLongFormPrismDID } from '@/actions';
 
 const CA_CUSTOM_BASE_URL_KEY = 'ca-custom-base-url';
@@ -191,9 +192,19 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
         const connectionMetadata = getConnectionMetadata(existingCAConnection.host.toString());
 
         if (connectionMetadata?.prismDid) {
-          // Already has PRISM DID, nothing to do
+          // Already has PRISM DID, nothing to do — except backfill capabilities if this
+          // connection predates the service-access/1.0 migration (GlobalGrantWatcher in
+          // _app.tsx requires it to trust an incoming grant and auto-open the CA portal iframe).
           console.log('[CA MODAL] Existing connection already has PRISM DID:',
               connectionMetadata.prismDid.substring(0, 50) + '...');
+          if (!connectionMetadata.capabilities?.length) {
+            saveConnectionMetadata(existingCAConnection.host.toString(), {
+              ...connectionMetadata,
+              isCAConnection: true,
+              capabilities: CA_CAPABILITIES
+            });
+            console.log('[CA MODAL] Backfilled capabilities for existing connection');
+          }
           setSuccess(true);
           setIsConnecting(false);
           return;
@@ -240,7 +251,9 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
           saveConnectionMetadata(existingCAConnection.host.toString(), {
             ...connectionMetadata,
             walletType: 'local',
-            prismDid: newPrismDID
+            prismDid: newPrismDID,
+            isCAConnection: true,
+            capabilities: CA_CAPABILITIES
           });
         }
 
@@ -362,7 +375,9 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
           if (newPrismDID) {
             saveConnectionMetadata(newConnection.host.toString(), {
               walletType: 'local',
-              prismDid: newPrismDID
+              prismDid: newPrismDID,
+              isCAConnection: true,
+              capabilities: CA_CAPABILITIES
             });
             console.log('[CA MODAL] PRISM DID associated with connection');
           }
@@ -502,7 +517,9 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
           if (prismDID) {
             saveConnectionMetadata(newConnection.host.toString(), {
               walletType: 'local',
-              prismDid: prismDID
+              prismDid: prismDID,
+              isCAConnection: true,
+              capabilities: CA_CAPABILITIES
             });
           }
         }

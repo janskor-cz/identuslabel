@@ -1,7 +1,35 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { useMountedApp } from '@/reducers/store';
 import { ChatMessage, MessageStatus } from '@/reducers/app';
+import { sendProtocolAccessRequest } from '@/actions';
+import { useCAPortal } from '@/utils/CAPortalContext';
+import { getItem, setItem } from '@/utils/prefixedStorage';
+import { getConnectionMetadata } from '@/utils/connectionMetadata';
+import { parseServiceAccessGrant, isTrustedGrantSender } from '@/utils/serviceAccessGrant';
+
+const DIDCOMM_SERVICES_KEY = 'didcomm-access-services';
+
+export interface DIDCommService {
+  id: string;
+  accessUrl: string;
+  label: string;
+  icon: string;
+  target: string;
+  userName: string;
+  receivedAt: number;
+  expiresAt: number;
+}
+
+export function loadDIDCommServices(): DIDCommService[] {
+  try { return JSON.parse(getItem(DIDCOMM_SERVICES_KEY) || '[]'); } catch { return []; }
+}
+
+function saveDIDCommService(svc: DIDCommService) {
+  const list = loadDIDCommServices().filter(s => s.target !== svc.target); // replace same target
+  list.unshift(svc);
+  setItem(DIDCOMM_SERVICES_KEY, JSON.stringify(list.slice(0, 20))); // keep last 20
+}
 import { SecurityLevel, SECURITY_LEVEL_NAMES, parseSecurityLevel } from '../utils/securityLevels';
 import { getVCClearanceLevel, validateSecurityClearanceVC, getSecurityKeyByFingerprint, getSecurityKeyByFingerprintAsync } from '../utils/keyVCBinding';
 import { SecurityLevelSelector } from './SecurityLevelSelector';
@@ -18,11 +46,16 @@ interface ChatProps {
 
 export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage }) => {
   const app = useMountedApp();
+  const { openCAPortal, setPendingAccessRequest } = useCAPortal();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const storedGrantIds = useRef<Set<string>>(new Set());
   const [messageText, setMessageText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [selectedSecurityLevel, setSelectedSecurityLevel] = useState<SecurityLevel>(SecurityLevel.INTERNAL);
+  const [showCommandHints, setShowCommandHints] = useState(false);
+  const [showAccessMenu, setShowAccessMenu] = useState(false);
+  const [accessRequestPending, setAccessRequestPending] = useState(false);
 
   // ✅ NEW: Store decrypted message content (cache)
   const [decryptedMessages, setDecryptedMessages] = useState<Map<string, string>>(new Map());
@@ -410,6 +443,46 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
     }
   };
 
+  // Parse a service-access/1.0/grant envelope out of a received message, trust-checked against
+  // the message's actual sender DID — replaces the old getGrantFromMessage, which had NO trust
+  // check at all (only isOwnMessage, which just filters self-echo, not authorization). Only
+  // `mode: redirect` grants are rendered as a service card here; `mode: payload` capabilities
+  // have no generic UI and are handled by GlobalGrantWatcher's capability-specific dispatch.
+  const getTrustedGrant = (message: SDK.Domain.Message): DIDCommService | null => {
+    if (isOwnMessage(message)) return null;
+    const parsed = parseServiceAccessGrant(message);
+    if (!parsed || parsed.mode !== 'redirect' || !parsed.accessUrl) return null;
+
+    const { trusted, originAllowlist } = isTrustedGrantSender(message, [connection], parsed.capability);
+    const urlOnTrustedOrigin = !!originAllowlist && (() => {
+      try { return originAllowlist.includes(new URL(parsed.accessUrl!).origin); } catch { return false; }
+    })();
+    if (!trusted || !urlOnTrustedOrigin) return null;
+
+    return {
+      id: parsed.id,
+      accessUrl: parsed.accessUrl,
+      label: parsed.label,
+      icon: parsed.icon,
+      target: parsed.capability,
+      userName: '',
+      receivedAt: Date.now(),
+      expiresAt: parsed.expiresAt
+    };
+  };
+
+  // Store incoming grant messages to localStorage so the Browser tab can show them.
+  useEffect(() => {
+    for (const msg of messages) {
+      if (storedGrantIds.current.has(msg.id)) continue;
+      const grant = getTrustedGrant(msg);
+      if (grant) {
+        storedGrantIds.current.add(msg.id);
+        saveDIDCommService(grant);
+      }
+    }
+  }, [messages]);
+
   // Parse message body content (handles both plaintext and encrypted)
   const getMessageContent = (message: SDK.Domain.Message): string => {
     try {
@@ -537,6 +610,21 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
     return true;
   };
 
+  // Detect DIDComm access-token URLs in message text and split into segments
+  const parseAccessLinks = (text: string): Array<{ type: 'text' | 'link'; value: string }> => {
+    const pattern = /(https?:\/\/[^\s]+\/api\/access\?token=[^\s]+)/g;
+    const segments: Array<{ type: 'text' | 'link'; value: string }> = [];
+    let last = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      if (match.index > last) segments.push({ type: 'text', value: text.slice(last, match.index) });
+      segments.push({ type: 'link', value: match[1] });
+      last = match.index + match[1].length;
+    }
+    if (last < text.length) segments.push({ type: 'text', value: text.slice(last) });
+    return segments.length > 0 ? segments : [{ type: 'text', value: text }];
+  };
+
   // Format timestamp
   const formatTime = (message: SDK.Domain.Message): string => {
     // ✅ Prefer StandardMessageBody timestamp if available (more accurate for encrypted messages)
@@ -575,16 +663,99 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
     return messageFromDID === myDID;
   };
 
+  // Known display info for CA's capability keys — used both for capabilities-based connections
+  // and as a fallback for connections that still only carry the deprecated isCAConnection flag.
+  const CA_CAPABILITY_INFO: Record<string, { label: string; icon: string }> = {
+    portal:              { label: 'CA Portal',               icon: '🏛️' },
+    'security-clearance': { label: 'Security Clearance Page', icon: '🔐' },
+    login:               { label: 'CA Login',                icon: '🔑' },
+  };
+
+  const getTargetsForConnection = (conn: SDK.Domain.DIDPair) => {
+    const meta = getConnectionMetadata(conn.host.toString());
+    const capabilities = meta?.capabilities?.length
+      ? meta.capabilities
+      : (meta?.isCAConnection ? Object.keys(CA_CAPABILITY_INFO) : []);
+
+    if (capabilities.length) {
+      return capabilities.map(key => ({
+        key,
+        label: CA_CAPABILITY_INFO[key]?.label ?? meta?.supportedTargets?.find(t => t.key === key)?.label ?? key,
+        icon:  CA_CAPABILITY_INFO[key]?.icon  ?? meta?.supportedTargets?.find(t => t.key === key)?.icon  ?? '🔗',
+      }));
+    }
+    return meta?.supportedTargets ?? [];
+  };
+
+  const handleRequestAccess = async (target: string) => {
+    if (!app.agent.instance || accessRequestPending) return;
+    setShowAccessMenu(false);
+    setAccessRequestPending(true);
+    const targetInfo = getTargetsForConnection(connection).find(t => t.key === target);
+    if (targetInfo) setPendingAccessRequest({ target, label: targetInfo.label, icon: targetInfo.icon });
+    try {
+      await app.dispatch(sendProtocolAccessRequest({
+        agent: app.agent.instance,
+        connection,
+        target
+      }));
+    } catch (e: any) {
+      console.error('[Chat] Access request failed:', e.message);
+      setPendingAccessRequest(null);
+    } finally {
+      setAccessRequestPending(false);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full max-h-[600px] bg-slate-800/30 rounded-2xl backdrop-blur-sm border border-slate-700/50">
       {/* Chat Header */}
       <div className="bg-gradient-to-r from-cyan-500/20 to-purple-500/20 text-white p-4 rounded-t-2xl border-b border-cyan-500/30">
-        <h3 className="text-lg font-semibold">
-          💬 Chat with {connection.name || 'Unknown Contact'}
-        </h3>
-        <p className="text-xs text-slate-400 truncate">
-          {otherDID.substring(0, 50)}...
-        </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold">
+              💬 Chat with {connection.name || 'Unknown Contact'}
+            </h3>
+            <p className="text-xs text-slate-400 truncate">
+              {otherDID.substring(0, 50)}...
+            </p>
+          </div>
+          {/* Request Access button — only shown when targets exist for this connection */}
+          {getTargetsForConnection(connection).length > 0 && (
+          <div className="relative">
+            <button
+              onClick={() => setShowAccessMenu(v => !v)}
+              disabled={accessRequestPending}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold
+                         bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-500/40
+                         text-cyan-300 hover:text-cyan-100 transition-all
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Request access to a protected resource via VC proof"
+            >
+              {accessRequestPending ? '⏳' : '🔓'} Request Access
+            </button>
+            {showAccessMenu && (
+              <div className="absolute right-0 top-full mt-1 z-50 min-w-max
+                              bg-slate-900 border border-slate-600/60 rounded-xl shadow-xl overflow-hidden">
+                <p className="px-3 py-2 text-xs text-slate-400 border-b border-slate-700/50">
+                  Select target — CA will send a VC proof request
+                </p>
+                {getTargetsForConnection(connection).map(({ key, label, icon }) => (
+                  <button
+                    key={key}
+                    onClick={() => handleRequestAccess(key)}
+                    className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-white
+                               hover:bg-cyan-500/20 transition-colors text-left"
+                  >
+                    <span>{icon}</span>
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          )}
+        </div>
       </div>
 
       {/* Messages Container */}
@@ -596,8 +767,50 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
         ) : (
           chatMessages.map((message) => {
             const isOwn = isOwnMessage(message);
-            const content = getMessageContent(message);
             const time = formatTime(message);
+            const grant = getTrustedGrant(message);
+
+            // Render grant messages as service cards
+            if (grant) {
+              const expired = Date.now() > grant.expiresAt;
+              const minsLeft = Math.max(0, Math.round((grant.expiresAt - Date.now()) / 60000));
+              return (
+                <div key={message.id} className="flex justify-start">
+                  <div className="max-w-xs lg:max-w-md rounded-xl border border-cyan-500/40 bg-slate-900/60 overflow-hidden">
+                    <div className="px-4 py-3 bg-gradient-to-r from-cyan-500/10 to-purple-500/10 border-b border-slate-700/50">
+                      <p className="text-xs text-cyan-400 font-semibold">✅ Access Granted</p>
+                      <p className="text-white font-semibold mt-0.5">
+                        {grant.icon} {grant.label}
+                      </p>
+                      {grant.userName && (
+                        <p className="text-slate-400 text-xs">Hello, {grant.userName}</p>
+                      )}
+                    </div>
+                    <div className="px-4 py-3 space-y-2">
+                      {expired ? (
+                        <p className="text-red-400 text-xs">⏰ Link expired</p>
+                      ) : (
+                        <p className="text-slate-400 text-xs">⏰ Expires in ~{minsLeft} min · Single use</p>
+                      )}
+                      {!expired && (
+                        <button
+                          onClick={() => openCAPortal(grant.accessUrl)}
+                          className="w-full py-2 px-4 rounded-lg bg-gradient-to-r from-cyan-500 to-purple-500
+                                     hover:from-cyan-400 hover:to-purple-400 text-white text-sm font-semibold
+                                     transition-all"
+                        >
+                          🔓 Launch in Wallet
+                        </button>
+                      )}
+                      <p className="text-slate-600 text-xs text-center">Also visible in Browser tab</p>
+                    </div>
+                    <div className="px-4 pb-2 text-xs text-slate-600">{time}</div>
+                  </div>
+                </div>
+              );
+            }
+
+            const content = getMessageContent(message);
             const isEncrypted = isEncryptedMessage(message);
             const securityLevel = getMessageSecurityLevel(message);
             const canDecrypt = canDecryptMessage(message);
@@ -623,27 +836,19 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
                   )}
 
                   {/* Message Content */}
-                  <p
+                  <div
                     className={`text-sm break-words ${
                       hasDecryptionError ? 'italic text-gray-400' : ''
                     }`}
+                    style={{ whiteSpace: 'pre-wrap' }}
                   >
                     {content}
-                  </p>
+                  </div>
 
                   {/* Timestamp */}
-                  <div
-                    className={`text-xs mt-1 ${
-                      isOwn ? 'text-white/70' : 'text-slate-400'
-                    }`}
-                  >
+                  <div className={`text-xs mt-1 ${isOwn ? 'text-white/70' : 'text-slate-400'}`}>
                     {time}
-                    {isOwn && (
-                      <span className="ml-2">
-                        {/* Add status indicators here if needed */}
-                        ✓✓
-                      </span>
-                    )}
+                    {isOwn && <span className="ml-2">✓✓</span>}
                   </div>
                 </div>
               </div>
@@ -684,14 +889,39 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
           disabled={isSending || clearanceRevoked}
         />
 
+        {/* Command hints (shown when input starts with /) */}
+        {showCommandHints && (
+          <div className="mb-2 p-2 bg-slate-900/80 border border-slate-600/50 rounded-xl text-xs text-slate-300 space-y-1">
+            <p className="font-semibold text-slate-400 mb-1">Text commands:</p>
+            {[
+              ['/status', 'Show your connection info'],
+              ['/help', 'List all commands from the server'],
+            ].map(([cmd, desc]) => (
+              <div
+                key={cmd}
+                className="flex items-center gap-2 cursor-pointer hover:bg-slate-700/50 rounded px-1 py-0.5"
+                onClick={() => { setMessageText(cmd); setShowCommandHints(false); }}
+              >
+                <code className="text-cyan-400">{cmd}</code>
+                <span className="text-slate-500">— {desc}</span>
+              </div>
+            ))}
+            <p className="text-slate-500 mt-1">Use the 🔓 Request Access button for secure access requests.</p>
+          </div>
+        )}
+
         {/* Message Input and Send Button */}
         <div className="flex space-x-2">
           <input
             type="text"
             value={messageText}
-            onChange={(e) => setMessageText(e.target.value)}
+            onChange={(e) => {
+              setMessageText(e.target.value);
+              setShowCommandHints(e.target.value.startsWith('/') && !e.target.value.includes(' '));
+            }}
             onKeyPress={handleKeyPress}
-            placeholder="Type a message..."
+            onBlur={() => setTimeout(() => setShowCommandHints(false), 150)}
+            placeholder="Type a message or / for commands..."
             disabled={isSending}
             className="flex-1 px-4 py-2 border border-slate-700/50 rounded-xl
                      bg-slate-800/50 text-white placeholder-slate-500

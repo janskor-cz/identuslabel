@@ -8,6 +8,7 @@ export interface RealPersonVCData {
   gender?: string;
   nationality?: string;
   placeOfBirth?: string;
+  photo?: string;
 }
 
 export interface SelectiveDisclosure {
@@ -131,7 +132,7 @@ export const DISCLOSURE_PRESETS = {
   full: {
     label: 'Full Profile',
     description: 'Share all available information',
-    fields: ['firstName', 'lastName', 'dateOfBirth', 'uniqueId', 'gender', 'nationality', 'placeOfBirth']
+    fields: ['firstName', 'lastName', 'dateOfBirth', 'uniqueId', 'gender', 'nationality', 'placeOfBirth', 'photo']
   }
 } as const;
 
@@ -142,5 +143,6 @@ export const FIELD_LABELS = {
   uniqueId: 'Unique ID',
   gender: 'Gender',
   nationality: 'Nationality',
-  placeOfBirth: 'Place of Birth'
+  placeOfBirth: 'Place of Birth',
+  photo: 'Photo'
 } as const;

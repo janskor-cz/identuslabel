@@ -50,6 +50,7 @@ import { getSchemaDisplayName, matchesSchema } from '@/utils/schemaMapping';
 import { getCredentialType } from '@/utils/credentialTypeDetector';
 import { filterCredentialsForProofRequest } from '@/utils/credentialFilterRules';
 import { getConnectionNameWithFallback } from '@/utils/connectionNameResolver';
+import { extractRequestedFields, filterCredentialsByRequestedFields } from '@/utils/proofRequestFieldMatching';
 
 /**
  * Extract meaningful display name from enterprise credential
@@ -93,6 +94,7 @@ interface UnifiedProofRequest {
   comment?: string;
   status: 'pending' | 'sent' | 'declined';
   presentationDefinition?: any;
+  requiredFields?: SDK.Domain.InputField[];
 }
 
 /**
@@ -174,7 +176,11 @@ export const UnifiedProofRequestModal: React.FC = () => {
         requestMessage: req.requestMessage,
         timestamp: req.timestamp,
         comment: req.requestMessage?.body?.comment,
-        status: 'pending'
+        status: 'pending',
+        // Parsed straight from the request's own DIF Presentation Exchange constraints —
+        // more reliable than the schemaId above, which depends on goalCode/goal/comment
+        // string-guessing that doesn't always match what the issuer actually sent.
+        requiredFields: req.requestMessage ? extractRequestedFields(req.requestMessage) : []
       });
     });
 
@@ -401,8 +407,18 @@ export const UnifiedProofRequestModal: React.FC = () => {
           return false; // Personal request — exclude enterprise credentials
         });
 
-        // Then apply schema filtering if schema ID specified
-        if (currentRequest.schemaId) {
+        // Then narrow further using the request's actual required fields (parsed straight
+        // from its DIF Presentation Exchange constraints) — this is what actually tells
+        // apart VC types that share overlapping field names (e.g. RealPersonIdentity and
+        // SecurityClearance both carry firstName/lastName), which schemaId-string matching
+        // alone cannot when goalCode/goal/comment extraction doesn't resolve cleanly.
+        if (currentRequest.requiredFields && currentRequest.requiredFields.length > 0) {
+          const matchedCredentialObjs = filterCredentialsByRequestedFields(
+            filteredCreds.map(c => c.credential),
+            currentRequest.requiredFields
+          );
+          filteredCreds = filteredCreds.filter(unifiedCred => matchedCredentialObjs.includes(unifiedCred.credential));
+        } else if (currentRequest.schemaId) {
           filteredCreds = filteredCreds.filter(unifiedCred =>
             matchesSchema(unifiedCred.credential, currentRequest.schemaId!)
           );
@@ -675,7 +691,9 @@ export const UnifiedProofRequestModal: React.FC = () => {
               <div>
                 <span className="text-sm font-medium text-slate-400">Time:</span>
                 <p className="text-sm text-slate-300 mt-1">
-                  {new Date(currentRequest.timestamp).toLocaleString()}
+                  {currentRequest.timestamp && !isNaN(new Date(currentRequest.timestamp).getTime())
+                    ? new Date(currentRequest.timestamp).toLocaleString()
+                    : 'Just now'}
                 </p>
               </div>
             </div>

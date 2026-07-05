@@ -1,6 +1,6 @@
 import '../app/index.css'
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { FooterNavigation } from "@/components/FooterNavigation";
 
@@ -12,13 +12,20 @@ import { DBConnect } from "@/components/DBConnect";
 import { OOB } from "@/components/OOB";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { copyToClipboardWithLog } from "@/utils/clipboard";
-import { refreshConnections, deleteConnection } from "@/actions";
-import { filterConnectionMessages } from "@/utils/messageFilters";
+import { refreshConnections, deleteConnection, sendMessage, sendProtocolAccessRequest } from "@/actions";
+import { filterConnectionMessages, filterChatAndCredentialMessages } from "@/utils/messageFilters";
 import { connectionRequestQueue, ConnectionRequestItem } from "@/utils/connectionRequestQueue";
 import { messageRejection } from "@/utils/rejectionManager";
 import { PendingRequestsModal } from "@/components/PendingRequestsModal";
 import { getConnectionNameWithFallback } from "@/utils/connectionNameResolver";
-import { getConnectionMetadata } from "@/utils/connectionMetadata";
+import { getConnectionMetadata, saveConnectionMetadata, updateConnectionMetadata } from "@/utils/connectionMetadata";
+import { getCredentialType } from "@/utils/credentialTypeDetector";
+import { getPinnedCA } from "@/utils/prefixedStorage";
+import { Chat } from "@/components/Chat";
+import { useCAPortal } from "@/utils/CAPortalContext";
+import { EnterpriseAgentClient, ColleagueRecord, PendingColleagueInvitation, ColleagueMessage } from "@/utils/EnterpriseAgentClient";
+import { getItem, setItem, removeItem, getKeysByPattern } from "@/utils/prefixedStorage";
+
 
 export default function App() {
 
@@ -26,6 +33,7 @@ export default function App() {
     useEffect(() => { setIsMounted(true); }, []);
 
     const app = useMountedApp();
+    const { setPendingAccessRequest, pendingAccessRequest, openCAPortal } = useCAPortal();
     const [connections, setConnections] = React.useState<SDK.Domain.DIDPair[]>([]);
     const [showDetails, setShowDetails] = React.useState<{[key: number]: boolean}>({});
 
@@ -51,6 +59,203 @@ export default function App() {
 
     // New connection modal
     const [showNewConnectionModal, setShowNewConnectionModal] = useState(false);
+
+    // Colleague chat state
+    const [showColleagueDirectory, setShowColleagueDirectory] = useState(false);
+    const [colleagues, setColleagues] = useState<ColleagueRecord[]>([]);
+    const [colleagueDirectoryLoading, setColleagueDirectoryLoading] = useState(false);
+    const [connectingTo, setConnectingTo] = useState<string | null>(null);
+    const [colleagueFilter, setColleagueFilter] = useState('');
+    const [portalLoginPending, setPortalLoginPending] = useState(false);
+    // Grant polling: set after sending access-request, cleared when grant arrives or times out
+    const pendingGrantIdsRef = useRef<string[]>([]);
+    const [pendingGrantBase, setPendingGrantBase] = useState<string | null>(null);
+    const [colleagueChatFor, setColleagueChatFor] = useState<string | null>(null); // connectionId
+    const [colleagueMessages, setColleagueMessages] = useState<Map<string, ColleagueMessage[]>>(new Map()); // connId → msgs
+    const [lastMessagePoll, setLastMessagePoll] = useState(0);
+
+    // Inline chat: stores the host DID of the connection whose chat panel is open
+    const [openChatFor, setOpenChatFor] = useState<string | null>(null);
+
+    // Request Access dropdown: stores host DID of the connection with the menu open
+    const [accessMenuFor, setAccessMenuFor] = useState<string | null>(null);
+    // Stores host DID of a connection with an in-flight access request
+    const [accessPendingFor, setAccessPendingFor] = useState<string | null>(null);
+
+
+    const getTargetsForConnection = (conn: SDK.Domain.DIDPair) => {
+        const hostDID = conn.host.toString();
+        const meta = getConnectionMetadata(hostDID);
+
+        // Primary: capabilities recorded at connection-establishment time (service-access/1.0).
+        if (meta?.capabilities?.length) {
+            return meta.capabilities.map(key => {
+                const known = CA_TARGETS.find(t => t.key === key);
+                const supported = meta.supportedTargets?.find(t => t.key === key);
+                return { key, label: known?.label ?? supported?.label ?? key, icon: known?.icon ?? supported?.icon ?? '🔗' };
+            });
+        }
+
+        // @deprecated fallback: the old isCAConnection flag, for connections not yet backfilled.
+        if (meta?.isCAConnection) return CA_TARGETS;
+
+        // Fallback for connections created before entity-agnostic discovery was added:
+        // match any name that mentions the CA (case-insensitive substring match).
+        const connName = ((conn as any).name ?? (conn as any).alias ?? '').toLowerCase();
+        if (connName.includes('certification authority') || connName.startsWith('ca connection')) {
+            const CA_CAPABILITIES = CA_TARGETS.map(t => t.key);
+            // Persist so future renders skip the name check
+            if (meta) {
+                updateConnectionMetadata(hostDID, { isCAConnection: true, capabilities: CA_CAPABILITIES });
+            } else {
+                saveConnectionMetadata(hostDID, { walletType: 'local', isCAConnection: true, capabilities: CA_CAPABILITIES });
+            }
+            return CA_TARGETS;
+        }
+
+        return meta?.supportedTargets ?? [];
+    };
+
+    const CA_TARGETS = [
+        { key: 'portal',             label: 'CA Portal',          icon: '🏛️' },
+        { key: 'security-clearance', label: 'Security Clearance', icon: '🔐' },
+        { key: 'login',              label: 'CA Login',            icon: '🔑' },
+    ];
+
+    const handleRequestAccess = async (connection: SDK.Domain.DIDPair, target: string) => {
+        if (!app.agent.instance || accessPendingFor) return;
+        const hostDID = connection.host.toString();
+        setAccessMenuFor(null);
+        setAccessPendingFor(hostDID);
+        const targetInfo = getTargetsForConnection(connection).find(t => t.key === target);
+        setPendingAccessRequest({ target, label: targetInfo?.label ?? target, icon: targetInfo?.icon ?? '🔗' });
+        try {
+            await app.dispatch(sendProtocolAccessRequest({ agent: app.agent.instance, connection, target }));
+        } catch (e: any) {
+            console.error('[Connections] Access request failed:', e.message);
+            setPendingAccessRequest(null);
+        } finally {
+            setAccessPendingFor(null);
+        }
+    };
+
+    const handleOpenColleagueDirectory = async () => {
+        if (!activeConfig) return;
+        setColleagueFilter('');
+        setColleagueDirectoryLoading(true);
+        setShowColleagueDirectory(true);
+        const client = new EnterpriseAgentClient(activeConfig);
+        const result = await client.getColleagues();
+        if (result.success && result.data) setColleagues(result.data.colleagues ?? (result.data as any));
+        setColleagueDirectoryLoading(false);
+    };
+
+    const handleEnterprisePortalLogin = async () => {
+        if (!activeConfig || accessPendingFor || pendingAccessRequest || portalLoginPending || pendingGrantBase) return;
+        setPortalLoginPending(true);
+        const client = new EnterpriseAgentClient(activeConfig);
+
+        try {
+            // Find EmployeeRole VC to resolve target key and connection
+            const credsResult = await client.listCredentials();
+            const allCreds = (credsResult.data as any)?.contents ?? [];
+            const employeeRoleVC = allCreds.find((vc: any) => {
+                const c = vc.claims ?? vc.credentialSubject ?? {};
+                return c.credentialType === 'EmployeeRole' || c.accessTarget;
+            });
+            if (!employeeRoleVC) throw new Error('No EmployeeRole credential found in enterprise wallet.');
+
+            const claims = employeeRoleVC.claims ?? employeeRoleVC.credentialSubject ?? {};
+            const targetKey = claims.accessTarget;
+            if (!targetKey) throw new Error('EmployeeRole VC is missing accessTarget field.');
+
+            // Resolve enterprise connection ID
+            let enterpriseConnectionId: string | undefined = claims.enterpriseConnectionId;
+            if (!enterpriseConnectionId) {
+                const companyPrefix = targetKey.split('-employee-portal')[0];
+                const ACTIVE_STATES = ['ConnectionResponseReceived', 'ConnectionResponseSent', 'Active', 'ACTIVE', 'active'];
+                const matched = enterpriseConnections.find(c =>
+                    ACTIVE_STATES.includes(c.state) &&
+                    (companyPrefix ? c.label?.toLowerCase().includes(companyPrefix.toLowerCase()) : true)
+                ) ?? enterpriseConnections.find(c => ACTIVE_STATES.includes(c.state));
+                enterpriseConnectionId = matched?.connectionId;
+            }
+            if (!enterpriseConnectionId) throw new Error('No active enterprise DIDComm connection found. Connect to your company in the Enterprise tab first.');
+
+            // Derive company-admin base URL for grant polling
+            let companyAdminBase: string | null = null;
+            try {
+                const svcUrl = new URL(claims.serviceUrl as string);
+                const seg = svcUrl.pathname.split('/').filter(Boolean)[0];
+                companyAdminBase = `${svcUrl.origin}${seg ? '/' + seg : ''}`;
+            } catch { /* serviceUrl absent or malformed */ }
+
+            // Send access request — company portal processes it via DIDComm and creates a proof.
+            // SelectiveDisclosure handles user approval; HTTP polling below picks up the grant.
+            const requestId = `ar-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+            const envelope = JSON.stringify({
+                type: 'https://identuslabel.cz/protocols/service-access/1.0/request',
+                id: requestId,
+                body: { capability: targetKey }
+            });
+            console.log(`[EnterprisePortalLogin] Sending access request, target=${targetKey}, conn=${enterpriseConnectionId}`);
+            const sendResult = await client.sendBasicMessage(enterpriseConnectionId, envelope);
+            if (!sendResult.success) throw new Error(`Failed to send access request: ${sendResult.error}`);
+
+            // Register requestId for background grant polling
+            pendingGrantIdsRef.current = [...pendingGrantIdsRef.current, requestId];
+            if (companyAdminBase && !pendingGrantBase) setPendingGrantBase(companyAdminBase);
+            console.log(`[EnterprisePortalLogin] Access request sent (${requestId}) — grant poller started.`);
+
+        } catch (e: any) {
+            console.error('[EnterprisePortalLogin] Failed:', e.message);
+            alert(`Enterprise portal login failed: ${e.message}`);
+        } finally {
+            setPortalLoginPending(false);
+        }
+    };
+
+    const handleConnectColleague = async (colleague: ColleagueRecord) => {
+        if (!activeConfig || connectingTo) return;
+        setConnectingTo(colleague.email);
+        try {
+            const client = new EnterpriseAgentClient(activeConfig);
+            const inv = await client.createInvitation(colleague.full_name);
+            if (!inv.success || !inv.data) throw new Error(inv.error || 'Failed to create invitation');
+            const oob = inv.data.invitation?.invitationUrl ?? '';
+            const oobBase64 = oob.includes('_oob=') ? oob.split('_oob=')[1] : oob;
+            const send = await client.sendColleagueInvite(colleague.email, oobBase64, inv.data.connectionId, colleague.full_name);
+            if (!send.success) throw new Error(send.error || 'Failed to send invitation');
+            setConnectionNames(prev => new Map(prev).set(inv.data!.connectionId, colleague.full_name));
+            alert(`Invitation sent to ${colleague.full_name}. They will be connected automatically.`);
+        } catch (e: any) {
+            alert(`Failed to connect: ${e.message}`);
+        } finally {
+            setConnectingTo(null);
+        }
+    };
+
+    const handleSendColleagueMessage = async (connectionId: string, content: string) => {
+        if (!activeConfig) return;
+        const client = new EnterpriseAgentClient(activeConfig);
+        const result = await client.sendBasicMessage(connectionId, content);
+        if (result.success) {
+            // Optimistically add to local messages
+            setColleagueMessages(prev => {
+                const next = new Map(prev);
+                const existing = next.get(connectionId) || [];
+                next.set(connectionId, [...existing, {
+                    id: result.data?.id || Date.now().toString(),
+                    fromEmail: 'me',
+                    fromName: 'You',
+                    content,
+                    timestamp: Date.now(),
+                    connectionId
+                }]);
+                return next;
+            });
+        }
+    };
 
     // Wallet tab selection
     const [walletTab, setWalletTab] = useState<'personal' | 'enterprise' | null>(null);
@@ -134,6 +339,7 @@ export default function App() {
         setConnections(app.connections)
     }, [app.connections])
 
+
     // Fetch enterprise connections when switching to enterprise mode
     useEffect(() => {
         const fetchEnterpriseConnections = async () => {
@@ -161,6 +367,102 @@ export default function App() {
         return () => clearInterval(interval);
     }, [walletTab, isEnterpriseConfigured, app.dispatch]);
 
+    // Colleague invitation polling + message polling (enterprise mode only)
+    useEffect(() => {
+        if (walletTab !== 'enterprise' || !isEnterpriseConfigured || !activeConfig) return;
+
+        const client = new EnterpriseAgentClient(activeConfig);
+
+        // Register this wallet's webhook so the company portal can forward BasicMessageReceived events
+        const webhookUrl = `https://identuslabel.cz/company-admin/api/enterprise-messages-webhook?walletId=${activeConfig.enterpriseAgentWalletId}`;
+        client.registerWebhook(webhookUrl).then(r => {
+            if (!r.success) console.warn('[ColleagueChat] Webhook registration failed:', r.error);
+            else console.log('[ColleagueChat] Webhook registered:', webhookUrl);
+        });
+
+        const pollInvitations = async () => {
+            const result = await client.getColleagueInvitations();
+            if (!result.success || !result.data?.invitations?.length) return;
+            for (const inv of result.data.invitations) {
+                console.log(`[ColleagueChat] Auto-accepting invitation from ${inv.fromEmail}`);
+                const accepted = await client.acceptInvitation(inv.oobBase64, inv.fromName || inv.fromEmail);
+                if (accepted.success && accepted.data?.connectionId) {
+                    await client.consumeColleagueInvitation(inv.id, accepted.data.connectionId);
+                    await app.dispatch(refreshEnterpriseConnections());
+                    console.log(`[ColleagueChat] Connected to ${inv.fromEmail} (conn: ${accepted.data.connectionId})`);
+                }
+            }
+        };
+
+        const pollMessages = async () => {
+            const result = await client.getColleagueMessages(lastMessagePoll);
+            if (!result.success || !result.data?.messages?.length) return;
+            setColleagueMessages(prev => {
+                const next = new Map(prev);
+                for (const msg of result.data!.messages) {
+                    const existing = next.get(msg.connectionId) || [];
+                    if (!existing.find(m => m.id === msg.id)) {
+                        next.set(msg.connectionId, [...existing, msg]);
+                    }
+                }
+                return next;
+            });
+            setLastMessagePoll(Date.now());
+        };
+
+        pollInvitations();
+        pollMessages();
+
+        const invInterval  = setInterval(pollInvitations,  15000);
+        const msgInterval  = setInterval(pollMessages,      5000);
+        return () => { clearInterval(invInterval); clearInterval(msgInterval); };
+    }, [walletTab, isEnterpriseConfigured, activeConfig]);
+
+    // Background grant polling: starts when access-request is sent, stops on grant or 2-min timeout.
+    // The grant arrives at the enterprise wallet (not personal wallet), so GlobalGrantWatcher can't
+    // see it. We poll the company-admin HTTP endpoint which mirrors the DIDCommCommandService grant map.
+    useEffect(() => {
+        if (!pendingGrantBase) return;
+        let cancelled = false;
+        const deadline = Date.now() + 120_000;
+
+        const poll = async () => {
+            while (!cancelled && Date.now() < deadline) {
+                const ids = [...pendingGrantIdsRef.current];
+                for (const reqId of ids) {
+                    try {
+                        const res = await fetch(`${pendingGrantBase}/api/enterprise-portal/grant-status?requestId=${encodeURIComponent(reqId)}`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (data.success && data.grant?.accessUrl) {
+                                console.log(`[EnterpriseGrantPoller] Grant received for ${reqId.slice(0, 12)}`);
+                                openCAPortal(data.grant.accessUrl);
+                                pendingGrantIdsRef.current = [];
+                                setPendingGrantBase(null);
+                                return;
+                            }
+                            if (data.error) {
+                                console.warn(`[EnterpriseGrantPoller] Access request failed for ${reqId.slice(0, 12)}: ${data.error} — ${data.message ?? ''}`);
+                                pendingGrantIdsRef.current = [];
+                                setPendingGrantBase(null);
+                                return;
+                            }
+                        }
+                    } catch { /* transient */ }
+                }
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            if (!cancelled) {
+                console.warn('[EnterpriseGrantPoller] Timed out waiting for grant');
+                pendingGrantIdsRef.current = [];
+                setPendingGrantBase(null);
+            }
+        };
+
+        poll();
+        return () => { cancelled = true; };
+    }, [pendingGrantBase, openCAPortal]);
+
     // Load persistent connection requests from IndexedDB
     const loadPersistentRequests = async () => {
         try {
@@ -168,7 +470,7 @@ export default function App() {
             setQueueError(null);
 
             // Get wallet ID from app configuration
-            const walletId = app.agent?.walletId || 'idl'; // fallback to alice
+            const walletId = app.wallet.walletId;
 
             const requests = await connectionRequestQueue.getPendingRequests(walletId);
 
@@ -196,12 +498,12 @@ export default function App() {
 
 
     // Save new connection requests to persistent queue
-    const saveRequestToPersistentQueue = async (message: SDK.Domain.Message) => {
+    const saveRequestToPersistentQueue = async (message: SDK.Domain.Message, vcOverride?: any) => {
         try {
-            const walletId = app.agent?.walletId || 'idl';
+            const walletId = app.wallet.walletId;
 
-            // Extract attached credential if any
-            const attachedCredential = extractCredentialFromMessage(message);
+            // Extract attached credential — vcOverride takes priority (vc-proof-sharing path)
+            const attachedCredential = vcOverride ?? extractCredentialFromMessage(message);
 
             const requestId = await connectionRequestQueue.addRequest(
                 walletId,
@@ -226,7 +528,7 @@ export default function App() {
         verificationResult?: any
     ) => {
         try {
-            const walletId = app.agent?.walletId || 'idl';
+            const walletId = app.wallet.walletId;
 
             await connectionRequestQueue.handleRequest(walletId, requestId, action, verificationResult);
 
@@ -370,6 +672,20 @@ export default function App() {
         return null;
     };
 
+    const extractPthid = (msg: SDK.Domain.Message): string | null => {
+        try {
+            const body = typeof msg.body === 'string' ? JSON.parse(msg.body) : msg.body;
+            return (body?.pthid || body?.['~thread']?.pthid) ?? null;
+        } catch { return null; }
+    };
+
+    const extractVCFromSharingMessage = (msg: SDK.Domain.Message): any | null => {
+        try {
+            const body = typeof msg.body === 'string' ? JSON.parse(msg.body) : msg.body;
+            return body?.vcProof ?? null;
+        } catch { return null; }
+    };
+
     // Refresh connections and load persistent requests when page loads
     useEffect(() => {
 
@@ -410,8 +726,52 @@ export default function App() {
                 for (const request of nonRejectedRequests) {
                     const existingRequest = persistentRequests.find(pr => pr.message.id === request.id);
                     if (!existingRequest) {
-                        await saveRequestToPersistentQueue(request);
-                    } else {
+                        const senderDID = request.from?.toString();
+
+                        // Check whether the vc-proof-sharing message already arrived from this sender
+                        const vcMsg = senderDID
+                            ? (app.messages as SDK.Domain.Message[]).find((m: SDK.Domain.Message) =>
+                                m.piuri === 'https://identuslabel.cz/protocols/vc-proof-sharing/1.0/proof' &&
+                                m.from?.toString() === senderDID &&
+                                m.direction === SDK.Domain.MessageDirection.RECEIVED
+                              )
+                            : undefined;
+
+                        if (vcMsg) {
+                            // VC proof arrived — queue with credential attached
+                            const vcProof = extractVCFromSharingMessage(vcMsg);
+                            console.log('✅ [VC PROOF DEFERRED] vc-proof-sharing found for sender:', senderDID?.substring(0, 50), '| vcProof keys:', vcProof ? Object.keys(vcProof) : null);
+                            await saveRequestToPersistentQueue(request, vcProof ?? undefined);
+                            removeItem(`vc-wait-${request.id}`);
+                        } else {
+                            // No vc-proof yet. Defer only if any active invitation requested VC proof.
+                            const invitationKeys = getKeysByPattern('invitation-');
+                            let hasActiveVCRequest = false;
+                            for (const key of invitationKeys) {
+                                const meta = getItem(key);
+                                if (meta?.includeVCRequest === true) {
+                                    hasActiveVCRequest = true;
+                                    break;
+                                }
+                            }
+
+                            if (hasActiveVCRequest) {
+                                // Defer — vc-proof-sharing will arrive shortly; re-check on next poll
+                                if (!getItem(`vc-wait-${request.id}`)) {
+                                    setItem(`vc-wait-${request.id}`, String(Date.now()));
+                                }
+                                const waitedMs = Date.now() - parseInt(getItem(`vc-wait-${request.id}`) || '0', 10);
+                                if (waitedMs > 30000) {
+                                    // 30 s timeout: surface without VC as graceful fallback
+                                    await saveRequestToPersistentQueue(request);
+                                    removeItem(`vc-wait-${request.id}`);
+                                }
+                                // else: effect re-runs when app.messages changes (next poll)
+                            } else {
+                                // No invitation required VC proof — queue immediately
+                                await saveRequestToPersistentQueue(request);
+                            }
+                        }
                     }
                 }
 
@@ -455,7 +815,7 @@ export default function App() {
     // Helper function to filter out rejected messages
     const filterRejectedMessages = async (messages: SDK.Domain.Message[]): Promise<SDK.Domain.Message[]> => {
         try {
-            const walletId = app.agent?.walletId || 'idl';
+            const walletId = app.wallet.walletId;
             const nonRejectedMessages: SDK.Domain.Message[] = [];
 
             for (const message of messages) {
@@ -527,6 +887,15 @@ export default function App() {
                                         Pending Requests
                                     </button>
                                 )}
+                                {walletTab === 'enterprise' && isEnterpriseConfigured && (
+                                    <button
+                                        onClick={handleOpenColleagueDirectory}
+                                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white rounded-xl transition-all font-medium text-sm"
+                                    >
+                                        <span>👥</span>
+                                        Connect to Colleague
+                                    </button>
+                                )}
                                 <button
                                     onClick={() => setShowNewConnectionModal(true)}
                                     className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 text-white rounded-xl transition-all font-medium text-sm"
@@ -591,9 +960,39 @@ export default function App() {
                             }
 
                             if (isEnterpriseMode) {
-                                return enterpriseConnections.map((connection, i) => {
-                                    const displayName = connection.label || `Connection ${connection.connectionId.substring(0, 8)}...`;
-                                    const isConnected = connection.state === 'ConnectionResponseSent' || connection.state === 'Active';
+                                return (<>
+                                    <div className="flex items-center justify-between mb-4">
+                                        <span className="text-xs text-slate-500">{enterpriseConnections.length} connection{enterpriseConnections.length !== 1 ? 's' : ''}</span>
+                                        <button
+                                            onClick={handleEnterprisePortalLogin}
+                                            disabled={!!accessPendingFor || !!pendingAccessRequest || !!pendingGrantBase || portalLoginPending}
+                                            className="flex items-center gap-2 px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 rounded-xl text-sm font-semibold transition-all disabled:opacity-50"
+                                        >
+                                            {pendingGrantBase
+                                                ? '⌛ Approve proof in wallet...'
+                                                : portalLoginPending
+                                                    ? '⏳ Sending request...'
+                                                    : '🏢 Login to Employee Portal'}
+                                        </button>
+                                    </div>
+                                    {enterpriseConnections.map((connection, i) => {
+                                    // `label` is nearly always empty for these (see EnterpriseConnection's
+                                    // `goal` field comment — the Cloud Agent's invitee-side accept endpoint
+                                    // has no `label` field at all). `goal` is transmitted to the invitee, but
+                                    // it's a full sentence ("Establish connection between...") when present,
+                                    // and absent entirely for connections whose inviter only set `goalCode`
+                                    // (e.g. document-service's invitation, which sets goalCode: 'document-access'
+                                    // with no goal string) — so it's inconsistent as the primary label. Prefer
+                                    // a proper name we already control: activeConfig.enterpriseAgentName comes
+                                    // from the applied ServiceConfiguration VC, not from the Cloud Agent's
+                                    // per-connection fields, so it's always a real name once configured. The
+                                    // one known goalCode value that means something different (document-service)
+                                    // is called out explicitly so the two enterprise connections aren't both
+                                    // shown under the same label.
+                                    const displayName = connection.goalCode === 'document-access'
+                                        ? 'Document Service'
+                                        : (activeConfig?.enterpriseAgentName || connection.label || connection.goal || `Connection ${connection.connectionId.substring(0, 8)}...`);
+                                    const isConnected = ['ConnectionResponseSent', 'ConnectionResponseReceived', 'Active', 'ACTIVE', 'active'].includes(connection.state);
                                     const isDetailsShown = showDetails[i] || false;
 
                                     const copyToClipboard = async (text: string, label: string) => {
@@ -615,6 +1014,15 @@ export default function App() {
                                                     <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-400 border border-purple-500/30">
                                                         ☁️ Enterprise
                                                     </span>
+                                                    {isConnected && (
+                                                        <button
+                                                            onClick={() => setColleagueChatFor(prev => prev === connection.connectionId ? null : connection.connectionId)}
+                                                            title="Chat"
+                                                            className={`p-1.5 rounded-lg transition-all text-sm ${colleagueChatFor === connection.connectionId ? 'text-emerald-300 bg-emerald-500/10' : 'text-slate-400 hover:text-emerald-300 hover:bg-emerald-500/10'}`}
+                                                        >
+                                                            💬
+                                                        </button>
+                                                    )}
                                                     <button
                                                         onClick={() => toggleDetails(i)}
                                                         title={isDetailsShown ? 'Hide details' : 'Show details'}
@@ -624,6 +1032,16 @@ export default function App() {
                                                     </button>
                                                 </div>
                                             </div>
+                                            {colleagueChatFor === connection.connectionId && (
+                                                <div className="border-t border-slate-700/50">
+                                                    <ColleagueChatPanel
+                                                        connectionId={connection.connectionId}
+                                                        displayName={displayName}
+                                                        messages={colleagueMessages.get(connection.connectionId) || []}
+                                                        onSend={(content) => handleSendColleagueMessage(connection.connectionId, content)}
+                                                    />
+                                                </div>
+                                            )}
                                             {isDetailsShown && (
                                                 <div className="px-4 pb-4 space-y-3 border-t border-slate-700/50 pt-3 animate-fadeIn">
                                                     <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
@@ -654,18 +1072,21 @@ export default function App() {
                                             )}
                                         </div>
                                     );
-                                });
+                                })}
+                                </>);
                             } else {
                                 return connections.map((connection, i) => {
                                     const isEstablished = true;
                                     const isDetailsShown = showDetails[i] || false;
+                                    const hostDID = connection.host.toString();
+                                    const isChatOpen = openChatFor === hostDID;
 
-                                    const displayName = connection.name || getConnectionName(
+                                    const displayName = connection.name || getConnectionNameWithFallback(
                                         connection.receiver.toString(),
                                         app.credentials
                                     );
 
-                                    const connectionMetadata = getConnectionMetadata(connection.host.toString());
+                                    const connectionMetadata = getConnectionMetadata(hostDID);
                                     const walletType = connectionMetadata?.walletType || 'local';
                                     const isCloudWallet = walletType === 'cloud';
 
@@ -682,8 +1103,39 @@ export default function App() {
                                         ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
                                         : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30';
 
+                                    // Messages for this specific connection
+                                    const conversationMessages = isChatOpen
+                                        ? filterChatAndCredentialMessages(app.messages)
+                                            .filter(msg => {
+                                                const from = msg.from?.toString();
+                                                const to = msg.to?.toString();
+                                                const receiverStr = connection.receiver.toString();
+                                                return (from === hostDID && to === receiverStr) ||
+                                                       (from === receiverStr && to === hostDID) ||
+                                                       from === hostDID || from === receiverStr ||
+                                                       to === hostDID || to === receiverStr;
+                                            })
+                                            .sort((a, b) => {
+                                                const aTime = a.createdTime ? (a.createdTime < 10000000000 ? a.createdTime * 1000 : a.createdTime) : 0;
+                                                const bTime = b.createdTime ? (b.createdTime < 10000000000 ? b.createdTime * 1000 : b.createdTime) : 0;
+                                                return aTime - bTime;
+                                            })
+                                        : [];
+
+                                    const handleSendMessage = async (content: string, toDID: string, securityLevel?: number) => {
+                                        if (!content) throw new Error('Message content is required');
+                                        const agent = app.agent.instance!;
+                                        if (securityLevel !== undefined && securityLevel > 0) {
+                                            await app.dispatch(sendMessage({ agent, content, recipientDID: toDID, securityLevel }));
+                                            return;
+                                        }
+                                        const message = new SDK.BasicMessage({ content }, connection.host, connection.receiver).makeMessage();
+                                        await app.dispatch(sendMessage({ agent, message }));
+                                    };
+
                                     return (
                                         <div key={`connection${i}`} className="bg-slate-800/30 border border-slate-700/50 rounded-xl mb-2 hover:border-slate-600/50 transition-all duration-200">
+                                            {/* Connection row */}
                                             <div className="flex items-center justify-between px-4 py-3">
                                                 <div className="flex items-center gap-3 min-w-0">
                                                     <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isEstablished ? 'bg-emerald-500' : 'bg-amber-500'} animate-pulse`} />
@@ -693,7 +1145,46 @@ export default function App() {
                                                     <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${badgeClasses}`}>
                                                         {badgeLabel}
                                                     </span>
-                                                    <button title="Send Message" className="p-1.5 text-slate-400 hover:text-cyan-300 hover:bg-cyan-500/10 rounded-lg transition-all">
+                                                    {/* Request Access dropdown — only shown when targets exist for this connection */}
+                                                    {getTargetsForConnection(connection).length > 0 && (
+                                                    <div className="relative">
+                                                        <button
+                                                            onClick={() => setAccessMenuFor(accessMenuFor === hostDID ? null : hostDID)}
+                                                            disabled={accessPendingFor === hostDID}
+                                                            title="Request access via VC proof"
+                                                            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold
+                                                                       bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-500/40
+                                                                       text-cyan-300 hover:text-cyan-100 transition-all
+                                                                       disabled:opacity-50 disabled:cursor-not-allowed"
+                                                        >
+                                                            {accessPendingFor === hostDID ? '⏳' : '🔓'} Request Access
+                                                        </button>
+                                                        {accessMenuFor === hostDID && (
+                                                            <div className="absolute right-0 top-full mt-1 z-50 min-w-max
+                                                                            bg-slate-900 border border-slate-600/60 rounded-xl shadow-xl overflow-hidden">
+                                                                <p className="px-3 py-2 text-xs text-slate-400 border-b border-slate-700/50">
+                                                                    CA will send a VC proof request
+                                                                </p>
+                                                                {getTargetsForConnection(connection).map(({ key, label, icon }) => (
+                                                                    <button
+                                                                        key={key}
+                                                                        onClick={() => handleRequestAccess(connection, key)}
+                                                                        className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-white
+                                                                                   hover:bg-cyan-500/20 transition-colors text-left"
+                                                                    >
+                                                                        <span>{icon}</span>
+                                                                        <span>{label}</span>
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    )}
+                                                    <button
+                                                        onClick={() => setOpenChatFor(isChatOpen ? null : hostDID)}
+                                                        title={isChatOpen ? 'Close chat' : 'Open chat'}
+                                                        className={`p-1.5 rounded-lg transition-all ${isChatOpen ? 'text-cyan-300 bg-cyan-500/10' : 'text-slate-400 hover:text-cyan-300 hover:bg-cyan-500/10'}`}
+                                                    >
                                                         💬
                                                     </button>
                                                     <button
@@ -707,7 +1198,7 @@ export default function App() {
                                                         onClick={async () => {
                                                             if (confirm(`Are you sure you want to delete the connection with "${displayName}"?\n\nThis will remove all associated messages and cannot be undone.`)) {
                                                                 try {
-                                                                    await app.dispatch(deleteConnection({ connectionHostDID: connection.host.toString() }));
+                                                                    await app.dispatch(deleteConnection({ connectionHostDID: hostDID }));
                                                                 } catch (error) {
                                                                     console.error('❌ [UI] Failed to delete connection:', error);
                                                                     alert('Failed to delete connection. Please try again.');
@@ -721,6 +1212,21 @@ export default function App() {
                                                     </button>
                                                 </div>
                                             </div>
+
+                                            {/* Inline chat panel */}
+                                            {isChatOpen && (
+                                                <div className="border-t border-slate-700/50">
+                                                    <ErrorBoundary componentName="Chat">
+                                                        <Chat
+                                                            messages={conversationMessages}
+                                                            connection={connection}
+                                                            onSendMessage={handleSendMessage}
+                                                        />
+                                                    </ErrorBoundary>
+                                                </div>
+                                            )}
+
+                                            {/* Technical details panel */}
                                             {isDetailsShown && (
                                                 <div className="px-4 pb-4 space-y-3 border-t border-slate-700/50 pt-3 animate-fadeIn">
                                                     {isCloudWallet && connectionMetadata && (
@@ -797,7 +1303,115 @@ export default function App() {
                     </div>
                 </div>
             )}
+            {/* Colleague Directory Modal */}
+            {showColleagueDirectory && (
+                <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/70 backdrop-blur-sm overflow-y-auto pt-8 pb-8">
+                    <div className="relative w-full max-w-lg mx-4">
+                        <div className="bg-slate-900 border border-slate-700/50 rounded-2xl shadow-2xl">
+                            <div className="flex items-center justify-between p-5 border-b border-slate-700/50">
+                                <h3 className="text-lg font-bold text-white">👥 Connect to Colleague</h3>
+                                <button onClick={() => setShowColleagueDirectory(false)} className="text-slate-400 hover:text-white transition-colors text-xl font-bold w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-700">✕</button>
+                            </div>
+                            <div className="p-5">
+                                {colleagueDirectoryLoading ? (
+                                    <p className="text-slate-400 text-center py-8">Loading colleagues...</p>
+                                ) : colleagues.length === 0 ? (
+                                    <p className="text-slate-400 text-center py-8">No colleagues found.</p>
+                                ) : (
+                                    <div className="space-y-2">
+                                        <input
+                                            type="text"
+                                            placeholder="Filter by email or name…"
+                                            value={colleagueFilter}
+                                            onChange={e => setColleagueFilter(e.target.value)}
+                                            className="w-full px-3 py-2 bg-slate-800/60 border border-slate-700/50 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500/50 mb-1"
+                                        />
+                                        {colleagues
+                                            .filter(c => {
+                                                const q = colleagueFilter.toLowerCase();
+                                                return !q || c.email.toLowerCase().includes(q) || c.full_name.toLowerCase().includes(q);
+                                            })
+                                            .map(c => (
+                                                <div key={c.email} className="flex items-center justify-between p-3 bg-slate-800/50 rounded-xl border border-slate-700/50">
+                                                    <div>
+                                                        <p className="text-sm font-medium text-white">{c.full_name}</p>
+                                                        <p className="text-xs text-slate-400">{c.department} · {c.email}</p>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => handleConnectColleague(c)}
+                                                        disabled={connectingTo === c.email}
+                                                        className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 rounded-lg text-xs font-semibold transition-all disabled:opacity-50"
+                                                    >
+                                                        {connectingTo === c.email ? 'Sending...' : '+ Connect'}
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        {colleagueFilter && !colleagues.some(c => {
+                                            const q = colleagueFilter.toLowerCase();
+                                            return c.email.toLowerCase().includes(q) || c.full_name.toLowerCase().includes(q);
+                                        }) && (
+                                            <p className="text-center text-slate-500 text-sm py-4">No colleagues match "{colleagueFilter}"</p>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
             </DBConnect>
+        </div>
+    );
+}
+
+// ─── Colleague Chat Panel ────────────────────────────────────────────────────
+
+function ColleagueChatPanel({ connectionId, displayName, messages, onSend }: {
+    connectionId: string;
+    displayName: string;
+    messages: ColleagueMessage[];
+    onSend: (content: string) => void;
+}) {
+    const [input, setInput] = React.useState('');
+    const bottomRef = React.useRef<HTMLDivElement>(null);
+
+    React.useEffect(() => {
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [messages]);
+
+    const send = () => {
+        const text = input.trim();
+        if (!text) return;
+        onSend(text);
+        setInput('');
+    };
+
+    return (
+        <div className="flex flex-col h-64 bg-slate-900/50">
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                {messages.length === 0 && (
+                    <p className="text-xs text-slate-500 text-center pt-4">No messages yet. Say hello!</p>
+                )}
+                {messages.map(msg => (
+                    <div key={msg.id} className={`flex ${msg.fromEmail === 'me' ? 'justify-end' : 'justify-start'}`}>
+                        <div className={`max-w-[75%] px-3 py-2 rounded-xl text-sm ${msg.fromEmail === 'me' ? 'bg-emerald-600/40 text-emerald-100' : 'bg-slate-700/60 text-slate-200'}`}>
+                            {msg.fromEmail !== 'me' && <p className="text-xs text-slate-400 mb-0.5">{msg.fromName}</p>}
+                            {msg.content}
+                        </div>
+                    </div>
+                ))}
+                <div ref={bottomRef} />
+            </div>
+            <div className="flex gap-2 p-3 border-t border-slate-700/50">
+                <input
+                    value={input}
+                    onChange={e => setInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && send()}
+                    placeholder={`Message ${displayName}...`}
+                    className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500/50"
+                />
+                <button onClick={send} className="px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 rounded-lg text-sm font-semibold transition-all">Send</button>
+            </div>
         </div>
     );
 }

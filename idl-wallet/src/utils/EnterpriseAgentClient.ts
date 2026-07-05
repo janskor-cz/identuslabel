@@ -37,6 +37,8 @@ export interface ConnectionRecord {
   connectionId: string;
   thid?: string;
   label?: string;
+  goalCode?: string;
+  goal?: string;
   state: string;
   role: string;
   invitation?: any;
@@ -90,6 +92,30 @@ export interface PresentationRecord {
   createdAt: string;
   updatedAt?: string;
   presentationDefinition?: any;
+}
+
+export interface ColleagueRecord {
+  email: string;
+  full_name: string;
+  department: string;
+  wallet_id: string;
+}
+
+export interface PendingColleagueInvitation {
+  id: string;
+  fromEmail: string;
+  fromName: string;
+  oobBase64: string;
+  createdAt: string;
+}
+
+export interface ColleagueMessage {
+  id: string;
+  fromEmail: string;
+  fromName: string;
+  content: string;
+  timestamp: number;
+  connectionId: string;
 }
 
 /**
@@ -679,6 +705,81 @@ export class EnterpriseAgentClient {
    *
    * @returns Object with state counts
    */
+  public async registerWebhook(url: string): Promise<ApiResponse<any>> {
+    return this.request('/events/webhooks', {
+      method: 'POST',
+      body: JSON.stringify({ url, customHeaders: {} })
+    });
+  }
+
+  public async sendBasicMessage(connectionId: string, content: string): Promise<ApiResponse<{ id: string; connectionId: string; content: string }>> {
+    return this.request(`/connections/${connectionId}/basic-messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content })
+    });
+  }
+
+  public async getBasicMessages(connectionId: string): Promise<ApiResponse<{ contents: Array<{ id: string; connectionId: string; content: string; createdAt: string }> }>> {
+    return this.request(`/connections/${connectionId}/basic-messages`);
+  }
+
+  // --- Colleague chat portal helpers ---
+
+  private get portalBase(): string {
+    return typeof window !== 'undefined' && window.location.hostname === 'localhost'
+      ? 'http://localhost:3010'
+      : 'https://identuslabel.cz/company-admin';
+  }
+
+  private async portalRequest<T = any>(path: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
+    const url = `${this.portalBase}${path}`;
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Employee-Api-Key': this.apiKey || '',
+          'X-Employee-Wallet-Id': this.config.enterpriseAgentWalletId,
+          ...(options.headers || {})
+        }
+      });
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!response.ok) return { success: false, error: data.error || data.message || response.statusText, status: response.status };
+      return { success: true, data };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  public async getColleagues(): Promise<ApiResponse<ColleagueRecord[]>> {
+    return this.portalRequest<ColleagueRecord[]>('/api/employee-portal/colleagues');
+  }
+
+  public async sendColleagueInvite(toEmail: string, oobBase64: string, connectionId?: string, toName?: string): Promise<ApiResponse<{ id: string }>> {
+    return this.portalRequest('/api/employee-portal/colleague-invite', {
+      method: 'POST',
+      body: JSON.stringify({ toEmail, oobBase64, connectionId, toName })
+    });
+  }
+
+
+  public async getColleagueInvitations(): Promise<ApiResponse<PendingColleagueInvitation[]>> {
+    return this.portalRequest<PendingColleagueInvitation[]>('/api/employee-portal/colleague-invitations');
+  }
+
+  public async consumeColleagueInvitation(id: string, connectionId: string): Promise<ApiResponse<void>> {
+    return this.portalRequest(`/api/employee-portal/colleague-invitations/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ connectionId })
+    });
+  }
+
+  public async getColleagueMessages(since?: number): Promise<ApiResponse<ColleagueMessage[]>> {
+    const qs = since ? `?since=${since}` : '';
+    return this.portalRequest<ColleagueMessage[]>(`/api/employee-portal/colleague-messages${qs}`);
+  }
+
   public async getConnectionStats(): Promise<ApiResponse<Record<string, number>>> {
     const response = await this.listConnections();
 

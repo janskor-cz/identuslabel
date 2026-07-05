@@ -1,5 +1,11 @@
 import React, { createContext, useContext, useState, useCallback } from 'react';
 
+export interface PendingAccessRequest {
+  target: string;
+  label: string;
+  icon: string;
+}
+
 interface CAPortalContextValue {
   openCAPortal: (url: string) => void;
   closeCAPortal: () => void;
@@ -9,6 +15,8 @@ interface CAPortalContextValue {
   isMinimized: boolean;
   pendingDocumentDID: string | null;
   setPendingDocumentDID: (did: string | null) => void;
+  pendingAccessRequest: PendingAccessRequest | null;
+  setPendingAccessRequest: (req: PendingAccessRequest | null) => void;
 }
 
 const CAPortalContext = createContext<CAPortalContextValue>({
@@ -20,16 +28,21 @@ const CAPortalContext = createContext<CAPortalContextValue>({
   isMinimized: false,
   pendingDocumentDID: null,
   setPendingDocumentDID: () => {},
+  pendingAccessRequest: null,
+  setPendingAccessRequest: () => {},
 });
 
 export function CAPortalProvider({ children }: { children: React.ReactNode }) {
   const [caPortalUrl, setCaPortalUrl] = useState<string | null>(null);
   const [isMinimized, setIsMinimized] = useState(false);
   const [pendingDocumentDID, setPendingDocumentDID] = useState<string | null>(null);
+  const [pendingAccessRequest, setPendingAccessRequest] = useState<PendingAccessRequest | null>(null);
 
+  // Clears the pending status modal as a side-effect of opening the portal
   const openCAPortal = useCallback((url: string) => {
     setCaPortalUrl(url);
     setIsMinimized(false);
+    setPendingAccessRequest(null);
   }, []);
 
   const closeCAPortal = useCallback(() => {
@@ -50,6 +63,8 @@ export function CAPortalProvider({ children }: { children: React.ReactNode }) {
       isMinimized,
       pendingDocumentDID,
       setPendingDocumentDID,
+      pendingAccessRequest,
+      setPendingAccessRequest,
     }}>
       {children}
     </CAPortalContext.Provider>
