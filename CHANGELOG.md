@@ -4,6 +4,36 @@ This file contains historical updates and fixes that have been archived from the
 
 ---
 
+## [2026-05-14] — Multi-user Wallet, Hash-based Backup, Restore Fix, Enterprise Config from VCs
+
+### Added
+- **Multi-user login** (`idl-wallet/src/components/layouts/MainLayout.tsx`): username + password fields replace the single-user hardcoded-password flow. Username drives the wallet's IndexedDB namespace and Iagon backup key.
+- **Privacy-preserving backup key**: wallet backups on Iagon are now keyed by `SHA-256(username:password)` (64-char hex `credHash`) — the server never sees a plaintext username.
+- **Content-hash deduplication** (`walletCrypto.ts`): `generateContentHash(jwe)` computes SHA-256 of the JWE string. `syncWalletBackup` compares it against the stored `contentHash` and skips the upload if the wallet hasn't changed.
+- **`syncWalletBackup` thunk** (`actions/index.ts`): runs at every agent startup for all wallets. Uploads a new backup only when the content hash differs from what the server recorded.
+- **Seed pre-load on restore** (`MainLayout.tsx`): before `connectDatabase()`, the backup envelope is decrypted client-side and the original seed is injected into Redux so `initAgent` uses the correct keys.
+- **`generateCredentialHash()` + `generateContentHash()`** exported from `walletCrypto.ts`.
+
+### Fixed
+- **Cross-browser restore — Pluto Store not empty** (`actions/index.ts` → `restoreFromIagon`): before calling `agent.backup.restore(jwe)`, Pluto is stopped, all `rxdb-dexie-identus-wallet-idl-${username}--*` Dexie IndexedDB databases are enumerated and deleted, then Pluto is restarted. Fixes the `assertStoreIsEmpty()` failure that blocked restores in a second browser.
+- **AutoStartAgent restore gate** (`AutoStartAgent.tsx`): `startAgent` is blocked while `iagonStatus` is `checking`, `downloading`, or `restoring`. Prevents `agent.start()` writing mediator data to Pluto before the restore runs.
+- **GlobalCAEnforcer race condition** (`_app.tsx`): CA connection check now gates on `app.agent.hasStarted` (not `agent.instance`) and on `iagonStatus` leaving the restore states. The old gate on `app.connections` (an `ignoredPaths` field) did not trigger re-renders, causing the modal to appear undismissably after a restore.
+- **DIDComm error recovery** (`actions/index.ts` → `startAgent`): `agent.startFetchingMessages(5000)` is now also called inside the DIDComm catch block so mediator polling starts even when `agent.start()` throws a `SecretNotFound` error.
+- **Atalaprism PIURI variant** (`actions/index.ts` → `handleMessages`): `issuedCredentials` filter now also matches `https://didcomm.atalaprism.io/issue-credential/3.0/issue-credential` so credentials issued via that URI are processed.
+- **Duplicate `initAgent`/`startAgent` calls removed** (`pages/index.tsx`): the Dashboard page had its own `useEffect` blocks calling these, racing with `AutoStartAgent`. Removed; `AutoStartAgent` (mounted globally in `_app.tsx`) is the sole handler.
+
+### Changed
+- **API endpoints rewritten** (`api/wallet/check.ts`, `upload.ts`, `download.ts`): accept `credHash` (and `contentHash` for upload) instead of plaintext `username`. Registry format changed to `{ wallets: { "<credHash>": { fileId, contentHash, updatedAt } } }`. Upload uses `axios` + `form-data` npm packages (more reliable multipart handling than native `FormData`/`Blob` for Node.js). Download cleans up stale registry entries on Iagon 404.
+- **Enterprise configuration derived from credentials** (`AutoStartAgent.tsx`): on startup, the component scans `app.credentials` for a `ServiceConfiguration` VC, extracts and validates the config, then applies it. The old approach of loading from localStorage blindly is replaced — if no ServiceConfiguration VC exists, any stale localStorage config is cleared.
+- **Stale enterprise config cleared on login** (`MainLayout.tsx`): `clearAllConfigurations()` is called at the start of every login so a config from a previous wallet session never bleeds into a new one.
+- **`syncWalletBackup` registered in Redux middleware** (`store.ts`): its three lifecycle action types added to `ignoredActions` to suppress serialization warnings.
+- **`NEXT_PUBLIC_BASE_PATH=/wallet`** added to `idl-wallet/.env.local` so browser-side fetch calls reach `/wallet/api/wallet/*` correctly via the Caddy reverse proxy.
+
+### Migration note
+First login after this deployment: `check.ts` returns `{ exists: false }` for existing users (old registry used plaintext username keys). `syncWalletBackup` uploads a fresh backup under the new `credHash` key — one extra upload per user on first post-deploy login, transparent to the user. Old Iagon files keyed by plaintext username become orphaned and can be cleaned up manually.
+
+---
+
 ## [2026-05-10] — Browser Tab, serviceUrl VC Standard, My Documents Removed
 
 ### Added

@@ -8,6 +8,7 @@ import { useAppSelector } from '../reducers/store';
 import { ValidatedCAConfig } from '../utils/caValidation';
 import { ValidatedCompanyConfig } from '../utils/companyValidation';
 import { getCredentialType } from '../utils/credentialTypeDetector';
+import { usePhotoDID } from '../hooks/usePhotoDID';
 
 /**
  * Simplified display component for RealPersonIdentity credentials
@@ -17,6 +18,8 @@ const RealPersonIdentityDisplay: React.FC<{
   revealedData: Record<string, any>;
   isVerified: boolean;
 }> = ({ revealedData, isVerified }) => {
+  const resolvedPhoto = usePhotoDID(revealedData.photo as string | undefined, revealedData.uniqueId as string | undefined);
+
   const displayFields = [
     { key: 'firstName', label: 'First Name' },
     { key: 'lastName', label: 'Last Name' },
@@ -39,10 +42,19 @@ const RealPersonIdentityDisplay: React.FC<{
       <div className={`rounded-2xl p-5 bg-gradient-to-br ${bgGradient} border-2 ${borderColor}`}>
         {/* Profile header */}
         <div className="flex items-start space-x-4 mb-4">
-          <div className={`w-16 h-16 rounded-full flex items-center justify-center text-3xl ${
-            isVerified ? 'bg-emerald-500/20' : 'bg-amber-500/20'
-          }`}>
-            👤
+          <div className={`flex-shrink-0 w-24 h-32 rounded-xl overflow-hidden border-2 ${
+            isVerified ? 'border-emerald-500/50 bg-emerald-500/20' : 'border-amber-500/50 bg-amber-500/20'
+          } flex flex-col items-center justify-center`}>
+            {resolvedPhoto ? (
+              <img src={resolvedPhoto} alt="ID Photo" className="w-full h-full object-cover object-top" />
+            ) : revealedData.photo ? (
+              <>
+                <span className="text-2xl animate-pulse">📷</span>
+                <span className="text-xs text-slate-400 mt-1">Loading…</span>
+              </>
+            ) : (
+              <span className="text-3xl">👤</span>
+            )}
           </div>
           <div className="flex-1">
             {(revealedData.firstName || revealedData.lastName) && (
@@ -58,11 +70,11 @@ const RealPersonIdentityDisplay: React.FC<{
           </div>
         </div>
 
-        {/* Additional fields grid */}
-        {displayFields.filter(f => !['firstName', 'lastName', 'uniqueId'].includes(f.key)).length > 0 && (
+        {/* Additional fields grid — firstName/lastName shown here with labels; uniqueId is shown inline above */}
+        {displayFields.filter(f => f.key !== 'uniqueId').length > 0 && (
           <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-700/50">
             {displayFields
-              .filter(f => !['firstName', 'lastName', 'uniqueId'].includes(f.key))
+              .filter(f => f.key !== 'uniqueId')
               .map(field => (
                 <div key={field.key}>
                   <p className="text-xs font-semibold text-slate-500 uppercase">{field.label}</p>
@@ -144,6 +156,7 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
 }) => {
   const [isAccepting, setIsAccepting] = useState(false);
   const [walletSelectionExpanded, setWalletSelectionExpanded] = useState(false);
+  const [step, setStep] = useState<1 | 2>(1);
   const app = useAppSelector((state) => state.app);
 
   // ✅ REALPERSON UX: Detect if invitation has RealPersonIdentity credential attached
@@ -201,6 +214,11 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
       icon: '⚠️'
     };
   }, [isRealPersonInvitation, inviterIdentity?.isVerified]);
+
+  // Reset to step 1 whenever modal opens
+  useEffect(() => {
+    if (isOpen) setStep(1);
+  }, [isOpen]);
 
   // ✅ REALPERSON UX: Set default wallet type from connections page context
   useEffect(() => {
@@ -286,17 +304,17 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
       <div className="flex min-h-full items-center justify-center p-4">
         <div className="relative bg-slate-900 border border-slate-700/50 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
           {/* Modal Header - Dynamic based on RealPerson detection */}
-          <div className={`sticky top-0 ${headerConfig.bgClass} border-b border-slate-700/50 px-6 py-4 flex items-center justify-between z-10`}>
+          <div className={`sticky top-0 ${step === 2 ? 'bg-slate-900' : headerConfig.bgClass} border-b border-slate-700/50 px-6 py-4 flex items-center justify-between z-10`}>
             <div className="flex items-center space-x-3">
-              <div className={`w-10 h-10 ${headerConfig.iconBgClass} rounded-xl flex items-center justify-center`}>
-                <span className={`${headerConfig.iconTextClass} text-xl`}>{headerConfig.icon}</span>
+              <div className={`w-10 h-10 ${step === 2 ? 'bg-cyan-500/20' : headerConfig.iconBgClass} rounded-xl flex items-center justify-center`}>
+                <span className={`${step === 2 ? 'text-cyan-400' : headerConfig.iconTextClass} text-xl`}>{step === 2 ? '🔐' : headerConfig.icon}</span>
               </div>
               <div>
                 <h2 className="text-2xl font-bold text-white">
-                  {headerConfig.title}
+                  {step === 2 ? 'Share Your Credential' : headerConfig.title}
                 </h2>
                 <p className="text-sm text-slate-400">
-                  {headerConfig.subtitle}
+                  {step === 2 ? 'Optional: share your identity proof with the inviter' : headerConfig.subtitle}
                 </p>
               </div>
             </div>
@@ -310,6 +328,9 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
 
           {/* Modal Body */}
           <div className="px-6 py-6 space-y-6">
+
+            {/* Step 1: Identity Review */}
+            {step === 1 && (<>
             {/* Inviter Identity Section */}
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -765,7 +786,12 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
               </div>
             )}
 
-            {/* ✅ NEW: Credential Selection Section */}
+            </>)}
+
+            {/* Step 2: Credential Sharing */}
+            {step === 2 && (<>
+
+            {/* Credential Selection Section */}
             {availableCredentials && availableCredentials.length > 0 && onVCSelectionChange && (
               <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wide">
@@ -820,35 +846,6 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
               </div>
             )}
 
-            {/* Invitation Details Section */}
-            {invitationData && (
-              <div className="space-y-4">
-                <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wide">
-                  Invitation Details:
-                </h3>
-
-                <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4 space-y-3 text-sm">
-                  {invitationData.id && (
-                    <div className="flex justify-between items-center">
-                      <span className="font-medium text-slate-400">Invitation ID:</span>
-                      <span className="font-mono text-xs text-white">{invitationData.id.substring(0, 20)}...</span>
-                    </div>
-                  )}
-                  {invitationData.type && (
-                    <div className="flex justify-between items-center">
-                      <span className="font-medium text-slate-400">Type:</span>
-                      <span className="text-white">RFC 0434 Out-of-Band</span>
-                    </div>
-                  )}
-                  {invitationData.goal && (
-                    <div className="flex justify-between items-center">
-                      <span className="font-medium text-slate-400">Purpose:</span>
-                      <span className="text-white">{invitationData.goal}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
 
             {/* Security Notice */}
             <div className="bg-cyan-500/20 border border-cyan-500/30 rounded-xl p-4">
@@ -985,19 +982,29 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
                 )}
               </div>
             )}
+
+            </>)}
           </div>
 
           {/* Modal Footer */}
           <div className="sticky bottom-0 bg-slate-900 border-t border-slate-700/50 px-6 py-4 flex items-center justify-between">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 text-slate-300 bg-transparent hover:bg-slate-800 rounded-xl transition-colors"
-              disabled={isAccepting}
-            >
-              Close
-            </button>
+            {step === 1 ? (
+              <button
+                onClick={onClose}
+                className="px-4 py-2 text-slate-300 bg-transparent hover:bg-slate-800 rounded-xl transition-colors"
+              >
+                Close
+              </button>
+            ) : (
+              <button
+                onClick={() => setStep(1)}
+                disabled={isAccepting}
+                className="px-4 py-2 text-slate-300 bg-transparent hover:bg-slate-800 rounded-xl transition-colors disabled:opacity-50"
+              >
+                ← Back
+              </button>
+            )}
 
-            {/* ✅ PHASE 3: Action buttons - Reject and Accept */}
             <div className="flex space-x-3">
               {onReject && (
                 <button
@@ -1008,13 +1015,47 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
                   ✗ Reject
                 </button>
               )}
-              <button
-                onClick={handleAccept}
-                disabled={isAccepting}
-                className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-purple-500 text-white font-semibold rounded-xl hover:opacity-90 focus:ring-4 focus:ring-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
-              >
-                {isAccepting ? '⏳ Accepting...' : '✓ Accept Invitation'}
-              </button>
+              {step === 1 ? (
+                (() => {
+                  // Company and CA invitations verify trust via their own VC (companyCAVerification /
+                  // caConfig), not via an inviter personal VC proof. The "no VC proof" fallback in
+                  // OOB.tsx sets validationResult.errors for these invitations too, so ignore errors
+                  // for those invitation types — their trust is checked separately.
+                  const hasValidationErrors = !isCompanyInvitation && !isCAInvitation &&
+                    (inviterIdentity?.validationResult?.errors?.length ?? 0) > 0;
+                  // Only show 2-step flow when there are credentials to select (RealPerson invitations).
+                  // Company and CA invitations don't require the invitee to share credentials —
+                  // skip step 2 and show Accept directly.
+                  const hasCredentialsToShare = isRealPersonInvitation && (availableCredentials?.length ?? 0) > 0;
+                  return hasCredentialsToShare ? (
+                    <button
+                      onClick={() => setStep(2)}
+                      disabled={hasValidationErrors}
+                      title={hasValidationErrors ? 'Cannot proceed: credential verification failed' : undefined}
+                      className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-purple-500 text-white font-semibold rounded-xl hover:opacity-90 focus:ring-4 focus:ring-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+                    >
+                      {hasValidationErrors ? '⛔ Verification Failed' : 'Next →'}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleAccept}
+                      disabled={isAccepting || hasValidationErrors}
+                      title={hasValidationErrors ? 'Cannot accept: credential verification failed' : undefined}
+                      className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-purple-500 text-white font-semibold rounded-xl hover:opacity-90 focus:ring-4 focus:ring-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+                    >
+                      {hasValidationErrors ? '⛔ Verification Failed' : isAccepting ? '⏳ Accepting...' : '✓ Accept Invitation'}
+                    </button>
+                  );
+                })()
+              ) : (
+                <button
+                  onClick={handleAccept}
+                  disabled={isAccepting}
+                  className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-purple-500 text-white font-semibold rounded-xl hover:opacity-90 focus:ring-4 focus:ring-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+                >
+                  {isAccepting ? '⏳ Accepting...' : '✓ Accept Invitation'}
+                </button>
+              )}
             </div>
           </div>
         </div>

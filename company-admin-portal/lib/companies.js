@@ -30,7 +30,9 @@ const COMPANIES = {
     color: '#2563eb', // Blue
     logo: '🏢',
     // null = use built-in company-admin-portal access gate
-    documentServiceUrl: null
+    documentServiceUrl: null,
+    // Companies whose employees may receive documents from TechCorp employees
+    trustedPartners: ['acme']
   },
 
   acme: {
@@ -55,7 +57,8 @@ const COMPANIES = {
     color: '#059669', // Green
     logo: '🔨',
     // ACME uses the standalone stateless document service
-    documentServiceUrl: 'https://identuslabel.cz/document-service'
+    documentServiceUrl: 'https://identuslabel.cz/document-service',
+    trustedPartners: ['techcorp']
   },
 
   evilcorp: {
@@ -79,7 +82,8 @@ const COMPANIES = {
     ],
     color: '#dc2626', // Red
     logo: '🏴',
-    documentServiceUrl: null
+    documentServiceUrl: null,
+    trustedPartners: [] // EvilCorp has no trusted document-sharing partners
   }
 };
 

@@ -37,8 +37,9 @@ import {
   cleanupDocuments,
   closeViewer
 } from "@/reducers/classifiedDocuments";
-import { selectEnterpriseCredentials, selectEnterpriseDIDs, selectIsEnterpriseConfigured, selectActiveConfiguration } from '@/reducers/enterpriseAgent';
-import { refreshEnterpriseCredentials } from '@/actions/enterpriseAgentActions';
+import { selectEnterpriseCredentials, selectEnterpriseDIDs, selectIsEnterpriseConfigured, selectActiveConfiguration, selectEnterpriseConnections } from '@/reducers/enterpriseAgent';
+import { refreshEnterpriseCredentials, refreshEnterpriseConnections } from '@/actions/enterpriseAgentActions';
+import { buildVP } from '@/utils/KeyAuthorityClient';
 import { DocumentSummary, formatRemainingTime, getDocument, fetchFromServiceEndpoint } from "@/utils/documentStorage";
 import { getItem, getKeysByPattern } from "@/utils/prefixedStorage";
 import {
@@ -48,6 +49,222 @@ import {
 } from '@/utils/walletFolderStorage';
 import { ClassifiedDocumentViewer } from "@/components/ClassifiedDocumentViewer";
 import { requestEditAccess } from "@/utils/KeyAuthorityClient";
+import { DocumentUploader } from "@/components/DocumentUploader";
+
+// Decode the service URI from a did:peer:2 DID's .S segment (browser-compatible)
+function decodePeerDidServiceUri(did: string): string {
+  if (!did || !did.startsWith('did:peer:')) return '';
+  const sPart = did.split('.').find(p => p.startsWith('S'));
+  if (!sPart) return '';
+  try {
+    const raw = sPart.slice(1).replace(/-/g, '+').replace(/_/g, '/');
+    const pad = '='.repeat((4 - (raw.length % 4)) % 4);
+    const decoded = JSON.parse(atob(raw + pad));
+    return (decoded.s || {}).uri || decoded.uri || '';
+  } catch { return ''; }
+}
+
+function isDocumentServiceConnection(conn: any): boolean {
+  const uri = decodePeerDidServiceUri(conn.receiver?.toString() ?? '');
+  return uri.includes('document-service') || uri.includes('91.99.4.54:8200') || uri.includes(':8200');
+}
+
+function connectionLabel(conn: any): string {
+  const uri = decodePeerDidServiceUri(conn.receiver?.toString() ?? '');
+  if (!uri) return 'Unknown Connection';
+  try { return new URL(uri).host; } catch { return uri.slice(0, 40); }
+}
+
+const CLEARANCE_LEVELS = ['INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'];
+
+interface UploadCompany { id: string; name: string; displayName: string; did: string; trustedPartners: string[]; }
+
+/** Decode a JWT payload without verifying — used only for UI filtering, not security decisions. */
+function decodeJWT(jwt: string): Record<string, any> | null {
+  try {
+    const b64 = jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(b64 + '='.repeat((4 - b64.length % 4) % 4)));
+  } catch { return null; }
+}
+
+/** Extract the issuerDID from an EmployeeRole VC (credentialSubject.issuerDID or iss field). */
+function getEmployerDID(credentials: any[]): string | null {
+  for (const cred of credentials) {
+    let jwtStr: string | null = null;
+    if (typeof cred === 'string' && cred.includes('.')) jwtStr = cred;
+    else if (cred?.credential && typeof cred.credential === 'string') jwtStr = cred.credential;
+    else if (cred?.jwt && typeof cred.jwt === 'string') jwtStr = cred.jwt;
+    else if (cred?.properties && typeof cred.properties.get === 'function') {
+      const jti = cred.properties.get('jti');
+      if (typeof jti === 'string' && jti.includes('.')) jwtStr = jti;
+    }
+    if (!jwtStr) continue;
+    const payload = decodeJWT(jwtStr);
+    const cs = payload?.vc?.credentialSubject || payload?.credentialSubject;
+    if (cs?.issuerDID && typeof cs.issuerDID === 'string') return cs.issuerDID;
+  }
+  return null;
+}
+
+const EnterpriseUploadForm: React.FC<{
+  credentials: any[];
+  onClose: () => void;
+}> = ({ credentials, onClose }) => {
+  const [companies, setCompanies] = React.useState<UploadCompany[]>([]);
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [title, setTitle] = React.useState('');
+  const [clearance, setClearance] = React.useState('');
+  const [file, setFile] = React.useState<File | null>(null);
+  const [step, setStep] = React.useState<'form' | 'uploading' | 'done' | 'error'>('form');
+  const [error, setError] = React.useState('');
+  const [resultDID, setResultDID] = React.useState('');
+
+  React.useEffect(() => {
+    fetch('https://identuslabel.cz/company-admin/api/companies')
+      .then(r => r.json())
+      .then(d => {
+        if (!d.success) return;
+        const all: UploadCompany[] = (d.companies || []).filter((c: any) => c.did);
+        // Determine the employee's company from their EmployeeRole VC issuerDID
+        const employerDID = getEmployerDID(credentials);
+        if (employerDID) {
+          const myCompany = all.find(c => c.did === employerDID);
+          if (myCompany) {
+            // Only show own company + explicitly trusted partners
+            const allowed = new Set([myCompany.id, ...(myCompany.trustedPartners || [])]);
+            setCompanies(all.filter(c => allowed.has(c.id)));
+            return;
+          }
+        }
+        // Fallback: show all companies if employer cannot be determined
+        setCompanies(all);
+      })
+      .catch(() => {});
+  }, []);
+
+  const toggle = (id: string) =>
+    setSelected(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!file) { setError('Please select a file.'); return; }
+    if (!clearance) { setError('Please select a clearance level.'); return; }
+    if (selected.size === 0) { setError('Select at least one company to grant access.'); return; }
+    setStep('uploading'); setError('');
+    try {
+      const releasableTo = companies.filter(c => selected.has(c.id)).map(c => c.did);
+      const effectiveTitle = title.trim() || file.name.replace(/\.[^.]+$/, '');
+
+      const initRes = await fetch('https://identuslabel.cz/document-service/upload/initiate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: effectiveTitle, clearanceLevel: clearance, releasableTo })
+      });
+      if (!initRes.ok) {
+        const err = await initRes.json().catch(() => ({}));
+        throw new Error((err as any).message || `Initiate failed: ${initRes.status}`);
+      }
+      const { sessionId } = await initRes.json();
+
+      const credList = (credentials || []).map((c: any) => c.credential || c).filter(Boolean);
+      const { vp, hasCredentials } = buildVP(credList);
+      if (!hasCredentials) throw new Error('No EmployeeRole credential found. Ensure your credentials are loaded.');
+
+      const formData = new FormData();
+      formData.append('sessionId', sessionId);
+      formData.append('vp', JSON.stringify(vp));
+      formData.append('file', file, file.name);
+      const completeRes = await fetch('https://identuslabel.cz/document-service/upload/complete', {
+        method: 'POST',
+        body: formData
+      });
+      if (!completeRes.ok) {
+        const err = await completeRes.json().catch(() => ({}));
+        throw new Error((err as any).message || `Upload failed: ${completeRes.status}`);
+      }
+      const result = await completeRes.json();
+      setResultDID(result.documentDID || '');
+      setStep('done');
+    } catch (err: any) {
+      setStep('error');
+      setError(err.message || 'Upload failed');
+    }
+  };
+
+  if (step === 'done') return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-white font-semibold text-lg">Document Uploaded</h2>
+        <button onClick={onClose} className="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <div className="text-center py-6">
+        <div className="text-emerald-400 text-3xl mb-3">✅</div>
+        <p className="text-white font-medium">Document published successfully</p>
+        {resultDID && <p className="text-slate-400 text-xs mt-2 break-all font-mono">{resultDID}</p>}
+        <button onClick={onClose} className="mt-4 px-4 py-2 bg-emerald-500 text-white rounded-xl text-sm">Close</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-white font-semibold text-lg">📤 Upload Document</h2>
+        <button onClick={onClose} className="text-slate-400 hover:text-white">✕</button>
+      </div>
+      {step === 'uploading' ? (
+        <div className="text-center py-8">
+          <div className="w-8 h-8 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-white font-medium">Verifying identity and uploading…</p>
+          <p className="text-slate-400 text-sm mt-1">Creating VP from your credentials and publishing to Iagon</p>
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-sm text-slate-300 mb-1">Title</label>
+            <input type="text" value={title} onChange={e => setTitle(e.target.value)}
+              placeholder="Leave empty to use filename"
+              className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white placeholder-slate-400 text-sm focus:outline-none focus:border-cyan-500" />
+          </div>
+          <div>
+            <label className="block text-sm text-slate-300 mb-1">Clearance Level</label>
+            <select value={clearance} onChange={e => setClearance(e.target.value)}
+              className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-cyan-500">
+              <option value="" disabled>Select classification…</option>
+              {CLEARANCE_LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm text-slate-300 mb-2">
+              Releasable To <span className="text-red-400">*</span>
+              <span className="text-slate-500 ml-1 text-xs">(companies that can access this document)</span>
+            </label>
+            {companies.length === 0 ? (
+              <p className="text-slate-400 text-sm">Loading companies…</p>
+            ) : companies.map(c => (
+              <label key={c.id} className="flex items-center gap-3 p-2 mb-1 rounded-lg border border-slate-700/50 bg-slate-800/30 hover:bg-slate-700/30 cursor-pointer">
+                <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)}
+                  className="rounded border-slate-600 text-cyan-500 bg-slate-800" />
+                <span className="text-sm text-white">{c.displayName || c.name}</span>
+                <span className="text-xs text-slate-500 ml-auto font-mono">{c.id}</span>
+              </label>
+            ))}
+          </div>
+          <div>
+            <label className="block text-sm text-slate-300 mb-1">File</label>
+            <input type="file" onChange={e => setFile(e.target.files?.[0] ?? null)}
+              className="w-full text-slate-300 text-sm file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:bg-slate-600 file:text-white" />
+          </div>
+          {(step === 'error' || error) && <p className="text-red-400 text-sm">{error}</p>}
+          <button type="submit" disabled={!file || !clearance || selected.size === 0}
+            className="w-full bg-gradient-to-r from-cyan-500 to-purple-500 disabled:opacity-50 text-white rounded py-2 text-sm font-medium">
+            Upload Document
+          </button>
+        </form>
+      )}
+    </div>
+  );
+};
 
 /**
  * Classification badge configuration (string)
@@ -398,6 +615,7 @@ export default function DocumentsPage() {
   const enterpriseDIDs = useAppSelector(selectEnterpriseDIDs);
   const isEnterpriseConfigured = useAppSelector(selectIsEnterpriseConfigured);
   const enterpriseConfig = useAppSelector(selectActiveConfiguration);
+  const enterpriseConnections = useAppSelector(selectEnterpriseConnections);
   const classifiedDocuments = useAppSelector(state => state.classifiedDocuments);
 
   // Portal bridge: document DID pushed from the in-wallet portal iframe
@@ -405,6 +623,10 @@ export default function DocumentsPage() {
 
   // My Documents state
   const [showExpired, setShowExpired] = useState(true);
+
+  // Upload modal state
+  const [showUploadPicker, setShowUploadPicker] = useState(false);
+  const [uploadConnection, setUploadConnection] = useState<any | null>(null);
 
   // Edit / versioning state (memory only — never persisted)
   const [editState, setEditState] = useState<'idle' | 'requesting' | 'editing' | 'uploading' | 'done' | 'error'>('idle');
@@ -450,25 +672,32 @@ export default function DocumentsPage() {
   // API configuration (used by edit handlers)
   const apiBaseUrl = 'https://identuslabel.cz/company-admin/api';
 
-  // Load enterprise credentials on mount
+  // Load enterprise credentials and connections on mount
   useEffect(() => {
-    if (isEnterpriseConfigured && enterpriseCredentials.length === 0) {
-      dispatch(refreshEnterpriseCredentials());
+    if (isEnterpriseConfigured) {
+      if (enterpriseCredentials.length === 0) dispatch(refreshEnterpriseCredentials());
+      dispatch(refreshEnterpriseConnections());
     }
   }, [isEnterpriseConfigured]);
 
-  // Load my documents on mount and when showExpired changes
+  // Load my documents on mount and when showExpired changes.
+  // Gated on db connection so this never reads the classified-documents store before
+  // login has scoped it to the current user (see setDocumentStorageWalletId in connectDatabase).
   useEffect(() => {
-    dispatch(loadMyDocuments(showExpired));
-  }, [dispatch, showExpired]);
+    if (app.db.instance && app.db.connected) {
+      dispatch(loadMyDocuments(showExpired));
+    }
+  }, [dispatch, showExpired, app.db.instance, app.db.connected]);
 
   // Auto-refresh my documents every 30 seconds
   useEffect(() => {
     const interval = setInterval(() => {
-      dispatch(loadMyDocuments(showExpired));
+      if (app.db.instance && app.db.connected) {
+        dispatch(loadMyDocuments(showExpired));
+      }
     }, 30000);
     return () => clearInterval(interval);
-  }, [dispatch, showExpired]);
+  }, [dispatch, showExpired, app.db.instance, app.db.connected]);
 
   // My Documents handlers
   const handleView = useCallback((ephemeralDID: string) => {
@@ -947,6 +1176,13 @@ export default function DocumentsPage() {
                         <span>Add Document DID</span>
                       </button>
                       <button
+                        onClick={() => { setAddMenuOpen(false); setShowUploadPicker(true); setUploadConnection(null); }}
+                        className="w-full px-4 py-3 text-sm text-left text-slate-200 hover:bg-slate-700/60 flex items-center gap-3 border-t border-slate-700/50"
+                      >
+                        <span className="text-lg">📤</span>
+                        <span>Upload Document</span>
+                      </button>
+                      <button
                         onClick={() => { setAddMenuOpen(false); handleCreateFolder(); }}
                         className="w-full px-4 py-3 text-sm text-left text-slate-200 hover:bg-slate-700/60 flex items-center gap-3 border-t border-slate-700/50"
                       >
@@ -1122,6 +1358,52 @@ export default function DocumentsPage() {
           onClose={() => { setDetailsDID(null); setDetailsData(null); setDetailsError(null); }}
         />
       )}
+
+      {/* Upload Document Modal */}
+      {showUploadPicker && (() => {
+        const personalDocConns = (app.connections ?? []).filter(isDocumentServiceConnection);
+        const hasPersonal = personalDocConns.length > 0;
+        // Enterprise upload is available when the enterprise agent is configured OR
+        // connections have already been loaded into Redux (reliable post-init signal).
+        const hasEnterprise = isEnterpriseConfigured || (enterpriseConnections ?? []).length > 0;
+
+        const closeModal = () => { setShowUploadPicker(false); setUploadConnection(null); };
+
+        return (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[10001] flex items-center justify-center" onClick={closeModal}>
+            <div className="bg-slate-900 border border-slate-700/50 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              {hasEnterprise ? (
+                <EnterpriseUploadForm
+                  credentials={enterpriseCredentials ?? []}
+                  onClose={closeModal}
+                />
+              ) : hasPersonal && app.agent?.instance ? (
+                <DocumentUploader
+                  agent={app.agent.instance}
+                  connection={personalDocConns.length === 1 ? personalDocConns[0] : (uploadConnection ?? personalDocConns[0])}
+                  onComplete={closeModal}
+                  onClose={closeModal}
+                />
+              ) : (
+                <>
+                  <div className="flex items-center justify-between mb-5">
+                    <h2 className="text-lg font-bold text-white">Upload Document</h2>
+                    <button onClick={closeModal} className="text-slate-400 hover:text-white text-2xl leading-none">×</button>
+                  </div>
+                  <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl">
+                    <p className="text-amber-300 font-medium mb-1">No document service connection</p>
+                    <p className="text-sm text-amber-400/80 mt-1">
+                      This is set up automatically during employee onboarding. If you see this message,
+                      ask your admin to re-run onboarding or connect manually via{' '}
+                      <span className="font-mono text-xs bg-slate-800 px-1 rounded">https://identuslabel.cz/document-service/connect</span>.
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Document Viewer Modal */}
       {classifiedDocuments.isViewing && classifiedDocuments.selectedDocument && (

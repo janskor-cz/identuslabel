@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Document Service Admin</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #0f1117;
+  --surface:   #1a1f2e;
+  --surface2:  #222840;
+  --border:    #2d3354;
+  --cyan:      #06b6d4;
+  --cyan-dim:  rgba(6,182,212,.15);
+  --purple:    #8b5cf6;
+  --purple-dim:rgba(139,92,246,.15);
+  --green:     #22c55e;
+  --red:       #ef4444;
+  --amber:     #f59e0b;
+  --text:      #e2e8f0;
+  --muted:     #64748b;
+  --radius:    10px;
+}
+
+body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; min-height: 100vh; }
+
+/* ── Auth screen ─────────────────────────────────────────────────────── */
+#auth-screen {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100vh;
+}
+.auth-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 40px; width: 380px; text-align: center;
+}
+.auth-card h1 { font-size: 22px; margin-bottom: 6px; }
+.auth-card p  { color: var(--muted); margin-bottom: 28px; font-size: 13px; }
+.auth-card input {
+  width: 100%; padding: 10px 14px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text); font-size: 14px; margin-bottom: 14px; outline: none;
+}
+.auth-card input:focus { border-color: var(--cyan); }
+.auth-error { color: var(--red); font-size: 13px; margin-top: 10px; min-height: 20px; }
+
+/* ── App layout ──────────────────────────────────────────────────────── */
+#app { display: flex; min-height: 100vh; }
+
+aside {
+  width: 220px; flex-shrink: 0; background: var(--surface);
+  border-right: 1px solid var(--border); display: flex; flex-direction: column;
+  position: sticky; top: 0; height: 100vh;
+}
+.sidebar-logo {
+  padding: 20px 16px 14px; border-bottom: 1px solid var(--border);
+}
+.sidebar-logo h2 { font-size: 15px; color: var(--cyan); }
+.sidebar-logo p  { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.health-dot.ok  { background: var(--green); }
+.health-dot.err { background: var(--red); }
+.health-dot.loading { background: var(--amber); }
+
+nav { flex: 1; padding: 12px 8px; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border-radius: 8px; cursor: pointer; color: var(--muted); transition: all .15s;
+  margin-bottom: 2px; border: none; background: none; width: 100%; text-align: left; font-size: 14px;
+}
+.nav-item:hover  { background: var(--surface2); color: var(--text); }
+.nav-item.active { background: var(--cyan-dim); color: var(--cyan); }
+.nav-item .icon  { font-size: 16px; width: 20px; text-align: center; }
+
+.sidebar-footer {
+  padding: 14px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted);
+}
+.sidebar-footer button {
+  width: 100%; padding: 7px; background: none; border: 1px solid var(--border);
+  border-radius: 6px; color: var(--muted); cursor: pointer; font-size: 12px; margin-top: 8px;
+}
+.sidebar-footer button:hover { border-color: var(--red); color: var(--red); }
+
+/* ── Main content ────────────────────────────────────────────────────── */
+main { flex: 1; padding: 28px; overflow-y: auto; min-width: 0; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+h2 { font-size: 20px; margin-bottom: 6px; }
+.subtitle { color: var(--muted); margin-bottom: 24px; font-size: 13px; }
+
+/* ── Shared components ───────────────────────────────────────────────── */
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+}
+.card-title { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 14px; }
+
+.grid-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
+.stat-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px 20px;
+}
+.stat-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.stat-value { font-size: 26px; font-weight: 700; }
+.stat-value.ok     { color: var(--green); }
+.stat-value.err    { color: var(--red); }
+.stat-value.info   { color: var(--cyan); }
+.stat-value.purple { color: var(--purple); }
+
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
+}
+.badge-green  { background: rgba(34,197,94,.15); color: var(--green); }
+.badge-red    { background: rgba(239,68,68,.15);  color: var(--red); }
+.badge-amber  { background: rgba(245,158,11,.15); color: var(--amber); }
+.badge-cyan   { background: var(--cyan-dim);       color: var(--cyan); }
+.badge-purple { background: var(--purple-dim);     color: var(--purple); }
+.badge-gray   { background: rgba(100,116,139,.15); color: var(--muted); }
+
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; border-bottom: 1px solid var(--border); }
+td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: middle; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--surface2); }
+.mono { font-family: monospace; font-size: 12px; color: var(--muted); }
+
+.btn {
+  padding: 8px 16px; border-radius: 7px; font-size: 13px; font-weight: 500;
+  cursor: pointer; border: none; transition: all .15s;
+}
+.btn-primary { background: linear-gradient(to right, var(--cyan), var(--purple)); color: #fff; }
+.btn-primary:hover { opacity: .9; }
+.btn-secondary { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
+.btn-secondary:hover { border-color: var(--cyan); color: var(--cyan); }
+.btn-danger { background: rgba(239,68,68,.15); border: 1px solid rgba(239,68,68,.3); color: var(--red); }
+.btn-danger:hover { background: rgba(239,68,68,.25); }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.form-row { margin-bottom: 14px; }
+.form-row label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; font-weight: 500; }
+.form-row input, .form-row select {
+  width: 100%; padding: 9px 12px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 7px; color: var(--text); font-size: 13px; outline: none;
+}
+.form-row input:focus, .form-row select:focus { border-color: var(--cyan); }
+.form-hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+.section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.actions { display: flex; gap: 8px; align-items: center; }
+.toast {
+  position: fixed; bottom: 24px; right: 24px; padding: 12px 20px;
+  border-radius: 8px; font-size: 13px; font-weight: 500; z-index: 9999;
+  opacity: 0; transform: translateY(8px); transition: all .2s;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.success { background: rgba(34,197,94,.2); border: 1px solid rgba(34,197,94,.4); color: var(--green); }
+.toast.error   { background: rgba(239,68,68,.2);  border: 1px solid rgba(239,68,68,.4);  color: var(--red); }
+
+.empty-state { text-align: center; padding: 40px; color: var(--muted); }
+.empty-state .icon { font-size: 36px; margin-bottom: 10px; }
+
+/* ── VC Policies ─────────────────────────────────────────────────────── */
+.level-section { margin-bottom: 16px; }
+.level-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; background: var(--surface2); border-radius: 8px 8px 0 0;
+  border: 1px solid var(--border); cursor: pointer; user-select: none;
+}
+.level-body {
+  border: 1px solid var(--border); border-top: none;
+  border-radius: 0 0 8px 8px; padding: 14px;
+}
+.rule-row {
+  display: grid; grid-template-columns: 1fr 140px 1fr auto;
+  gap: 8px; margin-bottom: 8px; align-items: start;
+}
+.rule-row input { font-size: 12px; padding: 7px 10px; }
+.trusted-issuers-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.issuer-tag {
+  display: flex; align-items: center; gap: 4px; padding: 3px 8px;
+  background: var(--cyan-dim); border: 1px solid rgba(6,182,212,.3);
+  border-radius: 4px; font-size: 11px; color: var(--cyan); font-family: monospace;
+}
+.issuer-tag button { background: none; border: none; cursor: pointer; color: var(--cyan); padding: 0; line-height: 1; }
+
+/* ── Logs ────────────────────────────────────────────────────────────── */
+.log-filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: flex-end; }
+.log-filters .form-row { margin: 0; flex: 1; min-width: 140px; }
+.pagination { display: flex; align-items: center; gap: 8px; margin-top: 14px; justify-content: flex-end; }
+.pagination span { color: var(--muted); font-size: 13px; }
+
+.did-short { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+</style>
+</head>
+<body>
+
+<!-- Auth screen -->
+<div id="auth-screen">
+  <div class="auth-card">
+    <div style="font-size:36px;margin-bottom:12px">🔐</div>
+    <h1>Document Service Admin</h1>
+    <p>Enter your admin API key to continue</p>
+    <input type="password" id="auth-key-input" placeholder="Admin API key" autocomplete="off">
+    <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Sign In</button>
+    <div class="auth-error" id="auth-error"></div>
+  </div>
+</div>
+
+<!-- Main app -->
+<div id="app" style="display:none">
+  <aside>
+    <div class="sidebar-logo">
+      <h2>📄 Doc Service</h2>
+      <p>
+        <span class="health-dot loading" id="health-dot"></span>
+        <span id="health-label">Checking…</span>
+      </p>
+    </div>
+    <nav>
+      <button class="nav-item active" onclick="showTab('overview')"    data-tab="overview">    <span class="icon">📊</span> Overview</button>
+      <button class="nav-item"        onclick="showTab('policies')"    data-tab="policies">    <span class="icon">🔑</span> VC Policies</button>
+      <button class="nav-item"        onclick="showTab('documents')"   data-tab="documents">   <span class="icon">📁</span> Documents</button>
+      <button class="nav-item"        onclick="showTab('storage')"     data-tab="storage">     <span class="icon">☁️</span>  Storage</button>
+      <button class="nav-item"        onclick="showTab('logs')"        data-tab="logs">        <span class="icon">📋</span> Logs</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div id="sidebar-url" style="word-break:break-all"></div>
+      <button onclick="doLogout()">Sign Out</button>
+    </div>
+  </aside>
+
+  <main>
+
+    <!-- ── Overview ─────────────────────────────────────────────────── -->
+    <div id="tab-overview" class="tab-content active">
+      <h2>Overview</h2>
+      <p class="subtitle">Service health and recent activity</p>
+      <div class="grid-stats">
+        <div class="stat-card"><div class="stat-label">Service</div><div class="stat-value ok" id="ov-status">—</div></div>
+        <div class="stat-card"><div class="stat-label">Documents</div><div class="stat-value info" id="ov-docs">—</div></div>
+        <div class="stat-card"><div class="stat-label">Storage</div><div class="stat-value" id="ov-storage">—</div></div>
+        <div class="stat-card"><div class="stat-label">Port</div><div class="stat-value purple" id="ov-port">—</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Recent Access Events</div>
+        <div id="ov-recent-logs">
+          <div class="empty-state"><div class="icon">📋</div>No events yet</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Service Info</div>
+        <table>
+          <tbody id="ov-info-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── VC Policies ───────────────────────────────────────────────── -->
+    <div id="tab-policies" class="tab-content">
+      <div class="section-header">
+        <div>
+          <h2>VC Schema Policies</h2>
+          <p class="subtitle">Define which schemas and issuers are trusted for each clearance level</p>
+        </div>
+        <button class="btn btn-primary" onclick="savePolicies()">💾 Save Policies</button>
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px">
+        ℹ️ If no rules are configured for a level, the built-in detection applies (SecurityClearance VC with <code style="color:var(--cyan)">clearanceLevel</code> field, or EmployeeRole VC field signature). Rules are checked in order — the first match wins.
+      </p>
+      <div id="policy-levels"></div>
+    </div>
+
+    <!-- ── Documents ─────────────────────────────────────────────────── -->
+    <div id="tab-documents" class="tab-content">
+      <div class="section-header">
+        <div>
+          <h2>Documents</h2>
+          <p class="subtitle">All documents managed by this service</p>
+        </div>
+        <button class="btn btn-secondary" onclick="loadDocuments()">↻ Refresh</button>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden">
+        <table>
+          <thead>
+            <tr>
+              <th>DID</th>
+              <th>Title</th>
+              <th>Clearance</th>
+              <th>Status</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="docs-table-body">
+            <tr><td colspan="5" class="empty-state">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Storage ───────────────────────────────────────────────────── -->
+    <div id="tab-storage" class="tab-content">
+      <h2>Storage Configuration</h2>
+      <p class="subtitle">Configure Iagon decentralized storage credentials</p>
+      <div class="card">
+        <div class="card-title">Iagon Settings</div>
+        <div class="form-row">
+          <label>Access Token</label>
+          <input type="password" id="st-token" placeholder="Iagon API access token">
+          <div class="form-hint">Required. Obtain from your Iagon account dashboard.</div>
+        </div>
+        <div class="form-row">
+          <label>Node ID</label>
+          <input type="text" id="st-nodeid" placeholder="Iagon storage node ID">
+          <div class="form-hint">Required. The node that will store encrypted files.</div>
+        </div>
+        <div class="form-row">
+          <label>Download Base URL</label>
+          <input type="text" id="st-baseurl" placeholder="https://gw.iagon.com/api/v2">
+          <div class="form-hint">Default: https://gw.iagon.com/api/v2</div>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:20px">
+          <button class="btn btn-secondary" onclick="testStorage()" id="test-storage-btn">🔌 Test Connection</button>
+          <button class="btn btn-primary"   onclick="saveStorage()">💾 Save Settings</button>
+        </div>
+        <div id="storage-test-result" style="margin-top:12px;font-size:13px"></div>
+      </div>
+    </div>
+
+    <!-- ── Logs ──────────────────────────────────────────────────────── -->
+    <div id="tab-logs" class="tab-content">
+      <div class="section-header">
+        <div>
+          <h2>Access Logs</h2>
+          <p class="subtitle">All document access events (newest first)</p>
+        </div>
+        <button class="btn btn-secondary" onclick="loadLogs(0)">↻ Refresh</button>
+      </div>
+      <div class="card">
+        <div class="log-filters">
+          <div class="form-row"><label>From date</label><input type="date" id="log-from"></div>
+          <div class="form-row"><label>To date</label><input type="date" id="log-to"></div>
+          <div class="form-row" style="min-width:200px"><label>Document DID</label><input type="text" id="log-did" placeholder="did:prism:…"></div>
+          <div class="form-row"><label>Result</label>
+            <select id="log-granted">
+              <option value="">All</option>
+              <option value="true">Granted</option>
+              <option value="false">Denied</option>
+            </select>
+          </div>
+          <div style="align-self:flex-end"><button class="btn btn-secondary" onclick="loadLogs(0)">Filter</button></div>
+        </div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Result</th>
+                <th>Document DID</th>
+                <th>Clearance</th>
+                <th>Viewer</th>
+                <th>Denial Reason</th>
+                <th>ms</th>
+              </tr>
+            </thead>
+            <tbody id="logs-table-body">
+              <tr><td colspan="7" class="empty-state">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <button class="btn btn-sm btn-secondary" id="log-prev" onclick="logPage(-1)" disabled>← Prev</button>
+          <span id="log-page-info">—</span>
+          <button class="btn btn-sm btn-secondary" id="log-next" onclick="logPage(1)"  disabled>Next →</button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let API_KEY = localStorage.getItem('doc-admin-key') || '';
+let policyData = { INTERNAL:{rules:[]}, CONFIDENTIAL:{rules:[]}, RESTRICTED:{rules:[]}, SECRET:{rules:[]} };
+let logOffset  = 0;
+const LOG_LIMIT = 50;
+
+// Derive base path so API calls work behind any reverse-proxy prefix (e.g. /document-service)
+// window.location.pathname for /document-service/admin/ → BASE = '/document-service'
+const BASE = (() => {
+  const p = window.location.pathname.replace(/\/admin\/?.*$/, '');
+  return p.endsWith('/') ? p.slice(0, -1) : p;
+})();
+
+const LEVELS = ['INTERNAL','CONFIDENTIAL','RESTRICTED','SECRET'];
+const LEVEL_COLORS = { INTERNAL:'cyan', CONFIDENTIAL:'amber', RESTRICTED:'amber', SECRET:'red' };
+const LEVEL_ICONS  = { INTERNAL:'🟢', CONFIDENTIAL:'🟡', RESTRICTED:'🟠', SECRET:'🔴' };
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  if (API_KEY) tryBootstrap();
+  document.getElementById('auth-key-input').addEventListener('keydown', e => e.key === 'Enter' && doLogin());
+});
+
+async function tryBootstrap() {
+  try {
+    const r = await api('GET', '/admin/api/status');
+    if (r.ok) showApp();
+  } catch (_) { /* key invalid, stay on login */ }
+}
+
+async function doLogin() {
+  const key = document.getElementById('auth-key-input').value.trim();
+  if (!key) return;
+  API_KEY = key;
+  const r = await fetch(BASE + '/admin/api/status', { headers: { 'x-admin-key': key } });
+  if (r.ok) {
+    localStorage.setItem('doc-admin-key', key);
+    showApp();
+  } else {
+    document.getElementById('auth-error').textContent = 'Invalid API key.';
+  }
+}
+
+function doLogout() {
+  localStorage.removeItem('doc-admin-key');
+  location.reload();
+}
+
+function showApp() {
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  loadOverview();
+  loadConfig();
+}
+
+// ── API helper ────────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: { 'x-admin-key': API_KEY, 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(BASE + path, opts);
+  const data = await r.json().catch(() => ({}));
+  return { ok: r.ok, status: r.status, data };
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let toastTimer;
+function toast(msg, type = 'success') {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.className = `toast ${type} show`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ── Tab navigation ────────────────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+  if (name === 'documents') loadDocuments();
+  if (name === 'logs')      loadLogs(0);
+}
+
+// ── Overview ──────────────────────────────────────────────────────────────────
+async function loadOverview() {
+  const { ok, data } = await api('GET', '/admin/api/status');
+  const dot   = document.getElementById('health-dot');
+  const label = document.getElementById('health-label');
+  if (ok && data.healthy) {
+    dot.className = 'health-dot ok'; label.textContent = 'Online';
+    document.getElementById('ov-status').textContent = 'Online';
+    document.getElementById('ov-status').className   = 'stat-value ok';
+  } else {
+    dot.className = 'health-dot err'; label.textContent = 'Offline';
+    document.getElementById('ov-status').textContent = 'Offline';
+    document.getElementById('ov-status').className   = 'stat-value err';
+  }
+  document.getElementById('ov-docs').textContent    = data.docCount ?? '—';
+  document.getElementById('ov-port').textContent    = data.port    ?? '—';
+  const stoEl = document.getElementById('ov-storage');
+  if (data.storageConfigured) { stoEl.textContent = 'OK'; stoEl.className = 'stat-value ok'; }
+  else                        { stoEl.textContent = 'Not configured'; stoEl.className = 'stat-value err'; }
+
+  if (data.serviceUrl) document.getElementById('sidebar-url').textContent = data.serviceUrl;
+
+  // Info table
+  const infoRows = [
+    ['Agent URL', data.agentUrl || '—'],
+    ['Service URL', data.serviceUrl || '—'],
+    ['Storage', data.storageConfigured ? '✅ Iagon configured' : '⚠️ Not configured'],
+  ];
+  document.getElementById('ov-info-table').innerHTML = infoRows.map(([k,v]) =>
+    `<tr><td style="color:var(--muted);width:160px">${k}</td><td>${v}</td></tr>`
+  ).join('');
+
+  // Recent logs
+  if (data.recentLogs?.length) {
+    document.getElementById('ov-recent-logs').innerHTML = `<table>
+      <thead><tr><th>Time</th><th>Result</th><th>Document</th><th>Clearance</th></tr></thead>
+      <tbody>${data.recentLogs.map(renderLogRow).join('')}</tbody>
+    </table>`;
+  }
+}
+
+// ── VC Policies ───────────────────────────────────────────────────────────────
+async function loadConfig() {
+  const { ok, data } = await api('GET', '/admin/api/config');
+  if (ok && data.schemaPolicy) {
+    policyData = data.schemaPolicy;
+    loadStorageFields(data.storage);
+  }
+  renderPolicies();
+}
+
+function renderPolicies() {
+  const container = document.getElementById('policy-levels');
+  container.innerHTML = LEVELS.map(level => `
+    <div class="level-section">
+      <div class="level-header">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span>${LEVEL_ICONS[level]}</span>
+          <span style="font-weight:600">${level}</span>
+          <span class="badge badge-${LEVEL_COLORS[level]}">${(policyData[level]?.rules||[]).length} rule(s)</span>
+        </div>
+        <button class="btn btn-sm btn-secondary" onclick="addRule('${level}')">+ Add Rule</button>
+      </div>
+      <div class="level-body" id="rules-${level}">
+        ${renderRules(level)}
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderRules(level) {
+  const rules = policyData[level]?.rules || [];
+  if (!rules.length) return `<div style="color:var(--muted);font-size:13px;padding:8px 0">No rules — built-in detection applies</div>`;
+  return rules.map((rule, i) => `
+    <div class="rule-row" id="rule-${level}-${i}">
+      <div>
+        <label style="font-size:11px;color:var(--muted)">Schema ID (GUID or URL fragment)</label>
+        <input type="text" value="${esc(rule.schemaId||'')}" placeholder="leave empty to match any schema"
+               onchange="updateRule('${level}',${i},'schemaId',this.value)">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted)">Clearance Field</label>
+        <input type="text" value="${esc(rule.clearanceField||'clearanceLevel')}" placeholder="clearanceLevel"
+               onchange="updateRule('${level}',${i},'clearanceField',this.value)">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted)">Trusted Issuer DIDs</label>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="issuer-input-${level}-${i}" placeholder="did:prism:…" style="flex:1">
+          <button class="btn btn-sm btn-secondary" onclick="addIssuer('${level}',${i})">Add</button>
+        </div>
+        <div class="trusted-issuers-list" id="issuers-${level}-${i}">
+          ${(rule.trustedIssuers||[]).map(did => issuerTag(level,i,did)).join('')}
+        </div>
+        <div class="form-hint">Empty = trust any issuer for this schema</div>
+      </div>
+      <div style="padding-top:20px">
+        <button class="btn btn-sm btn-danger" onclick="removeRule('${level}',${i})">✕</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function issuerTag(level, i, did) {
+  return `<div class="issuer-tag"><span class="did-short" title="${esc(did)}">${esc(did)}</span>
+    <button onclick="removeIssuer('${level}',${i},'${esc(did)}')" title="Remove">×</button></div>`;
+}
+
+function addRule(level) {
+  if (!policyData[level]) policyData[level] = { rules: [] };
+  policyData[level].rules.push({ schemaId: '', clearanceField: 'clearanceLevel', trustedIssuers: [] });
+  rerenderLevel(level);
+}
+function removeRule(level, i) {
+  policyData[level].rules.splice(i, 1);
+  rerenderLevel(level);
+}
+function updateRule(level, i, field, value) {
+  policyData[level].rules[i][field] = value;
+}
+function addIssuer(level, i) {
+  const inp = document.getElementById(`issuer-input-${level}-${i}`);
+  const did = inp.value.trim();
+  if (!did) return;
+  if (!policyData[level].rules[i].trustedIssuers) policyData[level].rules[i].trustedIssuers = [];
+  if (!policyData[level].rules[i].trustedIssuers.includes(did)) {
+    policyData[level].rules[i].trustedIssuers.push(did);
+    document.getElementById(`issuers-${level}-${i}`).innerHTML =
+      policyData[level].rules[i].trustedIssuers.map(d => issuerTag(level,i,d)).join('');
+  }
+  inp.value = '';
+}
+function removeIssuer(level, i, did) {
+  policyData[level].rules[i].trustedIssuers = policyData[level].rules[i].trustedIssuers.filter(d => d !== did);
+  document.getElementById(`issuers-${level}-${i}`).innerHTML =
+    policyData[level].rules[i].trustedIssuers.map(d => issuerTag(level,i,d)).join('');
+}
+function rerenderLevel(level) {
+  document.getElementById(`rules-${level}`).innerHTML = renderRules(level);
+  document.querySelector(`[data-level="${level}"] .badge`)?.remove();
+}
+
+async function savePolicies() {
+  const { ok } = await api('PUT', '/admin/api/config/schemas', { schemaPolicy: policyData });
+  ok ? toast('Policies saved') : toast('Save failed', 'error');
+  renderPolicies();
+}
+
+// ── Documents ────────────────────────────────────────────────────────────────
+async function loadDocuments() {
+  const tbody = document.getElementById('docs-table-body');
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted)">Loading…</td></tr>';
+  const { ok, data } = await api('GET', '/admin/api/documents');
+  if (!ok || !data.documents?.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No documents found</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.documents.map(d => `
+    <tr>
+      <td><span class="mono did-short" title="${esc(d.documentDID||'')}">${esc((d.documentDID||'—').slice(0,40))}…</span></td>
+      <td>${esc(d.title || d.metadata?.title || '—')}</td>
+      <td>${clearanceBadge(d.clearanceLevel || d.metadata?.clearanceLevel)}</td>
+      <td>${statusBadge(d.status)}</td>
+      <td style="color:var(--muted)">${fmtDate(d.createdAt || d.metadata?.createdAt)}</td>
+    </tr>
+  `).join('');
+}
+
+// ── Storage ──────────────────────────────────────────────────────────────────
+function loadStorageFields(storage) {
+  if (!storage) return;
+  // Don't populate masked token — leave blank so admin can set a new one
+  document.getElementById('st-nodeid').value  = storage.iagonNodeId    || '';
+  document.getElementById('st-baseurl').value = storage.iagonDownloadBaseUrl || '';
+}
+
+async function testStorage() {
+  const btn = document.getElementById('test-storage-btn');
+  const res = document.getElementById('storage-test-result');
+  btn.disabled = true; btn.textContent = 'Testing…';
+  const payload = {
+    iagonAccessToken:    document.getElementById('st-token').value.trim(),
+    iagonNodeId:         document.getElementById('st-nodeid').value.trim(),
+    iagonDownloadBaseUrl:document.getElementById('st-baseurl').value.trim()
+  };
+  const { ok, data } = await api('POST', '/admin/api/storage/test', payload);
+  btn.disabled = false; btn.textContent = '🔌 Test Connection';
+  if (data.success) {
+    res.innerHTML = `<span style="color:var(--green)">✅ ${esc(data.message || 'Connected')}</span>`;
+  } else {
+    res.innerHTML = `<span style="color:var(--red)">❌ ${esc(data.message || 'Connection failed')}</span>`;
+  }
+}
+
+async function saveStorage() {
+  const storage = {
+    backend:             'iagon',
+    iagonAccessToken:    document.getElementById('st-token').value.trim(),
+    iagonNodeId:         document.getElementById('st-nodeid').value.trim(),
+    iagonDownloadBaseUrl:document.getElementById('st-baseurl').value.trim() || 'https://gw.iagon.com/api/v2'
+  };
+  const { ok } = await api('PUT', '/admin/api/config/storage', { storage });
+  ok ? toast('Storage settings saved and applied') : toast('Save failed', 'error');
+}
+
+// ── Logs ──────────────────────────────────────────────────────────────────────
+async function loadLogs(offset) {
+  logOffset = offset;
+  const tbody = document.getElementById('logs-table-body');
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted)">Loading…</td></tr>';
+
+  const params = new URLSearchParams({
+    limit:  LOG_LIMIT,
+    offset: logOffset,
+  });
+  const did     = document.getElementById('log-did').value.trim();
+  const from    = document.getElementById('log-from').value;
+  const to      = document.getElementById('log-to').value;
+  const granted = document.getElementById('log-granted').value;
+  if (did)     params.set('documentDID', did);
+  if (from)    params.set('fromDate', from);
+  if (to)      params.set('toDate', to + 'T23:59:59');
+  if (granted) params.set('granted', granted);
+
+  const { ok, data } = await api('GET', '/admin/api/logs?' + params);
+  if (!ok) {
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--red)">Failed to load logs</td></tr>';
+    return;
+  }
+  if (!data.entries?.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No log entries</td></tr>';
+  } else {
+    tbody.innerHTML = data.entries.map(renderLogRow).join('');
+  }
+
+  const total = data.total || 0;
+  const page  = Math.floor(logOffset / LOG_LIMIT) + 1;
+  const pages = Math.ceil(total / LOG_LIMIT) || 1;
+  document.getElementById('log-page-info').textContent = `${logOffset+1}–${Math.min(logOffset+LOG_LIMIT,total)} of ${total}`;
+  document.getElementById('log-prev').disabled = logOffset === 0;
+  document.getElementById('log-next').disabled = logOffset + LOG_LIMIT >= total;
+}
+
+function logPage(dir) { loadLogs(Math.max(0, logOffset + dir * LOG_LIMIT)); }
+
+function renderLogRow(e) {
+  const granted = e.accessGranted || e.event === 'ACCESS_GRANTED';
+  return `<tr>
+    <td style="white-space:nowrap;color:var(--muted)">${fmtDateTime(e.timestamp)}</td>
+    <td>${granted ? '<span class="badge badge-green">✅ Granted</span>' : '<span class="badge badge-red">❌ Denied</span>'}</td>
+    <td><span class="mono did-short" title="${esc(e.documentDID||'')}">${esc((e.documentDID||'—').slice(-20))}</span></td>
+    <td>${clearanceBadge(e.clearanceLevel)}</td>
+    <td style="color:var(--muted)">${esc(e.viewerName || e.issuerDID?.slice(-16) || '—')}</td>
+    <td style="color:var(--red);font-size:12px">${esc(e.denialReason || '')}</td>
+    <td style="color:var(--muted)">${e.processingMs ?? '—'}</td>
+  </tr>`;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function clearanceBadge(level) {
+  if (!level) return '<span class="badge badge-gray">—</span>';
+  const map = { UNCLASSIFIED:'gray', INTERNAL:'cyan', CONFIDENTIAL:'amber', RESTRICTED:'amber', SECRET:'red', 'TOP-SECRET':'red' };
+  const cls = map[String(level).toUpperCase()] || 'gray';
+  return `<span class="badge badge-${cls}">${esc(level)}</span>`;
+}
+
+function statusBadge(status) {
+  const map = { active:'green', superseded:'amber', deleted:'red' };
+  const cls = map[status] || 'gray';
+  return `<span class="badge badge-${cls}">${esc(status||'—')}</span>`;
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleDateString(); } catch (_) { return iso; }
+}
+
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  } catch (_) { return iso; }
+}
+</script>
+</body>
+</html>

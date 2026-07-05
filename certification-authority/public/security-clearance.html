@@ -524,12 +524,47 @@
         let selectedClearanceLevel = null;
         let authData = null;
 
+        // Request keys from the wallet parent as early as possible via postMessage
+        // The wallet listens for REQUEST_WALLET_KEYS and responds with WALLET_KEYS containing
+        // ed25519PublicKey and x25519PublicKey. This works because the CA portal runs inside
+        // the IDL wallet iframe — the wallet is the parent window.
+        window.addEventListener('message', function onWalletKeys(event) {
+            if (event.data?.type !== 'WALLET_KEYS') return;
+            window.removeEventListener('message', onWalletKeys);
+            const { ed25519PublicKey, x25519PublicKey } = event.data;
+            console.log('[SC] WALLET_KEYS received: ed25519=' + !!ed25519PublicKey + ' x25519=' + !!x25519PublicKey);
+            if (!ed25519PublicKey || !x25519PublicKey) return;
+            const ed = document.getElementById('ed25519PublicKey');
+            const x25 = document.getElementById('x25519PublicKey');
+            if (!ed || !x25) return;
+            ed.value = ed25519PublicKey;
+            x25.value = x25519PublicKey;
+            validateEd25519Key();
+            validateX25519Key();
+            const hint = document.createElement('div');
+            hint.className = 'alert alert-success py-2 px-3 mt-2';
+            hint.style.fontSize = '0.85em';
+            hint.innerHTML = '✅ <strong>Keys provided by your wallet.</strong> Select a clearance level and submit.';
+            x25.closest('.form-group').after(hint);
+        });
+        console.log('[SC] Requesting wallet keys via postMessage');
+        window.parent.postMessage({ type: 'REQUEST_WALLET_KEYS' }, '*');
+
         // Check authentication on page load
         window.addEventListener('load', () => {
             checkAuthentication();
         });
 
         function checkAuthentication() {
+            // DIDComm grant flow: session passed as URL ?session=<id>
+            const urlParams = new URLSearchParams(window.location.search);
+            const sessionIdParam = urlParams.get('session');
+            if (sessionIdParam) {
+                loadSessionFromServer(sessionIdParam);
+                return;
+            }
+
+            // Legacy login flow: session stored in sessionStorage
             const authDataRaw = sessionStorage.getItem('ca_auth');
 
             if (!authDataRaw) {
@@ -560,6 +595,36 @@
             } catch (error) {
                 console.error('Error parsing authentication data:', error);
                 sessionStorage.removeItem('ca_auth');
+                document.getElementById('accessDenied').style.display = 'block';
+            }
+        }
+
+        async function loadSessionFromServer(sessionId) {
+            try {
+                const response = await fetch(apiUrl('/api/session/' + sessionId));
+                if (!response.ok) {
+                    document.getElementById('accessDenied').style.display = 'block';
+                    return;
+                }
+                const result = await response.json();
+                const session = result.session;
+                authData = {
+                    sessionId:    sessionId,
+                    userData:     session.userData || {},
+                    personalInfo: session.userData || {},
+                    loginTime:    session.loginTime || session.authenticatedAt || new Date().toISOString(),
+                    createdAt:    session.createdAt || session.authenticatedAt || new Date().toISOString(),
+                    // bridgeResult.connectionId is where the form submission reads connectionId from
+                    bridgeResult: { connectionId: session.connectionId }
+                };
+                // Update back-to-dashboard button
+                const backBtn = document.getElementById('backToDashboardBtn');
+                if (backBtn) {
+                    backBtn.href = BASE_PATH + '/dashboard?session=' + encodeURIComponent(sessionId);
+                }
+                displaySecurityClearanceForm();
+            } catch (error) {
+                console.error('Error loading session from server:', error);
                 document.getElementById('accessDenied').style.display = 'block';
             }
         }

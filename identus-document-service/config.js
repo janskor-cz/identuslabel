@@ -34,4 +34,9 @@ module.exports = {
   // Company Admin Portal — orchestrates DIDComm two-step credential collection
   COMPANY_ADMIN_URL: process.env.COMPANY_ADMIN_URL || 'http://localhost:3010',
   COMPANY_ADMIN_KEY: process.env.COMPANY_ADMIN_KEY || '',
+
+  // Public-facing URL of company-admin — embedded in DID #document-access-gate service endpoints
+  // so the wallet can reach the challenge endpoint from the browser.
+  // Falls back to COMPANY_ADMIN_URL if not set (only works when localhost is reachable from browser).
+  COMPANY_ADMIN_PUBLIC_URL: process.env.COMPANY_ADMIN_PUBLIC_URL || process.env.COMPANY_ADMIN_URL || 'http://localhost:3010',
 };

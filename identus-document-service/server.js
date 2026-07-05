@@ -29,10 +29,17 @@ const vcStore = require('./lib/VCKeyStore');
 const express = require('express');
 const multer  = require('multer');
 const crypto  = require('crypto');
+const path    = require('path');
+
+const AdminConfigStore = require('./lib/AdminConfigStore');
+const LocalAuditLog    = require('./lib/LocalAuditLog');
+const DocumentServiceStartup  = require('./lib/DocumentServiceStartup');
+const { DocumentDIDCommService } = require('./lib/DocumentDIDCommService');
 
 const config                       = require('./config');
 const { resolveDocumentDID }       = require('./lib/DIDDocumentResolver');
 const { emitAuditEvent }           = require('./lib/AuditEmitter');
+const SlackNotifier                = require('./lib/SlackNotifier');
 const { verifyVPAndExtractClaims } = require('./lib/VPVerificationService');
 const { processAccessRequest, getLevelNumber, getLevelLabel } = require('./lib/ReEncryptionService');
 const { IagonStorageClient }       = require('./lib/IagonStorageClient');
@@ -43,6 +50,159 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 40 
 const docSvc = new DocumentService(config);
 
 app.use(express.json({ limit: '10mb' }));
+
+// ---------------------------------------------------------------------------
+// Upload session store (VP-over-REST — no DIDComm, no admin key required)
+// ---------------------------------------------------------------------------
+const _pendingUploadSessions = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [id, s] of _pendingUploadSessions)
+    if (s.createdAt < cutoff) _pendingUploadSessions.delete(id);
+}, 60_000);
+
+// POST /upload/initiate — reserve upload slot; returns sessionId
+app.post('/upload/initiate', express.json(), (req, res) => {
+  const { title, clearanceLevel } = req.body || {};
+  let releasableTo = req.body?.releasableTo;
+
+  if (!title || !String(title).trim())
+    return res.status(400).json({ error: 'MISSING_FIELD', message: 'title is required' });
+
+  const VALID = ['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
+  const level = (clearanceLevel || '').toUpperCase();
+  if (!VALID.includes(level))
+    return res.status(400).json({ error: 'INVALID_FIELD', message: `clearanceLevel must be one of: ${VALID.join(', ')}` });
+
+  if (!Array.isArray(releasableTo)) {
+    try { releasableTo = JSON.parse(releasableTo || '[]'); } catch (_) { releasableTo = []; }
+  }
+  if (!releasableTo.length || !releasableTo.every(d => typeof d === 'string' && d.startsWith('did:')))
+    return res.status(400).json({ error: 'INVALID_FIELD', message: 'releasableTo must be a non-empty array of DID strings' });
+
+  const sessionId = crypto.randomUUID();
+  _pendingUploadSessions.set(sessionId, { title: String(title).trim(), clearanceLevel: level, releasableTo, createdAt: Date.now() });
+  return res.json({ sessionId, expiresIn: 1800 });
+});
+
+// POST /upload/complete — multipart: sessionId + vp (JSON string) + file
+app.post('/upload/complete', upload.single('file'), async (req, res) => {
+  const { sessionId, vp: vpString } = req.body || {};
+  if (!sessionId || !vpString)
+    return res.status(400).json({ error: 'MISSING_FIELDS', message: 'sessionId and vp are required' });
+  if (!req.file)
+    return res.status(400).json({ error: 'MISSING_FILE', message: 'A file is required' });
+
+  const session = _pendingUploadSessions.get(sessionId);
+  if (!session)
+    return res.status(404).json({ error: 'SESSION_NOT_FOUND', message: 'Upload session expired or not found' });
+  _pendingUploadSessions.delete(sessionId); // one-time use
+
+  let vp;
+  try { vp = typeof vpString === 'string' ? JSON.parse(vpString) : vpString; }
+  catch (_) { return res.status(400).json({ error: 'INVALID_VP', message: 'vp must be valid JSON' }); }
+
+  let vpResult;
+  try { vpResult = await verifyVPAndExtractClaims(vp, []); }
+  catch (err) {
+    console.error('[POST /upload/complete] VP verify error:', err.message);
+    return res.status(500).json({ error: 'VP_VERIFY_ERROR', message: 'VP verification failed' });
+  }
+  if (!vpResult.success)
+    return res.status(403).json({ error: vpResult.error, message: vpResult.message });
+
+  const publisherDID   = vpResult.credentialSubjectDID || vpResult.issuerDID;
+  const ownerCompanyDID = vpResult.issuerDID || null;
+  try {
+    const result = await docSvc.createDocument({
+      fileBuffer:       req.file.buffer,
+      originalFilename: req.file.originalname,
+      mimeType:         req.file.mimetype,
+      title:            session.title,
+      clearanceLevel:   session.clearanceLevel,
+      releasableTo:     session.releasableTo
+    });
+    console.log(`[POST /upload/complete] Created: ${result.documentDID?.slice(0, 50)}... publisher=${publisherDID?.slice(0, 40)}`);
+
+    // Register in company-admin DocumentRegistry so the document appears in employee discovery
+    try {
+      const regRes = await fetch(`${config.COMPANY_ADMIN_URL}/api/documents/register`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          documentDID:          result.documentDID,
+          title:                session.title,
+          classificationLevel:  session.clearanceLevel,
+          releasableTo:         session.releasableTo,
+          contentEncryptionKey: 'not-applicable',
+          ownerCompanyDID,
+          iagonStorage: {
+            fileId:   result.iagonFileId,
+            filename: req.file.originalname,
+          },
+          metadata: {
+            createdBy:    vpResult.viewerName || ownerCompanyDID,
+            department:   vpResult.employeeRoleClaims?.department || null,
+            uploadedVia:  'vp-over-rest',
+            sourceFormat: (req.file.originalname || '').toLowerCase().endsWith('.docx') ? 'docx' : 'binary',
+            title:        session.title,
+          }
+        })
+      });
+      if (!regRes.ok) {
+        const body = await regRes.json().catch(() => ({}));
+        console.warn(`[POST /upload/complete] Registry warn (${regRes.status}):`, body.message || '');
+      } else {
+        console.log(`[POST /upload/complete] Registered in DocumentRegistry: ${result.documentDID?.slice(0, 50)}`);
+      }
+    } catch (regErr) {
+      console.warn('[POST /upload/complete] DocumentRegistry call failed (non-fatal):', regErr.message);
+    }
+
+    // Populate vcStore so access requests can retrieve the DEK (avoids "bad public key size" crash)
+    if (result.encryptionInfo?.key && config.ADMIN_API_KEY) {
+      try {
+        const rawDEK = Buffer.from(result.encryptionInfo.key, 'base64');
+        const wrapped = cmkStore.wrapDEK(rawDEK, session.clearanceLevel);
+        rawDEK.fill(0);
+
+        const credSubject = {
+          documentDID:         result.documentDID,
+          iagonFileId:         result.iagonFileId,
+          wrappedKey:          wrapped.wrappedKey,
+          iv:                  wrapped.iv,
+          authTag:             wrapped.authTag,
+          wrappingAlgorithm:   wrapped.wrappingAlgorithm,
+          classificationLevel: wrapped.classificationLevel,
+          fileIv:              result.encryptionInfo.iv,
+          fileAuthTag:         result.encryptionInfo.authTag,
+          fileAlgorithm:       result.encryptionInfo.algorithm || 'AES-256-GCM',
+          releasableTo:        session.releasableTo,
+          contentHash:         null
+        };
+
+        const headerB64  = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+        const payloadB64 = Buffer.from(JSON.stringify({
+          vc:  { credentialSubject: credSubject },
+          iat: Math.floor(Date.now() / 1000),
+          iss: 'document-service-upload'
+        })).toString('base64url');
+        const sig    = crypto.createHmac('sha256', config.ADMIN_API_KEY).update(`${headerB64}.${payloadB64}`).digest('base64url');
+        const vcJwt  = `${headerB64}.${payloadB64}.${sig}`;
+
+        await vcStore.put(result.documentDID, { vcJwt });
+        console.log(`[POST /upload/complete] Key manifest stored in vcStore for: ${result.documentDID?.slice(0, 50)}`);
+      } catch (vcErr) {
+        console.error('[POST /upload/complete] vcStore population failed (non-fatal):', vcErr.message);
+      }
+    }
+
+    return res.status(201).json({ success: true, documentDID: result.documentDID });
+  } catch (err) {
+    console.error('[POST /upload/complete] createDocument failed:', err.message);
+    return res.status(err.status || 500).json({ error: 'CREATE_FAILED', message: err.message });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Admin auth middleware
@@ -460,7 +620,10 @@ async function _handleAccess(req, res) {
       nonce:              reqNonce     || crypto.randomUUID(),
       credentialStatuses: vpResult.credentialStatuses || [],
       docMeta,
-      clientIp
+      clientIp,
+      // VP-gated direct access: the VP (with issuer-signed VCs) is the cryptographic proof.
+      // The additional Ed25519 challenge-response signature is only needed when no VP is sent.
+      trustedDelegation:  !signature
     });
 
     _fireAudit(docMeta.auditEndpoint, {
@@ -657,10 +820,7 @@ app.post('/documents/:did/access-complete', async (req, res) => {
     clearanceLevelNum,
     clearanceLevelStr: clearanceLevelStr || getLevelLabel(clearanceLevelNum),
     ephemeralPublicKey,
-    signature:         _generateNullSig(),
-    ephemeralDID:      `did:key:${crypto.randomUUID()}`,
-    timestamp:         new Date().toISOString(),
-    nonce:             crypto.randomUUID(),
+    trustedDelegation: true,  // VP was verified by company-admin; auth via x-ds-key
     docMeta,
     clientIp
   });
@@ -703,6 +863,20 @@ app.post('/documents/:did/access-complete', async (req, res) => {
 // ---------------------------------------------------------------------------
 function _fireAudit(url, event) {
   emitAuditEvent(url, event);
+  SlackNotifier.notifyAccess(event);
+  LocalAuditLog.append({
+    timestamp:     new Date().toISOString(),
+    event:         event.event,
+    documentDID:   event.documentDID   || null,
+    issuerDID:     event.issuerDID     || null,
+    clearanceLevel:event.clearanceLevel|| null,
+    accessGranted: event.event === 'ACCESS_GRANTED',
+    denialReason:  event.denialReason  || null,
+    copyId:        event.copyId        || null,
+    viewerName:    event.viewerName    || null,
+    clientIp:      event.clientIp      || null,
+    processingMs:  event.processingMs  || null
+  });
 }
 
 /** Produces a 64-byte zero signature used when the client doesn't provide one.
@@ -712,48 +886,187 @@ function _generateNullSig() {
 }
 
 // ---------------------------------------------------------------------------
-// Test Helpers (only active when TEST_BYPASS_KEY env var is set)
+// DIDComm endpoints
 // ---------------------------------------------------------------------------
 
-if (process.env.TEST_BYPASS_KEY) {
-  /**
-   * POST /test/inject-vc-key
-   * Inject a VCKeyStore entry for automated testing.
-   * Body: { documentDID, claims }  (claims = KeyManifest fields)
-   * Requires X-Test-Key header matching TEST_BYPASS_KEY.
-   */
-  app.post('/test/inject-vc-key', (req, res) => {
-    if (req.headers['x-test-key'] !== process.env.TEST_BYPASS_KEY) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    const { documentDID, claims } = req.body;
-    if (!documentDID || !claims) {
-      return res.status(400).json({ error: 'documentDID and claims required' });
-    }
-    // Build a legacy HS256 JWT so KeyManifestVCVerifier.verify() passes
-    const hmacKey = process.env.ADMIN_API_KEY || process.env.DOCUMENT_SERVICE_ADMIN_KEY || 'test-key';
-    const header  = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-    const payload = Buffer.from(JSON.stringify({
-      iss: 'test-injector',
-      sub: documentDID,
-      iat: Math.floor(Date.now() / 1000),
-      vc:  { credentialSubject: claims }
-    })).toString('base64url');
-    const sig = crypto.createHmac('sha256', hmacKey).update(`${header}.${payload}`).digest('base64url');
-    const vcJwt = `${header}.${payload}.${sig}`;
-    vcStore.put(documentDID, { documentDID, vcId: 'test-vc-' + Date.now(), vcJwt, claims, issuedAt: new Date().toISOString() });
-    console.log(`[TEST] Injected VCKeyStore entry for ${documentDID.substring(0,40)}`);
-    return res.json({ success: true });
+// Lazy-initialised singleton — populated in the startup block below
+let _didcommSvc = null;
+
+// GET /connect — returns a fresh OOB connection invitation from the service wallet
+app.get('/connect', async (req, res) => {
+  if (!DocumentServiceStartup.isInitialized() || !_didcommSvc) {
+    return res.status(503).json({ error: 'NOT_INITIALIZED', message: 'DIDComm identity not yet initialized' });
+  }
+  try {
+    const invitation = await _didcommSvc.createConnectionInvitation();
+    return res.json({ success: true, invitation });
+  } catch (err) {
+    console.error('[GET /connect]', err.message);
+    return res.status(500).json({ error: 'INVITATION_FAILED', message: err.message });
+  }
+});
+
+// POST /didcomm-webhook — receives all DIDComm events from the multitenancy agent
+app.post('/didcomm-webhook', async (req, res) => {
+  // Acknowledge immediately; process asynchronously
+  res.status(200).json({ received: true });
+
+  if (!_didcommSvc) return;
+  const event = req.body;
+  if (!event) return;
+
+  _didcommSvc.handleWebhookEvent(event).catch(err => {
+    console.error('[POST /didcomm-webhook] Handler error:', err.message);
   });
-  console.log('[TEST] Doc-service test injection endpoint active at POST /test/inject-vc-key');
-}
+});
+
+// ---------------------------------------------------------------------------
+// Admin UI — static files + API
+// ---------------------------------------------------------------------------
+app.use('/admin', express.static(path.join(__dirname, 'public', 'admin')));
+app.get('/admin', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'admin', 'index.html')));
+
+// GET /admin/api/status — health + doc count + storage status
+app.get('/admin/api/status', requireAdminKey, async (req, res) => {
+  const iagonOk = !!(config.IAGON_ACCESS_TOKEN && config.IAGON_NODE_ID);
+  let docCount = null;
+  try {
+    if (config.DOCUMENT_INDEX_FILE_ID) {
+      const docs = await docSvc.listDocuments();
+      docCount = docs.filter(d => d.status !== 'deleted').length;
+    }
+  } catch (_) { /* non-fatal */ }
+
+  const { entries: recentLogs } = await LocalAuditLog.getEntries({ limit: 5 });
+
+  res.json({
+    healthy:    true,
+    port:       config.PORT,
+    docCount,
+    storageConfigured: iagonOk,
+    agentUrl:   config.ENTERPRISE_CLOUD_AGENT_URL,
+    serviceUrl: config.DOCUMENT_SERVICE_URL,
+    recentLogs
+  });
+});
+
+// GET /admin/api/config — full config (masks secrets)
+app.get('/admin/api/config', requireAdminKey, async (req, res) => {
+  const cfg = AdminConfigStore.getCachedConfig();
+  // Mask storage secrets for display
+  const masked = JSON.parse(JSON.stringify(cfg));
+  if (masked.storage?.iagonAccessToken) masked.storage.iagonAccessToken = masked.storage.iagonAccessToken.slice(0, 8) + '…';
+  res.json({ ...masked, _env: {
+    iagonConfigured: !!(config.IAGON_ACCESS_TOKEN && config.IAGON_NODE_ID),
+    adminKeySet:     !!config.ADMIN_API_KEY,
+    serviceUrl:      config.DOCUMENT_SERVICE_URL
+  }});
+});
+
+// PUT /admin/api/config/schemas — save schema policy
+app.put('/admin/api/config/schemas', requireAdminKey, async (req, res) => {
+  const { schemaPolicy } = req.body;
+  if (!schemaPolicy || typeof schemaPolicy !== 'object') {
+    return res.status(400).json({ error: 'INVALID_BODY', message: 'schemaPolicy object required' });
+  }
+  const cfg = AdminConfigStore.getCachedConfig();
+  cfg.schemaPolicy = schemaPolicy;
+  await AdminConfigStore.save(cfg);
+  res.json({ success: true });
+});
+
+// PUT /admin/api/config/storage — save storage settings and apply to runtime
+app.put('/admin/api/config/storage', requireAdminKey, async (req, res) => {
+  const { storage } = req.body;
+  if (!storage || typeof storage !== 'object') {
+    return res.status(400).json({ error: 'INVALID_BODY', message: 'storage object required' });
+  }
+  const cfg = AdminConfigStore.getCachedConfig();
+  cfg.storage = storage;
+  await AdminConfigStore.save(cfg);
+  // Apply to runtime so changes take effect without restart
+  if (storage.iagonAccessToken)    config.IAGON_ACCESS_TOKEN     = storage.iagonAccessToken;
+  if (storage.iagonNodeId)         config.IAGON_NODE_ID          = storage.iagonNodeId;
+  if (storage.iagonDownloadBaseUrl) config.IAGON_DOWNLOAD_BASE_URL = storage.iagonDownloadBaseUrl;
+  res.json({ success: true });
+});
+
+// GET /admin/api/documents — list documents
+app.get('/admin/api/documents', requireAdminKey, async (req, res) => {
+  try {
+    const docs = await docSvc.listDocuments();
+    res.json({ documents: docs });
+  } catch (err) {
+    res.status(500).json({ error: 'LIST_FAILED', message: err.message });
+  }
+});
+
+// GET /admin/api/logs — paginated access log
+app.get('/admin/api/logs', requireAdminKey, async (req, res) => {
+  const limit      = Math.min(parseInt(req.query.limit  || '50',  10), 200);
+  const offset     = parseInt(req.query.offset || '0',  10);
+  const documentDID= req.query.documentDID || undefined;
+  const fromDate   = req.query.fromDate    || undefined;
+  const toDate     = req.query.toDate      || undefined;
+  let   granted    = undefined;
+  if (req.query.granted === 'true')  granted = true;
+  if (req.query.granted === 'false') granted = false;
+
+  try {
+    const result = await LocalAuditLog.getEntries({ limit, offset, documentDID, granted, fromDate, toDate });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: 'LOG_READ_FAILED', message: err.message });
+  }
+});
+
+// POST /admin/api/storage/test — test Iagon connectivity with given creds
+app.post('/admin/api/storage/test', requireAdminKey, async (req, res) => {
+  const { iagonAccessToken, iagonNodeId, iagonDownloadBaseUrl } = req.body;
+  const testConfig = {
+    ...config,
+    IAGON_ACCESS_TOKEN:     iagonAccessToken    || config.IAGON_ACCESS_TOKEN,
+    IAGON_NODE_ID:          iagonNodeId         || config.IAGON_NODE_ID,
+    IAGON_DOWNLOAD_BASE_URL:iagonDownloadBaseUrl|| config.IAGON_DOWNLOAD_BASE_URL
+  };
+  try {
+    const { IagonStorageClient } = require('./lib/IagonStorageClient');
+    const client = new IagonStorageClient(testConfig);
+    const result = await client.testConnection();
+    res.json({ success: result.success, message: result.message || 'Connected' });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// Test injection endpoint removed — it accepted HMAC-signed JWTs alongside real ES256K VCs,
+// creating a production authentication bypass if TEST_BYPASS_KEY was set.
+// For integration testing, issue real EdDSA-signed DocumentKeyManifest VCs via company-admin.
 
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 (async () => {
-  // Load VC key-manifest store before accepting requests
+  // Load VC key-manifest store and admin config before accepting requests
   await vcStore.load();
+  await AdminConfigStore.load();
+
+  // Initialize DIDComm identity (wallet + webhook registration — non-fatal if agent unavailable)
+  await DocumentServiceStartup.initialize({
+    DOC_SERVICE_AGENT_URL: process.env.DOC_SERVICE_AGENT_URL || config.ENTERPRISE_CLOUD_AGENT_URL,
+    DOCUMENT_SERVICE_URL:  config.DOCUMENT_SERVICE_URL
+  }).catch(err => console.warn('[startup] DIDComm identity init failed (non-fatal):', err.message));
+
+  const svcApiKey = DocumentServiceStartup.getApiKey();
+  const svcAgentUrl = DocumentServiceStartup.getAgentUrl();
+  if (svcApiKey) {
+    _didcommSvc = new DocumentDIDCommService({
+      agentUrl: svcAgentUrl,
+      apiKey:   svcApiKey,
+      docSvc
+    });
+    console.log('[identus-document-service] DIDComm service ready');
+  }
 
   app.listen(config.PORT, () => {
     console.log(`[identus-document-service] Listening on port ${config.PORT}`);

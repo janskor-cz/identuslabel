@@ -45,17 +45,49 @@ export function createVCProofAttachment(
   selectedFields: string[],
   proofLevel: DisclosureLevel
 ): string {
-  // Create a filtered version of the credential with only selected fields
+  // Prefer embedding the raw JWT string so the receiver can cryptographically
+  // verify the ES256K signature. Without the raw JWT, the issuer field is
+  // just copied data that anyone could forge.
+
+  // A valid JWS has exactly 3 base64url parts separated by dots and starts with eyJ (JSON header)
+  const isRawJws = (s: any): s is string =>
+    typeof s === 'string' && s.startsWith('eyJ') && s.split('.').length === 3;
+
+  let rawJwt: string | null = null;
+
+  if (typeof credential.toStorable === 'function') {
+    try {
+      const storable = credential.toStorable();
+      // SDK stores the raw JWS in .id (the jti claim = originalString passed to constructor).
+      // .credentialData is JSON.stringify({ id: rawJWS, vc: {...}, iss: "...", ... }) — NOT the JWS.
+      if (isRawJws(storable.id)) rawJwt = storable.id;
+      else if (isRawJws(storable.credentialData)) rawJwt = storable.credentialData;
+    } catch (_) {}
+  }
+  // Fallback: plain object from Pluto with id = raw JWS
+  if (!rawJwt && isRawJws(credential.id)) rawJwt = credential.id;
+  if (!rawJwt && isRawJws(credential.credentialData)) rawJwt = credential.credentialData;
+
+  if (rawJwt) {
+    // Embed raw JWT — preserves ES256K signature for verification on the receiver side
+    const vcProof = {
+      jwt: rawJwt,
+      disclosedFields: selectedFields,
+      proofLevel,
+    };
+    return btoa(JSON.stringify(vcProof));
+  }
+
+  // Fallback for non-JWT credentials: synthetic display-only blob.
+  // Marked _unverifiable so the receiver knows no signature check is possible.
   const credentialSubject = extractCredentialSubject(credential);
   const filteredSubject: any = {};
-
   selectedFields.forEach(field => {
     if (credentialSubject[field] !== undefined) {
       filteredSubject[field] = credentialSubject[field];
     }
   });
 
-  // Create a simplified VC proof structure
   const vcProof = {
     "@context": credential["@context"] || ["https://www.w3.org/2018/credentials/v1"],
     type: credential.type || ["VerifiableCredential", "RealPerson"],
@@ -63,15 +95,9 @@ export function createVCProofAttachment(
     issuer: credential.issuer,
     issuanceDate: credential.issuanceDate || new Date().toISOString(),
     expirationDate: credential.expirationDate,
-    proof: {
-      type: "DataIntegrityProof",
-      created: new Date().toISOString(),
-      proofPurpose: "assertionMethod",
-      verificationMethod: credential.proof?.verificationMethod || "did:peer:placeholder"
-    }
+    _unverifiable: true,
   };
 
-  // Return base64 encoded proof
   return btoa(JSON.stringify(vcProof));
 }
 

@@ -5,29 +5,174 @@ import { CredentialOfferModal } from '@/components/CredentialOfferModal';
 import { EnterpriseCredentialOfferModal } from '@/components/EnterpriseCredentialOfferModal';
 import { CAPortalModal } from '@/components/CAPortalModal';
 import { CAPortalProvider, useCAPortal } from '@/utils/CAPortalContext';
+import { AccessRequestStatusModal } from '@/components/AccessRequestStatusModal';
 import { useAppSelector } from '@/reducers/store';
 import { useMountedApp } from '@/reducers/store';
+import { reduxActions } from '@/reducers/app';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { MainLayout } from '@/components/layouts/MainLayout';
+import { CAConnectionEnforcementModal } from '@/components/CAConnectionEnforcementModal';
+import { refreshConnections } from '@/actions';
 import { useRouter } from 'next/router';
 import dynamic from 'next/dynamic';
+import { useEffect, useRef, useState } from 'react';
 
 const UnifiedProofRequestModal = dynamic(
   () => import('@/components/UnifiedProofRequestModal').then(mod => ({ default: mod.UnifiedProofRequestModal })),
   { ssr: false }
 );
-import { useEffect } from 'react';
 import { routeMemoryCleanup } from '@/utils/RouteMemoryCleanup';
 import { memoryMonitor } from '@/utils/MemoryMonitor';
 import { testEncryptionRoundtrip, testEncryptionWithStoredKeys } from '@/utils/messageEncryption';
 import { initSecureDashboardBridge, cleanupSecureDashboardBridge } from '@/utils/SecureDashboardBridge';
 import { initConsoleLogger, cleanupConsoleLogger } from '@/utils/ConsoleLogger';
+import { getConnectionMetadata, saveConnectionMetadata } from '@/utils/connectionMetadata';
+import { parseServiceAccessGrant, isTrustedGrantSender } from '@/utils/serviceAccessGrant';
+import { CA_CAPABILITIES } from '@/config/serviceTrust';
 // Import cleanup utilities to auto-export to browser console
 import '@/utils/clearWalletData';
 import '@/utils/cleanupOrphanedPeerDIDs';
 
+function GlobalCAEnforcer() {
+    const app = useMountedApp();
+    const [hasCAConnection, setHasCAConnection] = useState<boolean | null>(null);
+    const [showModal, setShowModal] = useState(false);
+    const iagonStatus = app.iagonBackup?.status ?? 'idle';
+
+    useEffect(() => {
+        // Don't check while a restore is in progress — Pluto is being rebuilt.
+        if (iagonStatus === 'checking' || iagonStatus === 'downloading' || iagonStatus === 'restoring') return;
+        // After a restore (iagonStatus was 'checking'), wait until the agent has fully started
+        // before checking — startAgent writes mediator data to Pluto and signals the agent is ready.
+        // For normal logins (iagonStatus stays 'idle'), agent.hasStarted is still the right gate.
+        if (!app.agent.hasStarted) return;
+
+        const checkCAConnection = async () => {
+            try {
+                const allConnections = await app.agent.instance!.pluto.getAllDidPairs();
+                const caConnection = allConnections.find(pair => {
+                    const pairName = (pair.name ?? '').toLowerCase();
+                    return pairName === 'certification authority' || pairName.includes('certification');
+                });
+                // Backfill capabilities for connections established before service-access/1.0
+                // existed — GlobalGrantWatcher requires a DID-keyed capability list to trust an
+                // incoming grant and auto-open the CA portal iframe; without it, grants are
+                // silently dropped. SECURITY: require an EXACT name match here (unlike the
+                // `includes()` check above, which only gates whether to show the "connect to CA"
+                // nudge modal) — this backfill is a trust decision, so it must not match an
+                // arbitrary connection whose locally-chosen name merely contains "certification".
+                if (caConnection && (caConnection.name ?? '').toLowerCase() === 'certification authority') {
+                    const hostDID = caConnection.host.toString();
+                    const meta = getConnectionMetadata(hostDID);
+                    if (!meta?.capabilities?.length) {
+                        // isCAConnection is written alongside for connections.tsx, which still
+                        // reads it too — @deprecated, removed once that's repointed as well.
+                        saveConnectionMetadata(hostDID, {
+                            ...(meta ?? { walletType: 'local' }),
+                            isCAConnection: true,
+                            capabilities: CA_CAPABILITIES
+                        });
+                    }
+                }
+                setHasCAConnection(!!caConnection);
+                setShowModal(!caConnection);
+            } catch {
+                setHasCAConnection(false);
+                setShowModal(true);
+            }
+        };
+        checkCAConnection();
+    }, [app.agent.hasStarted, iagonStatus]);
+
+    if (!showModal || hasCAConnection !== false) return null;
+
+    return (
+        <CAConnectionEnforcementModal
+            visible={true}
+            onConnectionEstablished={() => {
+                setHasCAConnection(true);
+                setShowModal(false);
+                app.dispatch(refreshConnections());
+            }}
+            agent={app.agent.instance}
+            dispatch={app.dispatch}
+            defaultSeed={app.defaultSeed}
+        />
+    );
+}
+
+// Watches all incoming messages for service-access/1.0 grant envelopes and auto-opens the
+// portal (mode: redirect) or dispatches to a capability-specific consumer (mode: payload).
+// Trust is checked against the message's actual sender DID via isTrustedGrantSender — see
+// src/utils/serviceAccessGrant.ts for why this replaces the old isCAConnection display-name-
+// derived flag.
+function GlobalGrantWatcher() {
+    const app = useMountedApp();
+    const { openCAPortal } = useCAPortal();
+    const seenGrantIds = useRef<Set<string>>(new Set());
+
+    useEffect(() => {
+        if (!app.messages?.length) return;
+        for (const message of app.messages) {
+            const parsed = parseServiceAccessGrant(message);
+            if (!parsed) continue;
+
+            const grantId = parsed.id;
+            if (seenGrantIds.current.has(grantId)) continue;
+            seenGrantIds.current.add(grantId);
+
+            const msgId = message.id;
+            // Always clean up the grant message (delete + remove from Redux) regardless of
+            // whether it passes validation below — otherwise a rejected/stale/foreign grant
+            // stays in the message store and gets reprocessed (and reopens the same dead
+            // iframe) on every future login, since seenGrantIds resets on reload.
+            const cleanupGrantMessage = () => {
+                if (app.db.instance) {
+                    app.db.instance.deleteMessage(msgId).catch((err) => {
+                        console.error('[GlobalGrantWatcher] Failed to delete processed grant message:', msgId, err);
+                    });
+                }
+                app.dispatch(reduxActions.messageRemoved(msgId));
+            };
+
+            const notExpired = Date.now() < parsed.expiresAt;
+            const { trusted, originAllowlist } = isTrustedGrantSender(message, app.connections, parsed.capability);
+
+            if (parsed.mode === 'redirect') {
+                const urlOnTrustedOrigin = !!parsed.accessUrl && !!originAllowlist && (() => {
+                    try { return originAllowlist.includes(new URL(parsed.accessUrl!).origin); }
+                    catch { return false; }
+                })();
+
+                if (notExpired && trusted && urlOnTrustedOrigin) {
+                    openCAPortal(parsed.accessUrl!); // also clears pendingAccessRequest in context
+                } else {
+                    console.warn('[GlobalGrantWatcher] Ignoring redirect grant that failed validation', {
+                        capability: parsed.capability, notExpired, trusted, urlOnTrustedOrigin
+                    });
+                }
+            } else {
+                // mode: payload — no generic UI to open; dispatch by capability once a payload-
+                // mode capability is wired up (e.g. document-access). Until then, log and drop.
+                if (notExpired && trusted) {
+                    console.warn(`[GlobalGrantWatcher] No consumer registered for payload capability "${parsed.capability}" — ignoring`);
+                } else {
+                    console.warn('[GlobalGrantWatcher] Ignoring payload grant that failed validation', {
+                        capability: parsed.capability, notExpired, trusted
+                    });
+                }
+            }
+
+            cleanupGrantMessage();
+        }
+    }, [app.messages, app.connections, openCAPortal]);
+
+    return null;
+}
+
 function CAPortalRenderer() {
-    const { caPortalUrl, closeCAPortal, isMinimized, minimizeCAPortal, restoreCAPortal, setPendingDocumentDID } = useCAPortal();
+    const { caPortalUrl, closeCAPortal, isMinimized, minimizeCAPortal, restoreCAPortal,
+            setPendingDocumentDID, pendingAccessRequest, setPendingAccessRequest } = useCAPortal();
     const router = useRouter();
     const app = useMountedApp();
     const enterprisePendingRequests = useAppSelector(
@@ -37,21 +182,15 @@ function CAPortalRenderer() {
     const hasPendingRequests = enterprisePendingRequests > 0 || personalPendingRequests > 0;
 
     // Listen for wallet:openDocument custom events dispatched by SecureDashboardBridge.
-    // This covers both the iframe-embedded portal case and the separate-popup case,
-    // routing via React router instead of a hard page reload.
     useEffect(() => {
         const handler = (e: Event) => {
-            const { documentDID, ephemeralDID } = (e as CustomEvent).detail ?? {};
-            if (documentDID) {
-                setPendingDocumentDID(documentDID);
-            }
+            const { documentDID } = (e as CustomEvent).detail ?? {};
+            if (documentDID) setPendingDocumentDID(documentDID);
             router.push('/documents');
         };
         window.addEventListener('wallet:openDocument', handler);
         return () => window.removeEventListener('wallet:openDocument', handler);
     }, [setPendingDocumentDID, router]);
-
-    if (!caPortalUrl) return null;
 
     const handleOpenDocument = (documentDID: string) => {
         setPendingDocumentDID(documentDID);
@@ -59,15 +198,26 @@ function CAPortalRenderer() {
     };
 
     return (
-        <CAPortalModal
-            url={caPortalUrl}
-            isMinimized={isMinimized}
-            hasPendingRequests={hasPendingRequests}
-            onClose={closeCAPortal}
-            onMinimize={minimizeCAPortal}
-            onRestore={restoreCAPortal}
-            onOpenDocument={handleOpenDocument}
-        />
+        <>
+            {/* Login-in-progress modal — shown while waiting for grant, dismissed on portal open */}
+            {pendingAccessRequest && !caPortalUrl && (
+                <AccessRequestStatusModal
+                    request={pendingAccessRequest}
+                    onClose={() => setPendingAccessRequest(null)}
+                />
+            )}
+            {caPortalUrl && (
+                <CAPortalModal
+                    url={caPortalUrl}
+                    isMinimized={isMinimized}
+                    hasPendingRequests={hasPendingRequests}
+                    onClose={closeCAPortal}
+                    onMinimize={minimizeCAPortal}
+                    onRestore={restoreCAPortal}
+                    onOpenDocument={handleOpenDocument}
+                />
+            )}
+        </>
     );
 }
 
@@ -182,6 +332,8 @@ function App({ Component, pageProps }) {
             <MountSDK>
                 <AutoStartAgent />
                 <WasmMemoryGuard />
+                <GlobalCAEnforcer />
+                <GlobalGrantWatcher />
                 <UnifiedProofRequestModal />
                 <CredentialOfferModal />
                 <EnterpriseCredentialOfferModal />

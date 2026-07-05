@@ -66,7 +66,7 @@ const Dashboard: React.FC = () => {
   const router = useRouter();
   const app = useMountedApp();
   const isEnterpriseConfigured = useAppSelector(selectIsEnterpriseConfigured);
-  const { db, mediatorDID, initAgent, startAgent } = app;
+  const { db } = app;
   const agent = app.agent.instance;
   const [messages, setNewMessage] = useState<SDK.Domain.Message[]>([]);
 
@@ -78,17 +78,7 @@ const Dashboard: React.FC = () => {
     ]);
   }, [app.messages]);
 
-  useEffect(() => {
-    if (!app.agent.instance && db.instance) {
-      initAgent({ mediatorDID, pluto: db.instance, defaultSeed: app.defaultSeed });
-    }
-  }, [app.agent, db]);
-
-  useEffect(() => {
-    if (app.agent.instance && !app.agent.hasStarted && !app.agent.isStarting) {
-      startAgent({ agent: app.agent.instance });
-    }
-  }, [app.agent.instance, app.agent.hasStarted, app.agent.isStarting]);
+  // initAgent and startAgent are handled globally by AutoStartAgent (mounted in _app.tsx)
 
   useEffect(() => {
     if (agent) {

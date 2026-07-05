@@ -21,8 +21,9 @@
 
 'use strict';
 
-const crypto             = require('crypto');
+const crypto               = require('crypto');
 const { resolveIssuerDID } = require('./DIDDocumentResolver');
+const AdminConfigStore     = require('./AdminConfigStore');
 
 // ── JWT helpers ──────────────────────────────────────────────────────────────
 
@@ -194,27 +195,24 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
   for (let i = 0; i < vp.verifiableCredential.length; i++) {
     const decoded = decodeJWT(vp.verifiableCredential[i]);
     if (!decoded) {
-      console.warn(`[VPVerificationService] Credential at index ${i} is not a valid JWT — skipping`);
-      continue;
+      console.warn(`[VPVerificationService] Credential at index ${i} is not a valid JWT — rejecting VP`);
+      return {
+        success: false,
+        error:   'MALFORMED_CREDENTIAL',
+        message: `Credential at index ${i} is not a valid JWT`
+      };
     }
 
     const { payload } = decoded;
     const claims      = payload.vc?.credentialSubject || {};
     const issuerDID   = payload.iss;
 
-    // Subject consistency check: all VCs must belong to the same credential subject
+    // Track first-seen subject for informational logging; mixed subjects are permitted
+    // (W3C VP spec §4.3 does not require all VCs to share the same credential subject —
+    // employees legitimately hold VCs issued to their personal DID and their enterprise DID)
     const vcSubject = payload.sub || payload.vc?.credentialSubject?.id || null;
-    if (vcSubject) {
-      if (sharedSubjectDID === null) {
-        sharedSubjectDID = vcSubject;
-      } else if (vcSubject !== sharedSubjectDID) {
-        console.error(`[VPVerificationService] HOLDER BINDING: Mixed credential subjects — index ${i} subject=${vcSubject} differs from ${sharedSubjectDID}`);
-        return {
-          success: false,
-          error:   'MixedCredentialSubjects',
-          message: 'All credentials in a presentation must belong to the same subject'
-        };
-      }
+    if (vcSubject && sharedSubjectDID === null) {
+      sharedSubjectDID = vcSubject;
     }
 
     // Extract StatusList2021 revocation pointer for direct bitstring check by callers
@@ -247,13 +245,24 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
       };
     }
 
+    // ── Admin schema policy check (optional; backwards-compatible) ────────
+    const policyResult = AdminConfigStore.applySchemaPolicy(claims, issuerDID, payload);
+    if (policyResult && !policyResult.trusted) {
+      console.error(`[VPVerificationService] ❌ Policy: issuer ${issuerDID} not in trustedIssuers for level ${policyResult.level}`);
+      return { success: false, error: 'POLICY_ISSUER_NOT_TRUSTED', message: `Issuer not trusted for ${policyResult.level} by admin policy` };
+    }
+
     // ── Classify ───────────────────────────────────────────────────────────
     if (isEmployeeRoleCred(claims)) {
       console.log(`[VPVerificationService] ✅ EmployeeRole verified at index ${i}`);
       employeeRoleCred = { claims, issuer: issuerDID, payload };
-    } else if (isSecurityClearanceCred(claims)) {
+    } else if (isSecurityClearanceCred(claims) || policyResult?.clearanceLevel) {
+      // Apply policy-configured clearanceField if present
+      const policiedClaims = policyResult?.clearanceLevel
+        ? { ...claims, clearanceLevel: policyResult.clearanceLevel }
+        : claims;
       console.log(`[VPVerificationService] ✅ SecurityClearance verified at index ${i}`);
-      securityClearanceCred = { claims, issuer: issuerDID, payload };
+      securityClearanceCred = { claims: policiedClaims, issuer: issuerDID, payload };
     } else {
       console.log(`[VPVerificationService] ✅ Other credential verified at index ${i}: [${Object.keys(claims).join(', ')}]`);
     }
@@ -293,14 +302,22 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
   }
 
   // ── Personal wallet path: SecurityClearance only ───────────────────────────
+  // SECURITY: still enforce issuer trust — a self-issued clearance VC must not be accepted.
+  // If the document has a non-empty acceptedIssuerDIDs list, the clearance issuer must be in it.
+  const scIssuerDID = securityClearanceCred.issuer;
+  if (acceptedIssuerDIDs.length > 0 && !acceptedIssuerDIDs.includes(scIssuerDID)) {
+    console.error(`[VPVerificationService] Personal path: untrusted clearance issuer ${scIssuerDID}`);
+    return { success: false, error: 'UntrustedIssuer', message: 'Security Clearance issuer is not in the trusted list' };
+  }
+
   const clearanceLevel = securityClearanceCred.claims.clearanceLevel || null;
-  console.log(`[VPVerificationService] Personal wallet path — clearance=${clearanceLevel}`);
+  console.log(`[VPVerificationService] Personal wallet path — issuer=${scIssuerDID} clearance=${clearanceLevel}`);
 
   return {
     success:              true,
     companyDID:           null,
     clearanceLevel,
-    issuerDID:            securityClearanceCred.issuer,
+    issuerDID:            scIssuerDID,
     viewerName:           securityClearanceCred.claims.holderName || null,
     employeeRoleClaims:   null,
     credentialSubjectDID: sharedSubjectDID,

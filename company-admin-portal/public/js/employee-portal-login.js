@@ -24,15 +24,29 @@ const employeeLogin = {
     /**
      * Initialize the login page
      */
-    init() {
+    async init() {
         console.log('Employee Portal Login initialized');
 
-        // Pre-populate email from URL param (set by EmployeeRole VC portalUrl)
+        // Pre-populate email from URL param (set by EmployeeRole VC serviceUrl)
+        // Supports both ?email= (legacy) and ?user= (current — uses employeeId, not full email)
         const params = new URLSearchParams(window.location.search);
         const emailParam = params.get('email');
+        const userParam  = params.get('user');
         if (emailParam) {
             const emailField = document.getElementById('employee-email');
             if (emailField) emailField.value = emailParam;
+        } else if (userParam) {
+            // Resolve employeeId → full email via server lookup
+            try {
+                const res = await fetch(`/company-admin/api/employee-portal/resolve-user?user=${encodeURIComponent(userParam)}`);
+                if (res.ok) {
+                    const { email } = await res.json();
+                    const emailField = document.getElementById('employee-email');
+                    if (emailField && email) emailField.value = email;
+                }
+            } catch (e) {
+                console.warn('[Login] Could not resolve user param:', e.message);
+            }
         }
 
         // Check if already authenticated
@@ -100,7 +114,7 @@ const employeeLogin = {
             // Show waiting screen with instructions
             this.updateWaitingScreen(
                 'Waiting for wallet response...',
-                'Please approve the proof request in your Cloud Agent wallet. This may take a moment.'
+                'Please approve the proof request in your enterprise wallet. If you have a Security Clearance VC there, you can select it now — otherwise log in with your Employee Role credential.'
             );
 
             // Start polling for status

@@ -21,7 +21,7 @@ services:
 
   # Cloud Agent following official Hyperledger Identus pattern
   cloud-agent:
-    image: hyperledgeridentus/identus-cloud-agent:2.1.0
+    image: identuslabel/identus-cloud-agent:2.1-basicmsg
     container_name: identus-cloud-agent-backend
     # Publish ports to host for Caddy access (host networking mode)
     ports:

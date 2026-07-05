@@ -292,7 +292,11 @@ http.createServer(async (req, res) => {
                 if (res.writableEnded) { clearInterval(ping); return; }
                 res.write(': ping\n\n');
             }, 15000);
-            req.on('close', () => { clearInterval(ping); console.log('[bridge] SSE push channel closed', existingId); });
+            req.on('close', () => {
+                clearInterval(ping);
+                streamableSessions.delete(existingId);
+                console.log('[bridge] SSE push channel closed, session deleted', existingId);
+            });
             return;
         }
 
@@ -371,7 +375,8 @@ http.createServer(async (req, res) => {
         }
 
         if (!sessionId || !validStreamable(sessionId)) {
-            sendJson(res, 400, { jsonrpc: '2.0', error: { code: -32600, message: 'Invalid or missing session ID' }, id: body.id ?? null });
+            // 404 per MCP spec §6.4 — client must reinitialize on this status
+            sendJson(res, 404, { jsonrpc: '2.0', error: { code: -32600, message: 'Session not found or expired — send initialize to start a new session' }, id: body.id ?? null });
             return;
         }
         touchStreamable(sessionId);

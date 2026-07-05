@@ -159,9 +159,9 @@ export const EnterpriseCredentialOfferModal: React.FC = () => {
                 return subject?.employeeId && subject?.role && subject?.department && subject?.prismDid;
             });
 
-            // Fallback: use prismDid from the offer's claims directly (present in training VCs)
+            // Fallback: use prismDid or holderDID from the offer's claims directly
             if (!employeeRoleRecord) {
-                const claimsPrismDid = currentOffer.claims?.prismDid;
+                const claimsPrismDid = currentOffer.claims?.prismDid || currentOffer.claims?.holderDID;
                 if (claimsPrismDid) {
                     await dispatch(acceptCredentialOffer({
                         recordId: currentOffer.recordId,

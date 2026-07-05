@@ -734,6 +734,13 @@
 
       console.log('[Dashboard] Session ID:', sessionId || 'none (public access)');
 
+      // Wire the "Get Security Clearance" link to carry the session into security-clearance page
+      if (sessionId) {
+        document.querySelectorAll('a[href*="security-clearance"]').forEach(link => {
+          link.href = BASE_PATH + '/security-clearance?session=' + encodeURIComponent(sessionId);
+        });
+      }
+
       // NEW ARCHITECTURE: Always fetch PUBLIC, merge with encrypted sections for authenticated users
       // Step 1: Always fetch PUBLIC content (pass session if available to get user info)
       console.log('[Dashboard] Step 1: Fetching PUBLIC content...');

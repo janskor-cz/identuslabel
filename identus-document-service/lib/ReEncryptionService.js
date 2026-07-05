@@ -22,24 +22,32 @@ const zlib   = require('zlib');
 
 /**
  * Check a single bit in a StatusList2021 credential bitstring.
- * Fetches the credential URL (public, no API key) and checks the bit at `index`.
- * Returns true if the credential is revoked, false otherwise (fail-open on error).
+ * Returns 'revoked' | 'valid' | 'check-failed'.
+ * Callers treat 'check-failed' as fail-closed (deny access).
  */
 async function checkStatusListBit(statusListCredentialUrl, index) {
   try {
     const res  = await fetch(statusListCredentialUrl, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) {
+      console.warn(`[ReEncryptionService] StatusList fetch returned HTTP ${res.status}`);
+      return 'check-failed';
+    }
     const data = await res.json();
     const encoded = data.vc?.credentialSubject?.encodedList
                  || data.credentialSubject?.encodedList
                  || data.encodedList;
-    if (!encoded) return false;
+    if (!encoded) {
+      console.warn('[ReEncryptionService] StatusList credential missing encodedList field');
+      return 'check-failed';
+    }
     const bitstring = zlib.gunzipSync(Buffer.from(encoded, 'base64'));
     const byteIndex = Math.floor(index / 8);
     const bitIndex  = 7 - (index % 8);
-    return byteIndex < bitstring.length && !!(bitstring[byteIndex] & (1 << bitIndex));
+    const revoked   = byteIndex < bitstring.length && !!(bitstring[byteIndex] & (1 << bitIndex));
+    return revoked ? 'revoked' : 'valid';
   } catch (err) {
-    console.warn('[ReEncryptionService] checkStatusListBit failed (fail-open):', err.message);
-    return false;
+    console.warn('[ReEncryptionService] checkStatusListBit failed (fail-closed):', err.message);
+    return 'check-failed';
   }
 }
 const nacl   = require('tweetnacl');
@@ -156,14 +164,8 @@ async function verifySignature({ documentDID, ephemeralDID, timestamp, nonce, si
       const res = await fetch(resolveUrl, { method: 'GET', headers, timeout: config.REQUEST_TIMEOUT_MS });
 
       if (!res.ok) {
-        // Task 7: deny CONFIDENTIAL+ when Cloud Agent is unreachable
-        const levelNum = getLevelNumber(documentClassificationLevel);
-        if (levelNum > 1) {
-          console.warn(`[ReEncryptionService] DID resolution failed (${res.status}) for ${documentClassificationLevel} — denying (Task 7)`);
-          return false;
-        }
-        console.warn(`[ReEncryptionService] Requestor DID resolution failed (${res.status}) — format-only fallback (INTERNAL only)`);
-        return true;
+        console.warn(`[ReEncryptionService] DID resolution failed (HTTP ${res.status}) for ${requestorDID} — denying (fail-closed)`);
+        return false;
       }
 
       const data   = await res.json();
@@ -171,8 +173,8 @@ async function verifySignature({ documentDID, ephemeralDID, timestamp, nonce, si
       const vms    = didDoc.verificationMethods || didDoc.authentication || [];
 
       if (vms.length === 0) {
-        console.warn('[ReEncryptionService] No verification methods — format-only fallback');
-        return true;
+        console.warn('[ReEncryptionService] No verification methods found — denying (fail-closed)');
+        return false;
       }
 
       for (const vm of vms) {
@@ -203,14 +205,8 @@ async function verifySignature({ documentDID, ephemeralDID, timestamp, nonce, si
       return false;
 
     } catch (resolveErr) {
-      // Task 7: Only allow format-only fallback for INTERNAL documents
-      const levelNum = getLevelNumber(documentClassificationLevel);
-      if (levelNum > 1) {
-        console.warn(`[ReEncryptionService] DID resolution failed for ${documentClassificationLevel} document — denying (Task 7 hardening)`);
-        return false;
-      }
-      console.warn('[ReEncryptionService] DID resolution error — format-only fallback (INTERNAL only):', resolveErr.message);
-      return true;
+      console.warn('[ReEncryptionService] DID resolution error — denying all levels (fail-closed):', resolveErr.message);
+      return false;
     }
 
   } catch (err) {
@@ -301,16 +297,23 @@ async function processAccessRequest(opts) {
     signature, ephemeralDID, timestamp, nonce,
     credentialStatuses,
     docMeta,
-    clientIp
+    clientIp,
+    // Set true only for trusted server-to-server calls (e.g. DIDComm two-step via company-admin).
+    // The calling server must authenticate itself via x-ds-key; signature verification is skipped.
+    trustedDelegation = false
   } = opts;
 
-  // Step 1: Verify Ed25519 signature
-  const sigValid = await verifySignature({
-    documentDID, ephemeralDID, timestamp, nonce, signature, requestorDID,
-    documentClassificationLevel: docMeta.clearanceLevel || 'INTERNAL'  // Task 7
-  });
-  if (!sigValid) {
-    return { success: false, error: 'INVALID_SIGNATURE', message: 'Access request signature verification failed' };
+  // Step 1: Verify Ed25519 signature (skipped for trusted server-to-server delegation)
+  if (!trustedDelegation) {
+    const sigValid = await verifySignature({
+      documentDID, ephemeralDID, timestamp, nonce, signature, requestorDID,
+      documentClassificationLevel: docMeta.clearanceLevel || 'INTERNAL'
+    });
+    if (!sigValid) {
+      return { success: false, error: 'INVALID_SIGNATURE', message: 'Access request signature verification failed' };
+    }
+  } else {
+    console.log('[ReEncryptionService] Signature check skipped — trusted server delegation (company-admin)');
   }
 
   // Step 2: Replay detection
@@ -323,8 +326,8 @@ async function processAccessRequest(opts) {
   // Also skip when releasableTo is [] — this means the DID was created without an issuer
   // allowlist (new format that avoids PRISM's service-endpoint size limit); clearance
   // level alone governs access in that case.
-  if (companyDID !== null && docMeta.releasableTo.length > 0 && !docMeta.releasableTo.includes(issuerDID)) {
-    console.warn(`[ReEncryptionService] Releasability denied. issuerDID=${issuerDID}`);
+  if (companyDID !== null && docMeta.releasableTo.length > 0 && !docMeta.releasableTo.includes(companyDID)) {
+    console.warn(`[ReEncryptionService] Releasability denied. companyDID=${companyDID}`);
     return { success: false, error: 'RELEASABILITY_DENIED', message: 'Your credential issuer is not authorized for this document' };
   }
 
@@ -338,20 +341,20 @@ async function processAccessRequest(opts) {
     };
   }
 
-  // Step 5: Revocation check via StatusList2021 bitstring (best-effort — fail-open on error).
+  // Step 5: Revocation check via StatusList2021 bitstring (fail-closed — deny on error).
   // Uses the statusListCredential URL embedded in each VC — no agent API key needed.
-  try {
-    for (const cs of (credentialStatuses || [])) {
-      if (cs?.statusListCredential && cs?.statusListIndex != null) {
-        const revoked = await checkStatusListBit(cs.statusListCredential, Number(cs.statusListIndex));
-        if (revoked) {
-          console.warn(`[ReEncryptionService] Credential revoked at statusListIndex=${cs.statusListIndex}`);
-          return { success: false, error: 'CREDENTIAL_REVOKED', message: 'Your security clearance credential has been revoked' };
-        }
+  for (const cs of (credentialStatuses || [])) {
+    if (cs?.statusListCredential && cs?.statusListIndex != null) {
+      const result = await checkStatusListBit(cs.statusListCredential, Number(cs.statusListIndex));
+      if (result === 'revoked') {
+        console.warn(`[ReEncryptionService] Credential revoked at statusListIndex=${cs.statusListIndex}`);
+        return { success: false, error: 'CREDENTIAL_REVOKED', message: 'Your security clearance credential has been revoked' };
+      }
+      if (result === 'check-failed') {
+        console.warn(`[ReEncryptionService] Revocation check inconclusive — denying access (fail-closed)`);
+        return { success: false, error: 'REVOCATION_CHECK_FAILED', message: 'Could not verify credential revocation status — try again later' };
       }
     }
-  } catch (revErr) {
-    console.warn('[ReEncryptionService] Revocation check failed (best-effort):', revErr.message);
   }
 
   // Step 6: Load DocumentKeyManifest VC from local store, verify, unwrap DEK.
@@ -380,8 +383,8 @@ async function processAccessRequest(opts) {
     // Releasability enforced from VC — single authoritative source.
     if (companyDID !== null &&
         Array.isArray(claims.releasableTo) && claims.releasableTo.length > 0 &&
-        !claims.releasableTo.includes(issuerDID)) {
-      console.warn(`[ReEncryptionService] Releasability denied (from VC manifest). issuerDID=${issuerDID}`);
+        !claims.releasableTo.includes(companyDID)) {
+      console.warn(`[ReEncryptionService] Releasability denied (from VC manifest). companyDID=${companyDID}`);
       return {
         success: false,
         error:   'RELEASABILITY_DENIED',
@@ -500,4 +503,79 @@ async function processAccessRequest(opts) {
 }
 
 // ---------------------------------------------------------------------------
-module.exports = { processAccessRequest, getLevelNumber, getLevelLabel };
+// resolveDocumentDEK — for DIDComm access flow (DIDComm E2E handles key protection)
+// ---------------------------------------------------------------------------
+/**
+ * Validate access rights and return the raw DEK (base64) + file encryption params.
+ * Used by DocumentDIDCommService: DIDComm transport provides E2E encryption so no
+ * additional NaCl box wrapping is needed.
+ *
+ * @param {object} opts  Same keys as processAccessRequest minus ephemeralPublicKey/signature
+ * @returns {Promise<{ success: true, dek: string, fileIv, fileAuthTag, fileAlgorithm, contentHash, iagonFileId }
+ *                 | { success: false, error, message }>}
+ */
+async function resolveDocumentDEK(opts) {
+  const { documentDID, companyDID, clearanceLevelNum, credentialStatuses, docMeta } = opts;
+
+  // Clearance check
+  const requiredLevel = getLevelNumber(docMeta.clearanceLevel);
+  if (clearanceLevelNum < requiredLevel) {
+    return { success: false, error: 'CLEARANCE_DENIED',
+      message: `Document requires ${docMeta.clearanceLevel}` };
+  }
+
+  // Releasability from DID metadata
+  if (companyDID !== null && docMeta.releasableTo?.length > 0 &&
+      !docMeta.releasableTo.includes(companyDID)) {
+    return { success: false, error: 'RELEASABILITY_DENIED',
+      message: 'Your credential issuer is not authorized for this document' };
+  }
+
+  // Revocation check (fail-closed)
+  for (const cs of (credentialStatuses || [])) {
+    if (cs?.statusListCredential && cs?.statusListIndex != null) {
+      const result = await checkStatusListBit(cs.statusListCredential, Number(cs.statusListIndex));
+      if (result === 'revoked')      return { success: false, error: 'CREDENTIAL_REVOKED', message: 'Credential revoked' };
+      if (result === 'check-failed') return { success: false, error: 'REVOCATION_CHECK_FAILED', message: 'Revocation check failed' };
+    }
+  }
+
+  // Unwrap DEK from VC store
+  const vcRecord = vcStore.get(documentDID);
+  if (!vcRecord) {
+    return { success: false, error: 'MANIFEST_NOT_FOUND', message: 'No key manifest found for this document' };
+  }
+
+  const verification = await keyManifestVerifier.verify(vcRecord);
+  if (!verification.valid) {
+    return { success: false, error: 'MANIFEST_VC_INVALID', message: verification.reason };
+  }
+
+  const claims = verification.claims;
+
+  if (companyDID !== null && Array.isArray(claims.releasableTo) && claims.releasableTo.length > 0
+      && !claims.releasableTo.includes(companyDID)) {
+    return { success: false, error: 'RELEASABILITY_DENIED', message: 'Your credential issuer is not authorized' };
+  }
+
+  const rawDEK = cmkStore.unwrapDEK({
+    wrappedKey: claims.wrappedKey, iv: claims.iv, authTag: claims.authTag,
+    wrappingAlgorithm: claims.wrappingAlgorithm
+  }, claims.classificationLevel);
+
+  const dek = rawDEK.toString('base64');
+  rawDEK.fill(0);
+
+  return {
+    success:       true,
+    dek,
+    fileIv:        claims.fileIv,
+    fileAuthTag:   claims.fileAuthTag,
+    fileAlgorithm: claims.fileAlgorithm || 'AES-256-GCM',
+    contentHash:   claims.contentHash || null,
+    iagonFileId:   docMeta.iagonFileId
+  };
+}
+
+// ---------------------------------------------------------------------------
+module.exports = { processAccessRequest, resolveDocumentDEK, getLevelNumber, getLevelLabel };

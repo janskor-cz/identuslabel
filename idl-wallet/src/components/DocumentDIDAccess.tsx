@@ -464,7 +464,7 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
           documentDID,
           overrideCreds,
           kp,
-          { baseUrl: accessBase }
+          { baseUrl: accessBase, employeeIdentifier: empId }
         );
 
         // Decrypt nacl.box: nacl.box.open(ct, nonce, serverPubKey, walletSecretKey)

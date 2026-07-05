@@ -42,6 +42,20 @@ function b64ToBuf(b64: string): Uint8Array {
     return bytes;
 }
 
+/** SHA-256 of "username_lowercase:password" → 64-char hex. Server-side registry key (username never sent). */
+export async function generateCredentialHash(username: string, password: string): Promise<string> {
+    const enc = new TextEncoder();
+    const hashBuf = await crypto.subtle.digest('SHA-256', enc.encode(`${username.toLowerCase()}:${password}`));
+    return Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** SHA-256 of the raw JWE string → 64-char hex. Stored in registry to detect wallet changes. */
+export async function generateContentHash(jwe: string): Promise<string> {
+    const enc = new TextEncoder();
+    const hashBuf = await crypto.subtle.digest('SHA-256', enc.encode(jwe));
+    return Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function deriveKey(password: string, username: string, salt: Uint8Array): Promise<CryptoKey> {
     const enc = new TextEncoder();
     const baseKey = await crypto.subtle.importKey(

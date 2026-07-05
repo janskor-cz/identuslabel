@@ -3,6 +3,8 @@ const path = require('path');
 const crypto = require('crypto');
 const fetch = require('node-fetch');
 const fs = require('fs');
+const axios = require('axios');
+const FormData = require('form-data');
 
 // PRISM DID Parser for extracting keys from long-form PRISM DIDs
 const {
@@ -10,12 +12,17 @@ const {
   isLongFormPrismDID
 } = require('./lib/prismDIDParser');
 
+const { ServiceAccessService, createTrustRegistry, createIssuerResolver } = require('service-access-didcomm');
+
 const app = express();
 const PORT = process.env.PORT || 3005;
 
+// Initialize CA DIDComm identity (generates/loads keypair + peer DID)
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://identuslabel.cz/ca';
+
 // Cloud Agent configuration for Certification Authority (Local Simple Agent)
-const CLOUD_AGENT_URL = 'https://identuslabel.cz/cloud-agent';
-const API_KEY = 'admin'; // Simple cloud agent admin token
+const CLOUD_AGENT_URL = process.env.CLOUD_AGENT_URL || 'https://identuslabel.cz/cloud-agent';
+const API_KEY = process.env.CLOUD_AGENT_API_KEY || 'admin';
 const WALLET_ID = 'certification-authority-wallet';
 const ENTITY_ID = 'certification-authority-entity';
 const ORG_NAME = 'Certification Authority';
@@ -25,6 +32,34 @@ const USER_MAPPINGS_FILE = path.join(__dirname, 'data', 'user-connection-mapping
 
 // Persistent storage for soft-deleted connections
 const SOFT_DELETED_FILE = path.join(__dirname, 'data', 'soft-deleted-connections.json');
+
+// Persistent storage for photo DIDs (uniqueId → { photoDID, iagonFileId, proxyUrl })
+const PHOTO_DIDS_FILE = path.join(__dirname, 'data', 'photo-dids.json');
+
+// Persistent storage for DIDComm chat messages (scoped by connectionId)
+const CHAT_MESSAGES_FILE = path.join(__dirname, 'data', 'chat-messages.json');
+
+function loadChatMessages() {
+  try {
+    if (fs.existsSync(CHAT_MESSAGES_FILE)) {
+      return JSON.parse(fs.readFileSync(CHAT_MESSAGES_FILE, 'utf8'));
+    }
+    return {};
+  } catch (e) {
+    console.error('[Chat] Failed to load chat messages:', e.message);
+    return {};
+  }
+}
+
+function saveChatMessages(store) {
+  try {
+    fs.writeFileSync(CHAT_MESSAGES_FILE, JSON.stringify(store, null, 2), 'utf8');
+  } catch (e) {
+    console.error('[Chat] Failed to save chat messages:', e.message);
+  }
+}
+
+let chatMessageStore = loadChatMessages();
 
 /**
  * Load user-connection mappings from persistent storage
@@ -118,7 +153,7 @@ function saveSoftDeletedConnections(deletedConnections) {
   }
 }
 
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static('public'));
 
 // Utility function to generate RSA keypair for security clearances
@@ -269,6 +304,109 @@ global.userConnectionMappings = loadUserMappings();
 
 // Store soft-deleted connection IDs with persistent storage
 global.softDeletedConnections = loadSoftDeletedConnections();
+
+// ── Photo DID storage (uniqueId → { photoDID, iagonFileId, proxyUrl, createdAt }) ──
+let photoDIDs = {};
+try {
+  photoDIDs = JSON.parse(fs.readFileSync(PHOTO_DIDS_FILE, 'utf8'));
+  console.log(`📸 [PHOTO-DIDS] Loaded ${Object.keys(photoDIDs).length} photo DID mappings`);
+} catch (e) {
+  photoDIDs = {};
+  console.log('📸 [PHOTO-DIDS] Starting with empty photo DID store');
+}
+
+function savePhotoDIDs() {
+  try {
+    fs.writeFileSync(PHOTO_DIDS_FILE, JSON.stringify(photoDIDs, null, 2), 'utf8');
+  } catch (e) {
+    console.error('❌ [PHOTO-DIDS] Error saving photo DIDs:', e.message);
+  }
+}
+
+/**
+ * Filter published DIDs to exclude photo DIDs (which only have auth keys, not assertionMethod).
+ * Photo DIDs cannot sign credentials and must never be used as issuingDID.
+ * @param {Array} allDIDs - array of DID objects from Cloud Agent (with .did and .status)
+ * @returns {Array} published non-photo DIDs
+ */
+function filterIssuingDIDs(allDIDs) {
+  const photoDIDShortForms = new Set(
+    Object.values(photoDIDs).map(e => e.photoDID.split(':').slice(0, 3).join(':'))
+  );
+  return (allDIDs || []).filter(d =>
+    d.status === 'PUBLISHED' && !photoDIDShortForms.has(d.did)
+  );
+}
+
+/**
+ * DIDs this CA currently controls and can issue credentials from, for use as
+ * `trustIssuers` on proof requests. An empty trustIssuers array constrains a proof
+ * request by schema only, letting a self-issued or attacker-controlled credential of the
+ * right schema satisfy the request — a real auth bypass for login/access-control flows.
+ * Fetched live (rather than a hardcoded DID) so it stays correct across DID rotation.
+ */
+async function getTrustedIssuerDIDs() {
+  try {
+    const didsResponse = await fetch(`${CLOUD_AGENT_URL}/did-registrar/dids`, {
+      headers: { 'apikey': API_KEY }
+    });
+    if (!didsResponse.ok) return [];
+    const dids = await didsResponse.json();
+    return filterIssuingDIDs(dids.contents).map(d => d.did);
+  } catch (e) {
+    console.error('❌ [TRUST-ISSUERS] Failed to fetch CA issuer DIDs:', e.message);
+    return [];
+  }
+}
+
+/**
+ * Upload a raw JPEG buffer to Iagon (no encryption — photos are served publicly via CA proxy)
+ * @param {Buffer} jpegBuffer
+ * @param {string} filename
+ * @returns {Promise<string>} iagonFileId
+ */
+async function uploadPhotoToIagon(jpegBuffer, filename) {
+  const IAGON_BASE = 'https://gw.iagon.com/api/v2';
+  const form = new FormData();
+  form.append('file', jpegBuffer, { filename, contentType: 'image/jpeg' });
+  form.append('node_id', process.env.IAGON_NODE_ID);
+
+  const response = await axios.post(`${IAGON_BASE}/storage/upload`, form, {
+    headers: {
+      ...form.getHeaders(),
+      'x-api-key': process.env.IAGON_ACCESS_TOKEN
+    },
+    timeout: 60000,
+    maxContentLength: 10 * 1024 * 1024,
+    maxBodyLength: 10 * 1024 * 1024
+  });
+
+  const fileId = response.data?.data?._id;
+  if (!fileId) throw new Error(`Iagon upload returned no fileId: ${JSON.stringify(response.data)}`);
+  console.log(`📸 [IAGON] Uploaded photo: ${fileId}`);
+  return fileId;
+}
+
+/**
+ * Download a raw file from Iagon
+ * @param {string} iagonFileId
+ * @returns {Promise<Buffer>}
+ */
+async function downloadPhotoFromIagon(iagonFileId) {
+  const IAGON_BASE = 'https://gw.iagon.com/api/v2';
+  const response = await axios.post(`${IAGON_BASE}/storage/download`, {
+    id: iagonFileId,
+    files: [iagonFileId]
+  }, {
+    headers: {
+      'x-api-key': process.env.IAGON_ACCESS_TOKEN,
+      'Content-Type': 'application/json'
+    },
+    responseType: 'arraybuffer',
+    timeout: 60000
+  });
+  return Buffer.from(response.data);
+}
 
 /**
  * Enhanced connection resolution that tries multiple strategies to find the right connection
@@ -430,6 +568,120 @@ app.use((req, res, next) => {
     next();
   }
 });
+
+// ============================================================================
+// PHOTO DID ENDPOINTS
+// ============================================================================
+
+// Proxy: serve Iagon-stored photos without exposing the Iagon API key to clients
+app.get('/photo-proxy/:iagonFileId', async (req, res) => {
+  try {
+    const { iagonFileId } = req.params;
+    // Only serve files we uploaded (prevents arbitrary Iagon access)
+    const known = Object.values(photoDIDs).some(e => e.iagonFileId === iagonFileId);
+    if (!known) return res.status(404).json({ error: 'Photo not found' });
+
+    const imageBuffer = await downloadPhotoFromIagon(iagonFileId);
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=31536000'); // 1 year — changes only via new DID service update
+    res.send(imageBuffer);
+  } catch (error) {
+    console.error('❌ [PHOTO-PROXY] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch photo' });
+  }
+});
+
+// Stable per-user photo endpoint — always returns the current photo, bypassing DID resolution.
+// The wallet uses this to show photo updates immediately without waiting for PRISM on-chain confirmation.
+// X-Photo-Cache-Key header carries the iagonFileId so the wallet can key its local image cache correctly:
+// when the photo is updated a new iagonFileId is created, cache miss forces a fresh fetch.
+app.get('/photo-current/:uniqueId', async (req, res) => {
+  const entry = photoDIDs[req.params.uniqueId];
+  if (!entry) return res.status(404).json({ error: 'No photo for this user' });
+  try {
+    const imageBuffer = await downloadPhotoFromIagon(entry.iagonFileId);
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'no-cache, no-store');
+    res.set('X-Photo-Cache-Key', entry.iagonFileId);
+    res.send(imageBuffer);
+  } catch (error) {
+    console.error('❌ [PHOTO-CURRENT] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch photo' });
+  }
+});
+
+// Return the proxy URL for a given uniqueId (used by portal.html which has no SDK)
+app.get('/api/photos/proxy-url/:uniqueId', (req, res) => {
+  const entry = photoDIDs[req.params.uniqueId];
+  if (!entry) return res.status(404).json({ error: 'No photo found for this user' });
+  res.json({ proxyUrl: entry.proxyUrl, photoDID: entry.photoDID });
+});
+
+// Return current identity info for a uniqueId (used by company portals for login enrichment)
+app.get('/api/user-info/:uniqueId', (req, res) => {
+  const { uniqueId } = req.params;
+  const mapping = global.userConnectionMappings.get(uniqueId);
+  if (!mapping) return res.status(404).json({ error: 'User not found' });
+  const { firstName, lastName } = mapping.holderInfo || {};
+  const photoEntry = photoDIDs[uniqueId];
+  res.json({
+    firstName: firstName || null,
+    lastName: lastName || null,
+    photoDID: photoEntry?.photoDID || null,
+    proxyUrl: photoEntry?.proxyUrl || null
+  });
+});
+
+// Update photo: upload new version to Iagon + PATCH DID Document service endpoint
+app.post('/api/photos/update/:uniqueId', async (req, res) => {
+  try {
+    const { uniqueId } = req.params;
+    const { photo } = req.body; // base64 data URI
+
+    if (!photo) return res.status(400).json({ error: 'photo is required' });
+
+    const existing = photoDIDs[uniqueId];
+    if (!existing) return res.status(404).json({ error: 'No photo DID registered for this user' });
+
+    // Decode base64 to buffer
+    const base64 = photo.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64, 'base64');
+    const iagonFileId = await uploadPhotoToIagon(buffer, `photo-${uniqueId}-${Date.now()}.jpg`);
+    const proxyUrl = `${PUBLIC_BASE_URL}/photo-proxy/${iagonFileId}`;
+
+    // POST to /updates endpoint to update the DID document service endpoint
+    const patchResp = await fetch(`${CLOUD_AGENT_URL}/did-registrar/dids/${encodeURIComponent(existing.photoDID)}/updates`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
+      body: JSON.stringify({
+        actions: [{
+          actionType: 'UPDATE_SERVICE',
+          updateService: { id: 'photo', type: 'LinkedPhoto', serviceEndpoint: proxyUrl }
+        }]
+      })
+    });
+    if (!patchResp.ok) {
+      const errText = await patchResp.text();
+      console.warn(`⚠️ [PHOTO-UPDATE] DID PATCH failed: ${patchResp.status} ${errText} (continuing anyway)`);
+    }
+
+    // Update local mapping
+    existing.iagonFileId = iagonFileId;
+    existing.proxyUrl = proxyUrl;
+    existing.updatedAt = new Date().toISOString();
+    savePhotoDIDs();
+
+    console.log(`📸 [PHOTO-UPDATE] Updated photo for ${uniqueId}: ${iagonFileId}`);
+    res.json({ success: true, proxyUrl, photoDID: existing.photoDID });
+  } catch (error) {
+    console.error('❌ [PHOTO-UPDATE] Error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================================
+// END: PHOTO DID ENDPOINTS
+// ============================================================================
 
 // Create DID for Certification Authority
 app.post('/api/create-did', async (req, res) => {
@@ -772,7 +1024,7 @@ app.get('/api/well-known/invitation', async (req, res) => {
       connectionId: invitation.connectionId,
       caDID: caDID.did,
       caName: ORG_NAME,
-      caUrl: 'https://identuslabel.cz/ca',
+      caUrl: PUBLIC_BASE_URL,
       hasCACredential: !!caCredentialData
     });
 
@@ -959,7 +1211,7 @@ app.get('/invitation', (req, res) => {
         <div class="info-box">
           <h3>📋 Next Steps</h3>
           <ol>
-            <li>Visit <strong>https://identuslabel.cz/ca/init.html</strong> on your desktop</li>
+            <li>Visit <strong>${PUBLIC_BASE_URL}/init.html</strong> on your desktop</li>
             <li>Scan the QR code with your wallet app's built-in scanner</li>
             <li>Or copy the invitation URL above and paste it into your wallet</li>
           </ol>
@@ -1092,7 +1344,7 @@ app.get('/api/wallet-init/ca-invitation', async (req, res) => {
     }
 
     // Create short URL for QR code
-    const shortUrl = `https://identuslabel.cz/ca/i/${shortId}`;
+    const shortUrl = `${PUBLIC_BASE_URL}/i/${shortId}`;
     console.log(`✅ [WALLET-INIT] Short URL created: ${shortUrl}`);
 
     // Return invitation with embedded CA credential
@@ -1488,6 +1740,62 @@ app.post('/api/schemas/create-restricted-clearance', async (req, res) => {
   }
 });
 
+// Create RealPerson credential schema v4 (with photo support)
+app.post('/api/schemas/create-realperson-v4', async (req, res) => {
+  try {
+    console.log('📋 Creating RealPerson v4 schema (with photo support)...');
+
+    const fs = require('fs');
+    const path = require('path');
+    const schemaPath = path.join(__dirname, 'realperson-schema-v4.json');
+    if (!fs.existsSync(schemaPath)) {
+      throw new Error('realperson-schema-v4.json not found in server directory');
+    }
+    const schemaTemplate = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+
+    const didResponse = await fetch(`${CLOUD_AGENT_URL}/did-registrar/dids`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (!didResponse.ok) throw new Error('Failed to fetch authority DIDs');
+
+    const didData = await didResponse.json();
+    const publishedDIDs = filterIssuingDIDs(didData.contents);
+    const authorityDID = publishedDIDs.length > 0
+      ? publishedDIDs[publishedDIDs.length - 1].did
+      : (didData.contents.length > 0 ? didData.contents[didData.contents.length - 1].did : null);
+
+    if (!authorityDID) throw new Error('No DID found. Please create and publish a DID first.');
+
+    const schemaDefinition = {
+      ...schemaTemplate,
+      author: authorityDID,
+      authored: new Date().toISOString()
+    };
+
+    console.log(`📋 Registering RealPerson v4 schema with DID: ${authorityDID.substring(0, 50)}...`);
+
+    const response = await fetch(`${CLOUD_AGENT_URL}/schema-registry/schemas`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
+      body: JSON.stringify(schemaDefinition)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Cloud Agent responded with ${response.status}: ${errorText}`);
+    }
+
+    const schemaData = await response.json();
+    console.log(`✅ RealPerson v4 schema registered: ${schemaData.guid}`);
+
+    res.json({ success: true, schemaId: schemaData.guid, schemaData });
+  } catch (error) {
+    console.error('❌ Error creating RealPerson v4 schema:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Create RealPerson credential schema
 app.post('/api/schemas/create-realperson', async (req, res) => {
   try {
@@ -1601,8 +1909,8 @@ app.post('/api/schemas/create-ca-authority', async (req, res) => {
     }
 
     const didData = await didResponse.json();
-    // Use the PUBLISHED DID as author
-    const publishedDIDs = didData.contents.filter(did => did.status === 'PUBLISHED');
+    // Use the PUBLISHED DID as author (excluding photo DIDs which lack assertionMethod)
+    const publishedDIDs = filterIssuingDIDs(didData.contents);
     const authorityDID = publishedDIDs.length > 0 ? publishedDIDs[0].did : null;
 
     if (!authorityDID) {
@@ -1668,7 +1976,7 @@ app.post('/api/credentials/issue-ca-authority', async (req, res) => {
     }
 
     const didData = await didResponse.json();
-    const publishedDIDs = didData.contents.filter(did => did.status === 'PUBLISHED');
+    const publishedDIDs = filterIssuingDIDs(didData.contents);
 
     if (publishedDIDs.length === 0) {
       throw new Error('No PUBLISHED DID found for CA. Please publish a DID first.');
@@ -2258,8 +2566,8 @@ app.post('/api/credentials/issue-confidential-clearance', async (req, res) => {
     }
 
     const didData = await didResponse.json();
-    // Filter for published DIDs only and use the newest one
-    const publishedDIDs = didData.contents.filter(did => did.status === 'PUBLISHED');
+    // Filter for published DIDs only (excluding photo DIDs which lack assertionMethod keys)
+    const publishedDIDs = filterIssuingDIDs(didData.contents);
     const issuingDID = publishedDIDs.length > 0 ? publishedDIDs[publishedDIDs.length - 1].did : null;
 
     if (!issuingDID) {
@@ -2415,8 +2723,8 @@ app.post('/api/credentials/issue-restricted-clearance', async (req, res) => {
     }
 
     const didData = await didResponse.json();
-    // Filter for published DIDs only and use the newest one
-    const publishedDIDs = didData.contents.filter(did => did.status === 'PUBLISHED');
+    // Filter for published DIDs only (excluding photo DIDs which lack assertionMethod keys)
+    const publishedDIDs = filterIssuingDIDs(didData.contents);
     const issuingDID = publishedDIDs.length > 0 ? publishedDIDs[publishedDIDs.length - 1].did : null;
 
     if (!issuingDID) {
@@ -2508,11 +2816,12 @@ app.post('/api/credentials/issue-restricted-clearance', async (req, res) => {
 // Issue RealPerson credential
 app.post('/api/credentials/issue-realperson', async (req, res) => {
   try {
-    const { 
+    const {
       connectionId,
       credentialData,
       selectedDID,
-      selectedSchemaGuid
+      selectedSchemaGuid,
+      photo
     } = req.body;
     
     console.log(`🎫 Issuing RealPerson credential to connection: ${connectionId}`);
@@ -2541,8 +2850,8 @@ app.post('/api/credentials/issue-realperson', async (req, res) => {
       }
       
       const didData = await didResponse.json();
-      // Filter for published DIDs only and use the working one
-      const publishedDIDs = didData.contents.filter(did => did.status === 'PUBLISHED');
+      // Filter for published DIDs only (excluding photo DIDs which lack assertionMethod)
+      const publishedDIDs = filterIssuingDIDs(didData.contents);
       // Use the first published DID which is known to work for credential issuance
       const workingDID = 'did:prism:976a9472646282e667c2536e1d202620cf3b78a06693d67c277b33d2afbcfca4';
       issuingDID = publishedDIDs.find(did => did.did === workingDID)?.did || 
@@ -2587,10 +2896,12 @@ app.post('/api/credentials/issue-realperson', async (req, res) => {
       }
       
       const schemaData = await schemaResponse.json();
-      // Find all RealPerson schemas and use v3.0.0 (includes metadata fields)
+      // Find all RealPerson schemas; prefer v4.0.0 when photo is present, otherwise v3.0.0
       const realPersonSchemas = schemaData.contents.filter(schema => schema.name === 'RealPerson');
-      realPersonSchema = realPersonSchemas.find(schema => schema.version === '3.0.0') ||
-                         realPersonSchemas[realPersonSchemas.length - 1];
+      const preferredVersion = photo ? '4.0.0' : '3.0.0';
+      realPersonSchema = realPersonSchemas.find(schema => schema.version === preferredVersion)
+                      || realPersonSchemas.find(schema => schema.version === '3.0.0')
+                      || realPersonSchemas[realPersonSchemas.length - 1];
       
       if (!realPersonSchema) {
         throw new Error('RealPerson schema not found. Please create the schema first.');
@@ -2604,15 +2915,68 @@ app.post('/api/credentials/issue-realperson', async (req, res) => {
     const expiryDate = new Date(Date.now() + 63072000000).toISOString().split('T')[0]; // 2 years
     const credentialId = `REALPERSON-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
 
+    // Handle photo: upload to Iagon → create photo PRISM DID → store DID reference in VC
+    let photoDIDRef = null;
+    if (photo) {
+      try {
+        const uniqueId = credentialData.uniqueId;
+
+        // Reuse existing photo DID if one exists for this uniqueId
+        if (photoDIDs[uniqueId]) {
+          photoDIDRef = photoDIDs[uniqueId].photoDID;
+          console.log(`📸 Reusing existing photo DID for ${uniqueId}: ${photoDIDRef.substring(0, 60)}...`);
+        } else {
+          // 1. Upload photo to Iagon (raw JPEG bytes, no encryption)
+          const base64 = photo.replace(/^data:image\/\w+;base64,/, '');
+          const buffer = Buffer.from(base64, 'base64');
+          const iagonFileId = await uploadPhotoToIagon(buffer, `photo-${uniqueId}-${Date.now()}.jpg`);
+          const proxyUrl = `${PUBLIC_BASE_URL}/photo-proxy/${iagonFileId}`;
+
+          // 2. Create PRISM DID with #photo service endpoint
+          const didCreateResp = await fetch(`${CLOUD_AGENT_URL}/did-registrar/dids`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
+            body: JSON.stringify({
+              documentTemplate: {
+                publicKeys: [{ id: 'auth-0', purpose: 'authentication' }],
+                services: [{
+                  id: 'photo',
+                  type: 'LinkedPhoto',
+                  serviceEndpoint: proxyUrl
+                }]
+              }
+            })
+          });
+          if (!didCreateResp.ok) throw new Error(`DID create failed: ${await didCreateResp.text()}`);
+          const didData = await didCreateResp.json();
+          const longFormDid = didData.longFormDid;
+
+          // 3. Publish to blockchain (async fire-and-forget)
+          fetch(`${CLOUD_AGENT_URL}/did-registrar/dids/${encodeURIComponent(longFormDid)}/publications`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'apikey': API_KEY }
+          }).then(r => console.log(`📸 [PHOTO-DID] Published: ${r.status}`))
+            .catch(e => console.warn(`⚠️ [PHOTO-DID] Publish error (non-fatal): ${e.message}`));
+
+          // 4. Store mapping
+          photoDIDs[uniqueId] = { photoDID: longFormDid, iagonFileId, proxyUrl, createdAt: new Date().toISOString() };
+          savePhotoDIDs();
+          photoDIDRef = longFormDid;
+          console.log(`📸 [PHOTO-DID] Created for ${uniqueId}: ${longFormDid.substring(0, 60)}...`);
+        }
+      } catch (photoErr) {
+        console.error('❌ [PHOTO-DID] Photo processing failed (issuing VC without photo):', photoErr.message);
+        photoDIDRef = null;
+      }
+    }
+
     const enrichedClaims = {
       ...credentialData,
       credentialType: 'RealPersonIdentity',
-      serviceUrl: `https://identuslabel.cz/ca/login?uid=${encodeURIComponent(credentialData.uniqueId)}`,
-      serviceName: 'Certification Authority',
-      serviceIcon: '🔐',
       issuedDate: issuedDate,
       expiryDate: expiryDate,
-      credentialId: credentialId
+      credentialId: credentialId,
+      ...(photoDIDRef ? { photo: photoDIDRef } : {})
     };
 
     // Create credential offer using Cloud Agent documented API structure
@@ -2656,7 +3020,8 @@ app.post('/api/credentials/issue-realperson', async (req, res) => {
         lastName: credentialData.lastName,
         uniqueId: credentialData.uniqueId,
         dateOfBirth: credentialData.dateOfBirth,
-        gender: credentialData.gender
+        gender: credentialData.gender,
+        ...(photoDIDRef ? { photo: photoDIDRef } : {})
       },
       registeredAt: new Date().toISOString()
     });
@@ -2668,6 +3033,9 @@ app.post('/api/credentials/issue-realperson', async (req, res) => {
       recordId: offerData.recordId,
       thid: offerData.thid,
       credentialData: credentialData,
+      issuedDate,
+      expiryDate,
+      photoDID: photoDIDRef || null,
       message: 'RealPerson credential issued successfully'
     });
   } catch (error) {
@@ -2771,6 +3139,12 @@ app.get('/api/credentials/revocable', async (req, res) => {
           record.credentialStatusId = decodedPayload.vc.credentialStatus.id;
           record.statusListIndex = decodedPayload.vc.credentialStatus.statusListIndex;
           record.statusListCredential = decodedPayload.vc.credentialStatus.statusListCredential;
+          // Attach subject fields for update UI
+          const subj = decodedPayload.vc.credentialSubject || {};
+          record.uniqueId = subj.uniqueId || null;
+          record.credentialType = subj.credentialType || null;
+          record.holderLastName = subj.lastName || null;
+          record.holderFirstName = subj.firstName || null;
         }
 
         return hasCredentialStatus;
@@ -2792,7 +3166,11 @@ app.get('/api/credentials/revocable', async (req, res) => {
       issuedAt: record.createdAt,
       updatedAt: record.updatedAt,
       schemaId: record.schemaId,
-      connectionId: record.connectionId
+      connectionId: record.connectionId,
+      uniqueId: record.uniqueId || null,
+      credentialType: record.credentialType || null,
+      holderFirstName: record.holderFirstName || null,
+      holderLastName: record.holderLastName || null
     }));
 
     res.json({
@@ -3269,18 +3647,29 @@ app.post('/api/auth/didcomm/initiate', async (req, res) => {
 
     // 7. Generate cryptographic challenge and domain binding
     const challenge = crypto.randomUUID();
-    const domain = 'ca.identus.org';
+    // The Cloud Agent doesn't forward goalCode/goal/claims into the actual wire message for
+    // JWT-format requests (verified live) — options.domain is the one field confirmed to
+    // survive, so it doubles as the wallet-side schema hint (see actions/index.ts).
+    const domain = 'realperson.identuslabel.cz';
 
     console.log(`🔐 [DIDCOMM-AUTH] Generating proof request with challenge: ${challenge.substring(0, 12)}...`);
 
     // 8. Create DIDComm Present Proof request via Cloud Agent
     const proofRequestPayload = {
       connectionId: connectionId,
-      proofs: [],  // Required by Cloud Agent API (empty for JWT credentials)
-      proofTypes: [
+      // Constrains by schema (was the unused `proofs: []` + unrecognized `proofTypes` field,
+      // which produced presentation requests with empty input_descriptors — verified against
+      // a live Cloud Agent record. `proofs[].schemaId` is what the Cloud Agent actually reads.
+      proofs: [
         {
-          schema: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/e3ed8a7b-5866-3032-a06c-4c3ce7b7c73f',
-          requiredFields: ['firstName', 'lastName', 'uniqueId', 'dateOfBirth', 'gender']
+          // RealPerson v4.0.0 (the photo-carrying version) — the Cloud Agent enforces this
+          // schemaId as a POST-HOC check against whatever VC the wallet actually presents
+          // (verified live: a v3.0.0-requested schemaId against a v4.0.0-issued credential
+          // produced status PresentationVerificationFailed, matching the Identus error-
+          // handling ADR's documented "V6 Schema Mismatch" scenario). v4.0.0 is what
+          // /api/credentials/issue-realperson actually issues whenever a photo is supplied.
+          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/4755a426-b80b-3f6a-b9ea-ca202bd7ce16',
+          trustIssuers: await getTrustedIssuerDIDs() // constrain to DIDs this CA actually controls
         }
       ],
       options: {
@@ -3290,6 +3679,10 @@ app.post('/api/auth/didcomm/initiate', async (req, res) => {
       credentialFormat: 'JWT',
       goalCode: 'schema:RealPerson',
       goal: 'Please provide your RealPerson Identity Credential for authentication',
+      // Per the Cloud Agent's own OpenAPI spec, `claims` (not `proofs[].schemaId` alone) is
+      // what specifies which fields to disclose and populates presentation_definition's
+      // input_descriptors — omitting it is what caused empty input_descriptors even with
+      // a valid proofs[].schemaId.
       claims: {
         firstName: {},
         lastName: {},
@@ -3762,6 +4155,7 @@ app.post('/api/auth/didcomm/verify/:proofId', async (req, res) => {
         uniqueId: verifiedClaims.uniqueId,
         dateOfBirth: verifiedClaims.dateOfBirth,
         gender: verifiedClaims.gender,
+        photo: verifiedClaims.photo || null,
         id: holderPrismDID  // Include holder's PRISM DID for key extraction
       },
       connectionId: proofRequest.connectionId,
@@ -4454,7 +4848,11 @@ app.get('/api/session/:sessionId', (req, res) => {
         firstName: session.firstName,
         lastName: session.lastName,
         authenticatedAt: session.authenticatedAt,
-        expiresAt: session.expiresAt
+        loginTime: session.loginTime,
+        createdAt: session.createdAt,
+        expiresAt: session.expiresAt,
+        userData: session.userData || session.personalInfo || {},
+        connectionId: session.connectionId || null
       }
     });
   } catch (error) {
@@ -5289,22 +5687,29 @@ app.post('/api/request-clearance', async (req, res) => {
 
     const clearancePresentationRequest = {
       connectionId: connectionId,
-      proofs: [],  // Required by Cloud Agent API (empty for JWT credentials)
-      proofTypes: [
+      proofs: [
         {
-          schema: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/ba309a53-9661-33df-92a3-2023b4a56fd5',
-          requiredFields: ['clearanceLevel', 'issuedDate', 'expiryDate']
+          // SecurityClearanceLevel v5.0.0 — the current preferred issuance version (see the
+          // ['5.0.0','4.0.0','3.0.0'] preference order used when issuing). A stale version
+          // GUID here causes the Cloud Agent's post-hoc schema check to reject a real,
+          // correctly-typed credential as PresentationVerificationFailed (verified live).
+          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/78f56570-1405-3847-9e5c-87f582722711',
+          trustIssuers: await getTrustedIssuerDIDs() // constrain to DIDs this CA actually controls
         }
       ],
       options: {
         challenge: clearanceProofId,
-        domain: 'identuslabel.cz'
+        // Wallet-side schema hint — see the domain comment on the DIDComm identity-auth
+        // proof request above (Cloud Agent doesn't forward goalCode/claims to the wallet).
+        domain: 'clearance.identuslabel.cz'
       },
       credentialFormat: 'JWT',
       goalCode: 'schema:SecurityClearance',
       goal: 'Please provide your Security Clearance Credential to access restricted content',
       claims: {
-        clearanceLevel: {}  // Request clearance level claim
+        clearanceLevel: {},
+        issuedDate: {},
+        expiryDate: {}
       }
     };
 
@@ -6334,7 +6739,7 @@ app.post('/api/didcomm/request-security-clearance', async (req, res) => {
     }
 
     const didData = await didResponse.json();
-    const publishedDIDs = didData.contents.filter(did => did.status === 'PUBLISHED');
+    const publishedDIDs = filterIssuingDIDs(didData.contents);
     const issuingDID = publishedDIDs.length > 0 ? publishedDIDs[publishedDIDs.length - 1].did : null;
 
     if (!issuingDID) {
@@ -6630,22 +7035,29 @@ app.post('/api/enterprise/request-clearance', async (req, res) => {
     // Create presentation request for Security Clearance VC
     const clearancePresentationRequest = {
       connectionId: connectionId,
-      proofs: [],  // Required by Cloud Agent API (empty for JWT credentials)
-      proofTypes: [
+      proofs: [
         {
-          schema: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/ba309a53-9661-33df-92a3-2023b4a56fd5',
-          requiredFields: ['clearanceLevel', 'issuedDate', 'expiryDate']
+          // SecurityClearanceLevel v5.0.0 — the current preferred issuance version (see the
+          // ['5.0.0','4.0.0','3.0.0'] preference order used when issuing). A stale version
+          // GUID here causes the Cloud Agent's post-hoc schema check to reject a real,
+          // correctly-typed credential as PresentationVerificationFailed (verified live).
+          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/78f56570-1405-3847-9e5c-87f582722711',
+          trustIssuers: await getTrustedIssuerDIDs() // constrain to DIDs this CA actually controls
         }
       ],
       options: {
         challenge: challenge,
-        domain: 'employee-portal.techcorp.com'
+        // Wallet-side schema hint — see the domain comment on the DIDComm identity-auth
+        // proof request above (Cloud Agent doesn't forward goalCode/claims to the wallet).
+        domain: 'clearance.identuslabel.cz'
       },
       credentialFormat: 'JWT',
       goalCode: 'schema:SecurityClearance',
       goal: 'TechCorp Employee Portal requests your Security Clearance credential to verify authorization level',
       claims: {
-        clearanceLevel: {}  // Request clearance level claim
+        clearanceLevel: {},
+        issuedDate: {},
+        expiryDate: {}
       }
     };
 
@@ -6868,6 +7280,7 @@ app.get('/api/enterprise/clearance-status/:proofRequestId', async (req, res) => 
 
 // Serve security clearance request page
 app.get('/security-clearance', (req, res) => {
+  res.set('Cache-Control', 'no-store');
   res.sendFile(path.join(__dirname, 'public', 'security-clearance.html'));
 });
 
@@ -6932,9 +7345,9 @@ app.post('/api/credentials/company/issue', async (req, res) => {
     }
     
     const didData = await didResponse.json();
-    const publishedDIDs = didData.contents.filter(did => did.status === 'PUBLISHED');
+    const publishedDIDs = filterIssuingDIDs(didData.contents);
     const issuingDID = publishedDIDs.length > 0 ? publishedDIDs[publishedDIDs.length - 1].did : null;
-    
+
     if (!issuingDID) {
       throw new Error('No DID found for Certification Authority. Please create and publish a DID first.');
     }
@@ -7040,139 +7453,144 @@ app.get('/api/cloud-agent/cloud-agent/connections', async (req, res) => {
   }
 });
 
-// DIDComm Messaging endpoints
-const messageStorage = new Map(); // In-memory message store for demo
+// ── Cloud Agent Webhook Probe ─────────────────────────────────────────────────
 
-app.post('/api/receive-didcomm-message', (req, res) => {
-  try {
-    const { from, message, relayedBy } = req.body;
-    
-    console.log(`📥 CA received DIDComm message from ${from}:`, message.body?.content || 'No content');
+// Capture all webhook payloads from the Cloud Agent for inspection
+// Registered at: POST /events/webhooks → url: https://identuslabel.cz/ca/api/webhook-probe
+let webhookProbeLog = []; // in-memory ring buffer (last 50)
 
-    // Store received message
-    const messageId = message.id || Date.now().toString();
-    const messageData = {
-      id: messageId,
-      timestamp: new Date().toISOString(),
+app.post('/api/webhook-probe', express.json(), async (req, res) => {
+  const entry = {
+    receivedAt: new Date().toISOString(),
+    headers: req.headers,
+    body: req.body
+  };
+  webhookProbeLog.push(entry);
+  if (webhookProbeLog.length > 50) webhookProbeLog.shift();
+
+  const type = req.body?.type || req.body?.piuri || '(unknown)';
+  console.log(`🔔 [WebhookProbe] Received event — type: ${type}`);
+
+  // Handle BasicMessageReceived events from the custom Cloud Agent build
+  if (type === 'BasicMessageReceived' && req.body?.data) {
+    const { id, content, from: senderId, sentTime } = req.body.data;
+
+    // Wallet wraps all messages in StandardMessageBody: {"content":"...","timestamp":...,"encrypted":false}
+    // Unwrap to get the actual message text or protocol JSON
+    let actualContent = content || '';
+    try {
+      const stdBody = JSON.parse(actualContent);
+      if (stdBody && typeof stdBody.content === 'string') {
+        actualContent = stdBody.content;
+      }
+    } catch (_) { /* not JSON, use as-is */ }
+
+    // Look up connectionId by theirDid == senderId
+    let connectionId = 'unknown';
+    try {
+      const connResp = await fetch(`${CLOUD_AGENT_URL}/connections?limit=100`, {
+        headers: { 'apikey': API_KEY }
+      });
+      if (connResp.ok) {
+        const connData = await connResp.json();
+        const match = (connData.contents || []).find(c => c.theirDid === senderId);
+        if (match) connectionId = match.connectionId;
+      }
+    } catch (_) { /* non-fatal */ }
+
+    const msgData = {
+      id: id || `webhook-${Date.now()}`,
+      timestamp: sentTime ? new Date(sentTime * 1000).toISOString() : new Date().toISOString(),
       direction: 'received',
-      content: message.body?.content || message.content || 'No content',
-      sender: from,
-      recipient: 'Certification Authority',
-      relayedBy: relayedBy || 'direct'
+      content: actualContent,
+      sender: senderId || '',
+      connectionId
     };
 
-    messageStorage.set(messageId, messageData);
+    if (!chatMessageStore[connectionId]) chatMessageStore[connectionId] = [];
+    // Deduplicate by id
+    if (!chatMessageStore[connectionId].find(m => m.id === msgData.id)) {
+      chatMessageStore[connectionId].push(msgData);
+      saveChatMessages(chatMessageStore);
+      console.log(`📥 [Webhook] BasicMessage from ${senderId?.slice(0, 40)}... stored under connection ${connectionId}`);
+    }
 
-    res.json({
-      success: true,
-      messageId: messageId,
-      status: 'received'
-    });
-  } catch (error) {
-    console.error('Error receiving message:', error);
-    res.status(500).json({
-      error: 'Failed to receive message',
-      details: error.message
-    });
+    // Dispatch to command service (non-blocking; errors are caught internally)
+    didCommCmdService.handleIncomingMessage(senderId, actualContent).catch(e =>
+      console.error('[DIDCommCmd] handleIncomingMessage error:', e.message)
+    );
   }
+
+  res.status(200).json({ received: true });
 });
 
-app.get('/api/receive-didcomm-messages', (req, res) => {
-  try {
-    // Get all received messages (messages not sent by CA)
-    const messages = Array.from(messageStorage.values())
-      .filter(msg => msg.direction === 'received')
-      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-    res.json({
-      success: true,
-      messages: messages,
-      count: messages.length
-    });
-  } catch (error) {
-    console.error('Error retrieving messages:', error);
-    res.status(500).json({
-      error: 'Failed to retrieve messages',
-      details: error.message
-    });
-  }
+app.get('/api/webhook-probe', (req, res) => {
+  res.json({ count: webhookProbeLog.length, entries: webhookProbeLog.slice(-20) });
 });
 
-// Get all DIDComm messages (both sent and received)
+// ── DIDComm Messaging endpoints ───────────────────────────────────────────────
+// Wallet→CA: Cloud Agent receives BasicMessage, fires webhook → POST /api/webhook-probe
+// CA→Wallet: POST /api/send-didcomm-message → Cloud Agent POST /connections/{id}/basic-messages
+
+// Get DIDComm chat messages for a specific connection (scoped by connectionId)
 app.get('/api/didcomm-messages', (req, res) => {
   try {
-    // Get all messages sorted by timestamp
-    const messages = Array.from(messageStorage.values())
+    const { connectionId } = req.query;
+    if (!connectionId) {
+      return res.status(400).json({ error: 'connectionId query parameter is required' });
+    }
+    const messages = (chatMessageStore[connectionId] || [])
+      .slice()
       .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-    res.json({
-      success: true,
-      messages: messages,
-      count: messages.length
-    });
+    res.json({ success: true, messages, count: messages.length, connectionId });
   } catch (error) {
-    console.error('Error retrieving all messages:', error);
-    res.status(500).json({
-      error: 'Failed to retrieve messages',
-      details: error.message
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Send DIDComm message (for /realperson page)
+// Send DIDComm BasicMessage from CA to wallet via mediator
 app.post('/api/send-didcomm-message', async (req, res) => {
   try {
-    const { connectionId, message, recipient } = req.body;
+    const { connectionId, content } = req.body;
+    if (!connectionId || !content) {
+      return res.status(400).json({ error: 'connectionId and content are required' });
+    }
 
-    console.log(`📤 CA sending DIDComm message to ${recipient}:`, message.body.content);
+    // Delegate to Cloud Agent's built-in DIDComm stack via new sendBasicMessage endpoint
+    const agentResp = await fetch(`${CLOUD_AGENT_URL}/connections/${connectionId}/basic-messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
+      body: JSON.stringify({ content })
+    });
+    if (!agentResp.ok) {
+      const errText = await agentResp.text().catch(() => '');
+      return res.status(agentResp.status).json({ error: `Cloud Agent sendBasicMessage failed: ${errText.slice(0, 200)}` });
+    }
+    const agentResult = await agentResp.json();
+    const messageId = agentResult.id || `ca-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 
-    // Store message locally for CA
-    const messageId = message.id;
-    const messageData = {
+    console.log(`📤 [DIDComm] Sent BasicMessage via Cloud Agent to connection ${connectionId}, msgId=${messageId}`);
+
+    const msgData = {
       id: messageId,
       timestamp: new Date().toISOString(),
       direction: 'sent',
-      content: message.body.content,
+      content,
       sender: 'Certification Authority',
-      recipient: recipient,
-      connectionId: connectionId
+      connectionId
     };
+    if (!chatMessageStore[connectionId]) chatMessageStore[connectionId] = [];
+    chatMessageStore[connectionId].push(msgData);
+    saveChatMessages(chatMessageStore);
 
-    messageStorage.set(messageId, messageData);
-
-    // Forward to Alice's wallet for delivery (simulate DIDComm relay)
-    try {
-      await fetch('http://localhost:3010/api/receive-didcomm-message', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'origin': 'certification-authority'
-        },
-        body: JSON.stringify({
-          from: 'Certification Authority',
-          to: recipient,
-          message: message,
-          relayedBy: 'certification-authority'
-        })
-      });
-    } catch (forwardError) {
-      console.log('⚠️ Could not forward to Alice (Alice wallet might not be running)');
-    }
-
-    res.json({
-      success: true,
-      messageId: messageId,
-      status: 'sent',
-      timestamp: messageData.timestamp
-    });
+    console.log(`✅ [DIDComm] Message ${messageId} delivered`);
+    res.json({ success: true, messageId, status: 'sent' });
   } catch (error) {
-    console.error('Error sending message:', error);
-    res.status(500).json({
-      error: 'Failed to send message',
-      details: error.message
-    });
+    console.error('[DIDComm] Error sending message:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
+
 
 // API endpoint to get pending credential requests (waiting for admin approval)
 app.get('/api/credentials/pending', async (req, res) => {
@@ -7327,6 +7745,51 @@ app.post('/api/credentials/revoke/:recordId', async (req, res) => {
   }
 });
 
+// Update RealPerson VC: photo-only update via in-place DID document mutation (no re-issuance)
+app.post('/api/credentials/update-realperson', async (req, res) => {
+  try {
+    const { uniqueId, newPhoto } = req.body;
+    if (!uniqueId) return res.status(400).json({ success: false, error: 'uniqueId is required' });
+    if (!newPhoto) return res.status(400).json({ success: false, error: 'newPhoto is required' });
+
+    const mapping = global.userConnectionMappings.get(uniqueId);
+    if (!mapping) return res.status(404).json({ success: false, error: `No user mapping found for uniqueId: ${uniqueId}` });
+
+    const existingPhotoDID = photoDIDs[uniqueId];
+    if (!existingPhotoDID) return res.status(400).json({ success: false, error: 'No photo DID exists for this user — photo was not included in the original credential' });
+
+    console.log(`📸 [UPDATE] Updating photo for ${uniqueId} (in-place DID mutation)`);
+    const base64 = newPhoto.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64, 'base64');
+    const iagonFileId = await uploadPhotoToIagon(buffer, `photo-${uniqueId}-${Date.now()}.jpg`);
+    const proxyUrl = `${PUBLIC_BASE_URL}/photo-proxy/${iagonFileId}`;
+
+    const patchResp = await fetch(`${CLOUD_AGENT_URL}/did-registrar/dids/${encodeURIComponent(existingPhotoDID.photoDID)}/updates`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
+      body: JSON.stringify({
+        actions: [{
+          actionType: 'UPDATE_SERVICE',
+          updateService: { id: 'photo', type: 'LinkedPhoto', serviceEndpoint: proxyUrl }
+        }]
+      })
+    });
+    if (!patchResp.ok) throw new Error(`DID update failed: ${await patchResp.text()}`);
+
+    existingPhotoDID.iagonFileId = iagonFileId;
+    existingPhotoDID.proxyUrl = proxyUrl;
+    existingPhotoDID.updatedAt = new Date().toISOString();
+    savePhotoDIDs();
+    console.log(`✅ [UPDATE] Photo updated for ${uniqueId}: ${iagonFileId}`);
+
+    res.json({ success: true, action: 'photo-updated', message: 'Photo updated in place — no re-issuance needed' });
+
+  } catch (error) {
+    console.error('❌ [UPDATE] Error updating RealPerson photo:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // API endpoint to get detailed information about a credential record
 app.get('/api/credentials/details/:recordId', async (req, res) => {
   try {
@@ -7465,7 +7928,168 @@ app.get('/api/proxy-statuslist', async (req, res) => {
   }
 });
 
-// Serve main page
+// ── Service Access (service-access/1.0) ───────────────────────────────────────
+//
+// Migrated from the standalone lib/DIDCommCommandService.js onto the shared
+// service-access-didcomm package (see packages/service-access-didcomm/PROTOCOL.md and
+// ../company-admin-portal/server.js, which uses the same library for its own targets).
+//
+// SECURITY IMPROVEMENT vs. the prior implementation: the old DIDCommCommandService trusted
+// Cloud Agent's `PresentationVerified` status alone — it never independently verified the
+// VC-JWT signature or checked the issuer DID against a trust list post-hoc (the `trustIssuers`
+// array only constrains the *request* sent to the Cloud Agent, which — per this file's own
+// documented finding — doesn't reliably survive to the actual wire message). The shared library
+// now does real ES256K signature verification (resolving the issuer's DID) plus an explicit,
+// fail-closed trust-registry check on every grant, for defense in depth.
+
+// CA is both issuer and verifier for its own credentials, so trust registry entries are this
+// CA's own currently-registered issuing DIDs (refreshed periodically — DIDs can rotate), each
+// trusted for both VC types it issues. Reproduces the same "self-trust" model as
+// getTrustedIssuerDIDs() previously provided to the proof *request* only.
+let caTrustRegistry = createTrustRegistry([]);
+async function refreshCaTrustRegistry() {
+  try {
+    const issuingDIDs = await getTrustedIssuerDIDs();
+    caTrustRegistry = createTrustRegistry(
+      issuingDIDs.map(did => ({ did, vcTypes: ['RealPerson', 'SecurityClearanceGrant'] }))
+    );
+  } catch (e) {
+    console.error('[ServiceAccess] Failed to refresh CA trust registry:', e.message);
+  }
+}
+refreshCaTrustRegistry();
+setInterval(refreshCaTrustRegistry, 60 * 1000).unref();
+
+const didCommCmdService = new ServiceAccessService({
+  cloudAgentUrl: CLOUD_AGENT_URL,
+  apiKey:        API_KEY,
+  publicBaseUrl: PUBLIC_BASE_URL,
+  accessPath:    '/api/access',
+  verifiedEventAdapter: 'polling', // no PresentationVerified webhook wired for this Cloud Agent yet
+
+  async resolveConnection(fromDid) {
+    return resolveDIDToConnectionId(fromDid);
+  },
+
+  resolveIssuerDID: createIssuerResolver({ cloudAgentUrl: CLOUD_AGENT_URL, apiKey: API_KEY }),
+  // `trustRegistry` is dereferenced fresh on every call, so reassigning `caTrustRegistry` above
+  // is picked up without needing to reconstruct this service.
+  get trustRegistry() { return caTrustRegistry; },
+
+  capabilities: {
+    'portal': {
+      label: 'CA Dashboard', icon: '🏛️', mode: 'redirect', redirectPath: '/ca/dashboard',
+      trustedIssuerVcType: 'RealPerson',
+      proofSpec: {
+        proofs: [{
+          // RealPerson v4.0.0 (the photo-carrying version) — the Cloud Agent enforces this
+          // schemaId as a POST-HOC check against whatever VC the wallet actually presents
+          // (verified live: a v3.0.0-requested schemaId against a v4.0.0-issued credential
+          // produced status PresentationVerificationFailed, matching the Identus error-
+          // handling ADR's documented "V6 Schema Mismatch" scenario). v4.0.0 is what
+          // /api/credentials/issue-realperson actually issues whenever a photo is supplied.
+          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/4755a426-b80b-3f6a-b9ea-ca202bd7ce16',
+          trustIssuers: [] // filled in dynamically at request time from the trust registry
+        }],
+        goalCode: 'schema:RealPerson',
+        goal:     'Please provide your RealPerson Identity Credential for portal access',
+        claims:   { firstName: {}, lastName: {}, uniqueId: {}, dateOfBirth: {}, gender: {} },
+        // Wallet-side schema hint — see PROTOCOL.md / ServiceAccessService._handleAccessRequest.
+        domain:   'realperson.identuslabel.cz'
+      }
+    },
+    'login': {
+      label: 'CA Dashboard', icon: '🔑', mode: 'redirect', redirectPath: '/ca/dashboard',
+      trustedIssuerVcType: 'RealPerson',
+      proofSpec: {
+        proofs: [{
+          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/4755a426-b80b-3f6a-b9ea-ca202bd7ce16',
+          trustIssuers: []
+        }],
+        goalCode: 'schema:RealPerson',
+        goal:     'Please provide your RealPerson Identity Credential for login',
+        claims:   { firstName: {}, lastName: {}, uniqueId: {}, dateOfBirth: {}, gender: {} },
+        domain:   'realperson.identuslabel.cz'
+      }
+    },
+    'security-clearance': {
+      label: 'Security Clearance', icon: '🔐', mode: 'redirect', redirectPath: '/ca/security-clearance',
+      trustedIssuerVcType: 'SecurityClearanceGrant',
+      proofSpec: {
+        // SecurityClearanceLevel v5.0.0 — the current preferred issuance version (see the
+        // ['5.0.0','4.0.0','3.0.0'] preference order used when issuing). A stale version
+        // GUID here causes the Cloud Agent's post-hoc schema check to reject a real,
+        // correctly-typed credential as PresentationVerificationFailed (verified live).
+        proofs: [{
+          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/78f56570-1405-3847-9e5c-87f582722711',
+          trustIssuers: []
+        }],
+        goalCode: 'schema:SecurityClearance',
+        goal:     'Please provide your Security Clearance Credential to access the dashboard',
+        claims:   { clearanceLevel: {}, issuedDate: {}, expiryDate: {} },
+        domain:   'clearance.identuslabel.cz'
+      }
+    }
+  }
+});
+
+// One-time access token redemption endpoint.
+// dashboard.html reads the session from ?session=<id> URL param and fetches content
+// from /api/dashboard/content?session=<id>. We redirect there directly after registering
+// the session server-side — no sessionStorage needed.
+app.get('/api/access', (req, res) => {
+  const { token } = req.query;
+  if (!token) {
+    return res.status(400).send(accessErrorPage('Missing token parameter.'));
+  }
+
+  const entry = didCommCmdService.getToken(token);
+  if (!entry) {
+    return res.status(404).send(accessErrorPage('Token not found. It may have expired or never existed.'));
+  }
+  if (entry.used) {
+    return res.status(410).send(accessErrorPage('This access link has already been used. Request a new one from your wallet.'));
+  }
+  if (Date.now() > entry.expiresAt) {
+    return res.status(410).send(accessErrorPage('This access link has expired. Request a new one from your wallet.'));
+  }
+
+  // Mark as used (single-use enforcement)
+  entry.used = true;
+
+  // Register server-side session in the format /api/dashboard/content expects
+  const sessionId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  global.userSessions = global.userSessions || new Map();
+  global.userSessions.set(sessionId, {
+    sessionId,
+    authenticated:   true,
+    state:           'Authenticated',
+    connectionId:    entry.connectionId,
+    userData:        entry.userClaims,
+    personalInfo:    entry.userClaims,
+    loginTime:       now,
+    authenticatedAt: now,
+    authMethod:      'DIDComm-AccessToken',
+    createdAt:       now
+  });
+
+  console.log(`[DIDCommAccess] Token redeemed: ${token.slice(0, 12)}... → session ${sessionId.slice(0, 12)}... → ${entry.redirectPath}`);
+
+  // dashboard.html reads ?session=<id> from URL — redirect directly, no bridge needed
+  const targetUrl = `${entry.redirectPath}?session=${encodeURIComponent(sessionId)}`;
+  res.redirect(302, targetUrl);
+});
+
+function accessErrorPage(msg) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Access Error</title>
+<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a;color:#e2e8f0}
+.box{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:2rem;max-width:480px;text-align:center}
+h2{color:#f87171;margin-top:0}p{color:#94a3b8;margin-bottom:0}</style></head>
+<body><div class="box"><h2>⛔ Access Denied</h2><p>${msg}</p></div></body></html>`;
+}
+
+// ── Serve main page ───────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -7480,6 +8104,12 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`💼 Wallet ID: ${WALLET_ID}`);
   console.log(`🏢 Entity ID: ${ENTITY_ID}`);
   console.log('=' .repeat(50));
+
+  // Register DIDComm command service webhook with Cloud Agent (idempotent)
+  const webhookUrl = `${PUBLIC_BASE_URL}/api/webhook-probe`;
+  didCommCmdService.registerWebhook(webhookUrl).catch(e =>
+    console.error('[DIDCommCmd] Webhook registration error on startup:', e.message)
+  );
 });
 
 // Graceful shutdown

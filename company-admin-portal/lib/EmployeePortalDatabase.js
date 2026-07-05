@@ -127,14 +127,31 @@ class EmployeePortalDatabase {
         employee_role_vc_issued,
         cis_training_vc_issued,
         service_config_vc_issued,
+        personal_wallet_connection_id,
         is_active,
         created_at,
-        updated_at
+        updated_at,
+        metadata
       FROM employee_portal_accounts
       WHERE email = $1 AND deleted_at IS NULL
     `;
 
     const result = await this.db.query(query, [email]);
+    return result.rows[0] || null;
+  }
+
+  /**
+   * Get employee by employeeId (email prefix, e.g. "alice" from "alice@techcorp.com")
+   * Returns the first match — employeeId is expected to be unique within a tenant.
+   */
+  async getEmployeeByEmployeeId(employeeId) {
+    const query = `
+      SELECT id, email, employee_id
+      FROM employee_portal_accounts
+      WHERE employee_id = $1 AND deleted_at IS NULL AND is_active = true
+      LIMIT 1
+    `;
+    const result = await this.db.query(query, [employeeId]);
     return result.rows[0] || null;
   }
 
@@ -158,6 +175,40 @@ class EmployeePortalDatabase {
 
     const result = await this.db.query(query, [prismDid]);
     return result.rows[0] || null;
+  }
+
+  async getEmployeeByWalletId(walletId) {
+    const query = `
+      SELECT id, email, full_name, department, wallet_id, entity_id, prism_did, techcorp_connection_id
+      FROM employee_portal_accounts
+      WHERE wallet_id = $1 AND deleted_at IS NULL AND is_active = true
+    `;
+    const result = await this.db.query(query, [walletId]);
+    return result.rows[0] || null;
+  }
+
+  async getAllActiveEmployees() {
+    const query = `
+      SELECT email, full_name, department, wallet_id, prism_did
+      FROM employee_portal_accounts
+      WHERE deleted_at IS NULL AND is_active = true
+      ORDER BY full_name ASC
+    `;
+    const result = await this.db.query(query);
+    return result.rows;
+  }
+
+  async getEmployeeConnectionMap() {
+    const query = `
+      SELECT techcorp_connection_id, full_name, email, department
+      FROM employee_portal_accounts
+      WHERE deleted_at IS NULL AND is_active = true
+        AND techcorp_connection_id IS NOT NULL
+    `;
+    const rows = (await this.db.query(query)).rows;
+    const map = new Map();
+    for (const row of rows) map.set(row.techcorp_connection_id, row);
+    return map;
   }
 
   /**
@@ -217,6 +268,30 @@ class EmployeePortalDatabase {
     const prismDidShort = prismDid.split(':').pop().substring(0, 8);
     const result = await this.db.query(query, [walletId, prismDid, prismDidShort]);
     return result.rows[0];
+  }
+
+  /**
+   * Persist RealPerson identity data (uniqueId, photo) into the metadata column.
+   * Called after the personal onboarding proof so login can resolve the photo
+   * even when the EmployeeRole VC was issued without these fields.
+   */
+  async updateEmployeeRealPersonData(email, uniqueId, photoDid, realPersonCredentialStatus) {
+    const query = `
+      UPDATE employee_portal_accounts
+      SET
+        metadata = COALESCE(metadata, '{}'::jsonb) ||
+                   jsonb_build_object(
+                     'caUniqueId',                $2::text,
+                     'photoDid',                  $3::text,
+                     'realPersonCredentialStatus', $4::jsonb
+                   ),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE email = $1 AND deleted_at IS NULL
+      RETURNING id, email
+    `;
+    const csJson = realPersonCredentialStatus ? JSON.stringify(realPersonCredentialStatus) : null;
+    const result = await this.db.query(query, [email, uniqueId || null, photoDid || null, csJson]);
+    return result.rows[0] || null;
   }
 
   /**
@@ -540,6 +615,15 @@ class EmployeePortalDatabase {
     `;
 
     await this.db.query(historyQuery, [employeeId, recordId, reason]);
+  }
+
+  async savePersonalWalletConnectionId(email, connectionId) {
+    const query = `
+      UPDATE employee_portal_accounts
+      SET personal_wallet_connection_id = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE email = $2 AND deleted_at IS NULL
+    `;
+    await this.db.query(query, [connectionId, email]);
   }
 }
 

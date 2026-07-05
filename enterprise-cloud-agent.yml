@@ -11,10 +11,8 @@ version: '3.8'
 
 networks:
   identus-network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.18.0.0/16
+    external: true
+    name: root_identus-network
 
 services:
   # PostgreSQL Database - INTERNAL ONLY (NO external port)
@@ -54,7 +52,7 @@ services:
   # Cloud Agent - Enterprise Multitenancy for Internal Departments
   enterprise-cloud-agent:
     container_name: enterprise-cloud-agent
-    image: hyperledgeridentus/identus-cloud-agent:2.1.0
+    image: identuslabel/identus-cloud-agent:2.1-basicmsg
     environment:
       # SECURITY: Secure admin token (32 chars random)
       ADMIN_TOKEN: "3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu"
@@ -69,6 +67,7 @@ services:
       # Service URLs
       REST_SERVICE_URL: http://91.99.4.54:8300/cloud-agent
       DIDCOMM_SERVICE_URL: https://identuslabel.cz/enterprise/didcomm
+      WEBHOOK_URL: "https://identuslabel.cz/company-admin/api/enterprise-messages-webhook"
 
       # Database Configuration - CUSTOM USER (NOT postgres)
       POLLUX_DB_HOST: enterprise-db

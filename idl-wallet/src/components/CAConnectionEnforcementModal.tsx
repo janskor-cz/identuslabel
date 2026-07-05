@@ -19,7 +19,10 @@ import { CERTIFICATION_AUTHORITY } from '@/config/certificationAuthority';
 import { CACredentialConfirmationModal } from './CACredentialConfirmationModal';
 import { getItem, setItem, removeItem, getKeysByPattern } from '@/utils/prefixedStorage';
 import { getConnectionMetadata, saveConnectionMetadata } from '@/utils/connectionMetadata';
+import { CA_CAPABILITIES } from '@/config/serviceTrust';
 import { createLongFormPrismDID } from '@/actions';
+
+const CA_CUSTOM_BASE_URL_KEY = 'ca-custom-base-url';
 
 interface CAConnectionEnforcementModalProps {
   visible: boolean;
@@ -50,6 +53,10 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
   // Prevent concurrent connection attempts
   const [isConnecting, setIsConnecting] = useState(false);
 
+  // CA address configuration
+  const [caBaseUrl, setCaBaseUrl] = useState<string>(CERTIFICATION_AUTHORITY.baseUrl);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
   // Mediator status
   const [mediatorConfigured, setMediatorConfigured] = useState(false);
 
@@ -58,6 +65,14 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
   const [showCACredentialModal, setShowCACredentialModal] = useState(false);
   const [pendingInvitationUrl, setPendingInvitationUrl] = useState<string | null>(null);
   const [pendingInvitationData, setPendingInvitationData] = useState<any>(null);
+
+  // Load persisted CA base URL from localStorage on mount
+  useEffect(() => {
+    const stored = getItem(CA_CUSTOM_BASE_URL_KEY);
+    if (stored && typeof stored === 'string' && stored.trim()) {
+      setCaBaseUrl(stored.trim());
+    }
+  }, []);
 
   // Check mediator status
   useEffect(() => {
@@ -139,7 +154,8 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
       console.log('[CA MODAL] Fetching well-known invitation from CA...');
 
       // Include userName as query parameter
-      const baseEndpoint = CERTIFICATION_AUTHORITY.getInvitationEndpoint();
+      const effectiveBaseUrl = caBaseUrl.trim() || CERTIFICATION_AUTHORITY.baseUrl;
+      const baseEndpoint = `${effectiveBaseUrl}${CERTIFICATION_AUTHORITY.wellKnownInvitationEndpoint}`;
       const fetchUrl = userName.trim()
         ? `${baseEndpoint}?userName=${encodeURIComponent(userName.trim())}`
         : baseEndpoint;
@@ -176,9 +192,19 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
         const connectionMetadata = getConnectionMetadata(existingCAConnection.host.toString());
 
         if (connectionMetadata?.prismDid) {
-          // Already has PRISM DID, nothing to do
+          // Already has PRISM DID, nothing to do — except backfill capabilities if this
+          // connection predates the service-access/1.0 migration (GlobalGrantWatcher in
+          // _app.tsx requires it to trust an incoming grant and auto-open the CA portal iframe).
           console.log('[CA MODAL] Existing connection already has PRISM DID:',
               connectionMetadata.prismDid.substring(0, 50) + '...');
+          if (!connectionMetadata.capabilities?.length) {
+            saveConnectionMetadata(existingCAConnection.host.toString(), {
+              ...connectionMetadata,
+              isCAConnection: true,
+              capabilities: CA_CAPABILITIES
+            });
+            console.log('[CA MODAL] Backfilled capabilities for existing connection');
+          }
           setSuccess(true);
           setIsConnecting(false);
           return;
@@ -225,7 +251,9 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
           saveConnectionMetadata(existingCAConnection.host.toString(), {
             ...connectionMetadata,
             walletType: 'local',
-            prismDid: newPrismDID
+            prismDid: newPrismDID,
+            isCAConnection: true,
+            capabilities: CA_CAPABILITIES
           });
         }
 
@@ -347,7 +375,9 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
           if (newPrismDID) {
             saveConnectionMetadata(newConnection.host.toString(), {
               walletType: 'local',
-              prismDid: newPrismDID
+              prismDid: newPrismDID,
+              isCAConnection: true,
+              capabilities: CA_CAPABILITIES
             });
             console.log('[CA MODAL] PRISM DID associated with connection');
           }
@@ -487,7 +517,9 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
           if (prismDID) {
             saveConnectionMetadata(newConnection.host.toString(), {
               walletType: 'local',
-              prismDid: prismDID
+              prismDid: prismDID,
+              isCAConnection: true,
+              capabilities: CA_CAPABILITIES
             });
           }
         }
@@ -593,6 +625,49 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
             <p className="text-xs text-slate-400 mt-2">
               This name will be used as the alias for your PRISM DID created during connection.
             </p>
+          </div>
+
+          {/* Advanced: CA Address */}
+          <div className="mb-4">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(v => !v)}
+              className="w-full flex items-center justify-between px-4 py-3 bg-slate-800/50 border border-slate-700/50 rounded-xl text-sm text-slate-300 hover:text-white hover:border-slate-600 transition-all"
+            >
+              <span className="flex items-center space-x-2">
+                <span>⚙️</span>
+                <span>Advanced: Change CA address</span>
+              </span>
+              <span className="text-slate-500">{showAdvanced ? '▲' : '▼'}</span>
+            </button>
+            {showAdvanced && (
+              <div className="mt-2 p-4 bg-slate-800/50 border border-slate-700/50 rounded-xl">
+                <label htmlFor="caBaseUrl" className="block text-sm font-medium text-slate-300 mb-2">
+                  CA Base URL
+                </label>
+                <input
+                  type="url"
+                  id="caBaseUrl"
+                  value={caBaseUrl}
+                  onChange={(e) => setCaBaseUrl(e.target.value)}
+                  onBlur={() => {
+                    const trimmed = caBaseUrl.trim();
+                    if (trimmed) {
+                      setItem(CA_CUSTOM_BASE_URL_KEY, trimmed);
+                    } else {
+                      removeItem(CA_CUSTOM_BASE_URL_KEY);
+                      setCaBaseUrl(CERTIFICATION_AUTHORITY.baseUrl);
+                    }
+                  }}
+                  placeholder={CERTIFICATION_AUTHORITY.baseUrl}
+                  className="w-full px-4 py-3 text-sm bg-slate-900/70 border border-slate-600/50 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={connecting || creatingPrismDID || success}
+                />
+                <p className="text-xs text-slate-500 mt-2">
+                  Default: {CERTIFICATION_AUTHORITY.baseUrl}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Error Display */}

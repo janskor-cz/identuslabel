@@ -156,6 +156,7 @@ const app = {
         await this.loadEmployees();
         await loadCompanyCredentials(); // Load credentials after authentication
         this.loadAccessLogs();
+        this.loadAdminChat();
     },
 
     /**
@@ -230,38 +231,99 @@ const app = {
                     </td>
                 </tr>
             `;
+            this._stopAutoRefresh();
             return;
         }
+
+        let hasPending = false;
 
         tbody.innerHTML = this.employees.map(employee => {
             const statusClass = this.getStatusClass(employee.state);
             const createdDate = new Date(employee.createdAt).toLocaleDateString();
 
+            // Show real name once proof is done; otherwise show role/dept hint
+            let displayName, subtitle;
+            if (employee.employeeName) {
+                displayName = employee.employeeName;
+                subtitle = employee.employeeEmail || '';
+            } else {
+                const parts = [employee.employeeRole, employee.employeeDept].filter(Boolean);
+                displayName = parts.length ? parts.join(' — ') : (employee.theirLabel || 'Unknown Employee');
+                subtitle = '';
+            }
+
+            const proofBadge = this._proofStateBadge(employee.proofState, employee.proofError, employee.state);
+            const isConnectionActive = employee.state === 'ConnectionResponseSent' || employee.state === 'Active';
+            if ((!employee.proofState && !isConnectionActive) || employee.proofState === 'sending' || employee.proofState === 'requested' || employee.proofState === 'issuing') hasPending = true;
+
             return `
                 <tr>
                     <td>
-                        <strong>${employee.label || 'Unnamed Employee'}</strong>
+                        <strong>${displayName}</strong>
+                        ${subtitle ? `<br><small class="text-muted">${subtitle}</small>` : ''}
                     </td>
                     <td>
                         <code class="connection-id">${employee.connectionId.substring(0, 12)}...</code>
                     </td>
                     <td>
-                        <span class="status-badge ${statusClass}">${employee.state}</span>
+                        <span class="status-badge ${statusClass}">${this.getStatusLabel(employee.state)}</span>
+                        ${proofBadge}
                     </td>
                     <td>${createdDate}</td>
                     <td class="actions">
-                        <button class="btn btn-sm btn-secondary"
-                                onclick="app.issueCredential('${employee.connectionId}', '${employee.label}')">
-                            Issue Credential
-                        </button>
                         <button class="btn btn-sm btn-danger"
-                                onclick="app.removeEmployee('${employee.connectionId}', '${employee.label}')">
+                                onclick="app.removeEmployee('${employee.connectionId}', '${(employee.employeeName || displayName).replace(/'/g, "\\'")}')">
                             Remove
                         </button>
                     </td>
                 </tr>
             `;
         }).join('');
+
+        if (hasPending) {
+            this._startAutoRefresh();
+        } else {
+            this._stopAutoRefresh();
+        }
+    },
+
+    /**
+     * Return HTML badge for proof flow state.
+     */
+    _proofStateBadge(proofState, proofError, connectionState) {
+        if (!proofState) {
+            const isActive = connectionState === 'ConnectionResponseSent' || connectionState === 'Active';
+            if (isActive) return '';
+            return '<br><small class="text-muted">Awaiting connection...</small>';
+        }
+        if (proofState === 'sending' || proofState === 'requested') {
+            return '<br><small class="text-warning"><span class="spinner-border spinner-border-sm"></span> Awaiting identity proof...</small>';
+        }
+        if (proofState === 'issuing') {
+            return '<br><small class="text-info"><span class="spinner-border spinner-border-sm"></span> Issuing credentials...</small>';
+        }
+        if (proofState === 'complete') {
+            return '<br><small class="text-success">✅ Credentials issued</small>';
+        }
+        if (proofState === 'failed') {
+            return `<br><small class="text-danger">❌ ${proofError || 'Proof failed'}</small>`;
+        }
+        return '';
+    },
+
+    /**
+     * Auto-refresh connections while proof flows are in progress.
+     */
+    _startAutoRefresh() {
+        if (this._autoRefreshTimer) return;
+        this._autoRefreshTimer = setInterval(() => this.loadEmployees(), 4000);
+    },
+
+    _stopAutoRefresh() {
+        if (this._autoRefreshTimer) {
+            clearInterval(this._autoRefreshTimer);
+            this._autoRefreshTimer = null;
+        }
     },
 
     /**
@@ -292,6 +354,16 @@ const app = {
             'Active': 'status-active'
         };
         return stateMap[state] || 'status-default';
+    },
+
+    getStatusLabel(state) {
+        const labelMap = {
+            'InvitationGenerated': 'Invitation Sent',
+            'ConnectionRequested': 'Connecting…',
+            'ConnectionResponseSent': 'Connected',
+            'Active': 'Connected'
+        };
+        return labelMap[state] || state;
     },
 
     /**
@@ -325,25 +397,23 @@ const app = {
         event.preventDefault();
 
         const formData = new FormData(event.target);
-        const employeeName = formData.get('employeeName');
         const role = formData.get('role');
         const department = formData.get('department');
 
-        console.log('[INVITE] Creating invitation for:', employeeName);
+        console.log('[INVITE] Creating invitation, role:', role, 'dept:', department);
 
         try {
             const response = await fetch('/company-admin/api/company/invite-employee', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ employeeName, role, department })
+                body: JSON.stringify({ role, department })
             });
 
             const data = await response.json();
 
             if (data.success) {
-                // Show invitation result
-                this.showInvitationResult(employeeName, data.invitation.invitationUrl);
-                this.showNotification(`Invitation created for ${employeeName}`, 'success');
+                this.showInvitationResult(data.invitation.invitationUrl);
+                this.showNotification('Invitation created', 'success');
             } else {
                 this.showNotification(data.error || 'Failed to create invitation', 'error');
             }
@@ -357,13 +427,10 @@ const app = {
      * Show invitation result with QR code
      * Uses URL shortener for long DIDComm invitation URLs
      */
-    async showInvitationResult(employeeName, invitationUrl) {
+    async showInvitationResult(invitationUrl) {
         // Hide form, show result
         document.getElementById('invite-form').classList.add('hidden');
         document.getElementById('invitation-result').classList.remove('hidden');
-
-        // Update employee name
-        document.getElementById('invited-employee-name').textContent = employeeName;
 
         // Set invitation URL (full URL for copying)
         document.getElementById('invitation-url').value = invitationUrl;
@@ -495,143 +562,6 @@ const app = {
         });
     },
 
-    /**
-     * Issue Service Configuration credential to employee
-     */
-    async issueCredential(connectionId, employeeName) {
-        console.log('[SERVICE-CONFIG] Issuing Service Configuration VC to:', connectionId);
-
-        // Extract name, role, department from label as fallback
-        let name = employeeName;
-        let role = '';
-        let department = '';
-
-        const roleMatch = employeeName.match(/^([^(]+)\(([^)]+)\)(.*)$/);
-        if (roleMatch) {
-            name = roleMatch[1].trim();
-            role = roleMatch[2].trim();
-            const remainder = roleMatch[3].trim();
-            if (remainder.startsWith('- ')) department = remainder.substring(2).trim();
-        } else {
-            const deptMatch = employeeName.match(/^([^-]+)-(.+)$/);
-            if (deptMatch) { name = deptMatch[1].trim(); department = deptMatch[2].trim(); }
-        }
-
-        // Try to fetch stored invitation data to pre-fill email
-        let storedEmail = '';
-        let storedDept = department;
-        try {
-            const inv = await fetch(`/company-admin/api/company/connections/${connectionId}/invitation-data`, { credentials: 'include' });
-            const invData = await inv.json();
-            if (invData.success && invData.data) {
-                storedEmail = invData.data.email || '';
-                name = invData.data.name || name;
-                storedDept = invData.data.department || department;
-            }
-        } catch (e) { /* non-fatal, fall through */ }
-
-        const emailReadOnly = storedEmail ? 'readonly' : '';
-        const emailHint = storedEmail
-            ? '<small class="form-text text-success">✓ Auto-generated from invitation</small>'
-            : '<small class="form-text text-muted">Required for Enterprise Cloud Agent access</small>';
-
-        // Show modal
-        const modal = document.createElement('div');
-        modal.className = 'modal fade show';
-        modal.style.display = 'block';
-        modal.style.backgroundColor = 'rgba(0,0,0,0.5)';
-        modal.innerHTML = `
-            <div class="modal-dialog">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h5 class="modal-title">📋 Issue Service Configuration VC</h5>
-                        <button type="button" class="close" onclick="this.closest('.modal').remove()">
-                            <span>&times;</span>
-                        </button>
-                    </div>
-                    <div class="modal-body">
-                        <p><strong>Connection:</strong> ${connectionId}</p>
-                        <hr>
-                        <div class="form-group">
-                            <label>Employee Name *</label>
-                            <input type="text" class="form-control" id="employeeName" value="${name}" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Email Address *</label>
-                            <input type="email" class="form-control" id="employeeEmail" value="${storedEmail}" placeholder="employee@company.test" ${emailReadOnly} required>
-                            ${emailHint}
-                        </div>
-                        <div class="alert alert-info">
-                            <strong>ℹ️ Service Configuration VC</strong><br>
-                            This credential will grant the employee access to:
-                            <ul class="mb-0 mt-2">
-                                <li>Enterprise Cloud Agent (port 8300)</li>
-                                <li>Department-specific API access</li>
-                                <li>Employee portal accessible from wallet</li>
-                            </ul>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" onclick="this.closest('.modal').remove()">Cancel</button>
-                        <button type="button" class="btn btn-primary" id="confirmIssueBtn">Issue Credential</button>
-                    </div>
-                </div>
-            </div>
-        `;
-
-        document.body.appendChild(modal);
-
-        // Handle confirm button
-        document.getElementById('confirmIssueBtn').onclick = async () => {
-            const employeeNameInput = document.getElementById('employeeName').value.trim();
-            const employeeEmail = document.getElementById('employeeEmail').value.trim();
-
-            if (!employeeNameInput || !employeeEmail) {
-                this.showNotification('Name and Email are required', 'error');
-                return;
-            }
-
-            // Disable button and show loading
-            const btn = document.getElementById('confirmIssueBtn');
-            btn.disabled = true;
-            btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Issuing...';
-
-            try {
-                const response = await fetch(`/company-admin/api/company/connections/${connectionId}/auto-issue-config`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'include',  // Include session cookie
-                    body: JSON.stringify({
-                        name: employeeNameInput,
-                        email: employeeEmail
-                    })
-                });
-
-                const data = await response.json();
-
-                console.log('[SERVICE-CONFIG] Server response:', data);
-
-                if (data.success) {
-                    this.showNotification(`✅ Service Configuration VC issued to ${employeeNameInput}`, 'success');
-                    console.log('[SERVICE-CONFIG] Credential issued:', data.data);
-                    modal.remove();
-
-                    // Reload employees to show updated state
-                    await this.loadEmployees();
-                } else {
-                    console.error('[SERVICE-CONFIG] Error response:', data);
-                    this.showNotification(data.error || 'Failed to issue credential', 'error');
-                    btn.disabled = false;
-                    btn.innerHTML = 'Issue Credential';
-                }
-            } catch (error) {
-                console.error('[SERVICE-CONFIG] Error:', error);
-                this.showNotification('Failed to issue credential: ' + error.message, 'error');
-                btn.disabled = false;
-                btn.innerHTML = 'Issue Credential';
-            }
-        };
-    },
 
     /**
      * Remove employee connection
@@ -1102,6 +1032,147 @@ function copyToClipboard(elementId) {
         showNotification('Copied to clipboard', 'success');
     }
 }
+
+// ─── Admin Chat ──────────────────────────────────────────────────────────────
+
+Object.assign(app, {
+    _adminChatSelectedConnectionId: null,
+    _adminChatSelectedName: null,
+    _adminChatLastSeen: {}, // connectionId → timestamp
+    _adminChatPollTimer: null,
+    _adminChatEmployees: [],
+
+    async loadAdminChat() {
+        try {
+            const res = await fetch('/company-admin/api/admin/employee-index');
+            const data = await res.json();
+            if (!data.success) return;
+            this._adminChatEmployees = data.employees || [];
+            this._renderAdminChatSidebar();
+        } catch (e) {
+            console.warn('[AdminChat] loadAdminChat error:', e.message);
+        }
+    },
+
+    _renderAdminChatSidebar() {
+        const list = document.getElementById('admin-chat-employee-list');
+        if (!list) return;
+        if (this._adminChatEmployees.length === 0) {
+            list.innerHTML = '<p style="color:#94a3b8; font-size:13px;">No active employee connections yet.</p>';
+            return;
+        }
+        list.innerHTML = this._adminChatEmployees.map(emp => {
+            const isSelected = this._adminChatSelectedConnectionId === emp.connectionId;
+            const unread = emp.unreadCount || 0;
+            return `<div onclick="app.selectAdminChatEmployee('${escapeHtml(emp.connectionId)}','${escapeHtml(emp.name || emp.label)}','${escapeHtml(emp.email||'')}') "
+                style="padding:10px 12px; border-radius:8px; cursor:pointer; margin-bottom:4px;
+                    background:${isSelected ? 'rgba(6,182,212,0.15)' : 'transparent'};
+                    border-left:${isSelected ? '3px solid #06b6d4' : '3px solid transparent'};
+                    transition:background 0.15s;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <div style="font-weight:600; color:#e2e8f0; font-size:13px;">${escapeHtml(emp.name || emp.label || emp.connectionId.slice(0,8))}</div>
+                        ${emp.email ? `<div style="font-size:11px; color:#64748b;">${escapeHtml(emp.email)}</div>` : ''}
+                    </div>
+                    ${unread > 0 ? `<span style="background:#0ea5e9; color:#fff; border-radius:99px; font-size:11px; padding:1px 7px;">${unread}</span>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    },
+
+    selectAdminChatEmployee(connectionId, name, email) {
+        this._adminChatSelectedConnectionId = connectionId;
+        this._adminChatSelectedName = name;
+        this._renderAdminChatSidebar();
+
+        // Show header + input
+        const header = document.getElementById('admin-chat-header');
+        if (header) { header.style.display = 'block'; }
+        document.getElementById('admin-chat-header-name').textContent = name || connectionId.slice(0,8);
+        document.getElementById('admin-chat-header-email').textContent = email || '';
+        const inputArea = document.getElementById('admin-chat-input-area');
+        if (inputArea) inputArea.style.display = 'flex';
+
+        // Clear messages
+        const msgBox = document.getElementById('admin-chat-messages');
+        if (msgBox) msgBox.innerHTML = '<p style="color:#64748b; text-align:center; margin:auto; font-size:13px;">Loading…</p>';
+
+        // Load messages
+        this._pollAdminChat();
+
+        // Start poll timer
+        if (this._adminChatPollTimer) clearInterval(this._adminChatPollTimer);
+        this._adminChatPollTimer = setInterval(() => this._pollAdminChat(), 3000);
+    },
+
+    async _pollAdminChat() {
+        const connId = this._adminChatSelectedConnectionId;
+        if (!connId) return;
+        const since = this._adminChatLastSeen[connId] || 0;
+        try {
+            const res = await fetch(`/company-admin/api/admin/messages/${encodeURIComponent(connId)}?since=${since}`);
+            const data = await res.json();
+            if (!data.success) return;
+            const msgs = data.messages || [];
+            if (msgs.length === 0 && since === 0) {
+                document.getElementById('admin-chat-messages').innerHTML =
+                    '<p style="color:#64748b; text-align:center; margin:auto; font-size:13px;">No messages yet. Send the first message!</p>';
+                return;
+            }
+            if (msgs.length > 0) {
+                this._adminChatLastSeen[connId] = Date.now();
+                this._renderAdminChatMessages(connId, msgs, since === 0);
+            }
+        } catch (e) {
+            console.warn('[AdminChat] poll error:', e.message);
+        }
+    },
+
+    _renderAdminChatMessages(connId, msgs, replace) {
+        const msgBox = document.getElementById('admin-chat-messages');
+        if (!msgBox) return;
+        const html = msgs.map(m => {
+            const isAdmin = m.sentByAdmin;
+            const time = new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            return `<div style="display:flex; flex-direction:column; align-items:${isAdmin ? 'flex-end' : 'flex-start'}; gap:2px;">
+                <div style="max-width:70%; padding:8px 12px; border-radius:12px;
+                    background:${isAdmin ? 'linear-gradient(135deg,#0ea5e9,#6366f1)' : '#1e293b'};
+                    color:#e2e8f0; font-size:13px; line-height:1.5;">
+                    ${escapeHtml(m.content)}
+                </div>
+                <div style="font-size:10px; color:#64748b;">${isAdmin ? 'You' : escapeHtml(m.fromLabel || m.from)} · ${time}</div>
+            </div>`;
+        }).join('');
+        if (replace) {
+            msgBox.innerHTML = html;
+        } else {
+            msgBox.insertAdjacentHTML('beforeend', html);
+        }
+        msgBox.scrollTop = msgBox.scrollHeight;
+    },
+
+    async sendAdminChatMessage() {
+        const input = document.getElementById('admin-chat-input');
+        const content = input?.value?.trim();
+        if (!content || !this._adminChatSelectedConnectionId) return;
+        input.value = '';
+        try {
+            const res = await fetch('/company-admin/api/admin/send-message', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ connectionId: this._adminChatSelectedConnectionId, content })
+            });
+            const data = await res.json();
+            if (!data.success) { showNotification('Failed to send message: ' + (data.error || 'Unknown error'), 'error'); return; }
+            // Optimistically add sent message
+            this._renderAdminChatMessages(this._adminChatSelectedConnectionId, [{
+                from: 'admin', fromLabel: 'Admin', content, timestamp: Date.now(), sentByAdmin: true
+            }], false);
+        } catch (e) {
+            showNotification('Send failed: ' + e.message, 'error');
+        }
+    }
+});
 
 /**
  * Get status badge HTML

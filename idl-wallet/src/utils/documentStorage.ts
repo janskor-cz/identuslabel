@@ -21,9 +21,20 @@
  */
 
 // IndexedDB configuration
-const DB_NAME = 'classified-documents-store';
+// Scoped per logged-in user: see setDocumentStorageWalletId(). Defaults to 'idl' for
+// backward compatibility until the login flow calls the setter.
+let currentWalletId = 'idl';
 const DB_VERSION = 1;
 const STORE_NAME = 'documents';
+
+/**
+ * Set the wallet/user identifier this module's database name is scoped to.
+ * Must be called at login (before any other function here runs) so each
+ * user's classified documents land in their own IndexedDB database.
+ */
+export function setDocumentStorageWalletId(walletId: string): void {
+  currentWalletId = walletId;
+}
 
 /**
  * Document status enum
@@ -95,7 +106,7 @@ export interface DocumentSummary {
  */
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(`classified-documents-store-${currentWalletId}`, DB_VERSION);
 
     request.onerror = () => {
       console.error('[DocumentStorage] Failed to open database:', request.error);
@@ -660,6 +671,7 @@ export async function storeDocumentFromCredential(
 }
 
 export default {
+  setDocumentStorageWalletId,
   storeDocument,
   getDocument,
   getAllDocuments,

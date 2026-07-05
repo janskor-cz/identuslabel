@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useMountedApp, useAppSelector } from '@/reducers/store';
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { DIDSelectionModal } from './DIDSelectionModal';
+import { getCredentialLayout } from './CredentialCardTypeLayouts';
 
 /**
  * CredentialOfferModal Component
@@ -216,6 +217,11 @@ export const CredentialOfferModal: React.FC = () => {
     const attributes = currentOffer.credentialPreview.body.attributes;
     const schemaId = currentOffer.credentialPreview.schema_id;
 
+    // Build a mock credential so the typed card layouts can render a preview
+    const mockCredential = {
+        credentialSubject: Object.fromEntries(attributes.map(a => [a.name, a.value]))
+    };
+
     // Find connection name from issuer DID
     const getConnectionName = (): string => {
         const issuerDID = currentOffer.from;
@@ -261,11 +267,14 @@ export const CredentialOfferModal: React.FC = () => {
                     </div>
                 </div>
 
-                {/* Attributes Table */}
+                {/* Credential Preview */}
                 <div className="mb-4">
-                    <h3 className="text-lg font-semibold text-white mb-4">
-                        Credential Attributes:
-                    </h3>
+                    <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
+                            Credential Preview
+                        </h3>
+                        <span className="text-xs text-slate-500 italic">not yet in wallet</span>
+                    </div>
 
                     {attributes.length === 0 ? (
                         <div className="bg-yellow-900/20 border border-yellow-700/30 rounded-xl p-4">
@@ -274,40 +283,7 @@ export const CredentialOfferModal: React.FC = () => {
                             </p>
                         </div>
                     ) : (
-                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden">
-                            <table className="w-full">
-                                <thead>
-                                    <tr className="bg-slate-800 border-b border-slate-700">
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                                            Attribute
-                                        </th>
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                                            Value
-                                        </th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {attributes.map((attr, index) => (
-                                        <tr
-                                            key={index}
-                                            className="border-b border-slate-700/50 last:border-b-0"
-                                        >
-                                            <td className="px-4 py-3 text-sm font-medium text-white">
-                                                {formatAttributeName(attr.name)}
-                                            </td>
-                                            <td className="px-4 py-3 text-sm text-slate-300">
-                                                {attr.value}
-                                                {attr.media_type && (
-                                                    <span className="ml-2 text-xs text-slate-400">
-                                                        ({attr.media_type})
-                                                    </span>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
+                        getCredentialLayout(mockCredential)
                     )}
                 </div>
 

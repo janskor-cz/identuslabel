@@ -7,10 +7,13 @@
     "build": "next build",
     "start": "next start --port 3002 --hostname 0.0.0.0",
     "lint": "next lint",
-    "test": "npm run test:basic && npm run test:buffer",
+    "test": "npm run test:basic && npm run test:buffer && npm run test:unit",
     "test:basic": "node tests/basic-load.test.js",
     "test:buffer": "node tests/buffer-error.test.js",
-    "test:connect-ca": "node tests/connect-ca.test.js"
+    "test:connect-ca": "node tests/connect-ca.test.js",
+    "test:unit": "node tests/basic-message-filters.test.js && node tests/basic-message-encryption.test.js",
+    "test:unit:filters": "node tests/basic-message-filters.test.js",
+    "test:unit:encryption": "node tests/basic-message-encryption.test.js"
   },
   "dependencies": {
     "@atala/prism-wallet-sdk": "^5.2.0",

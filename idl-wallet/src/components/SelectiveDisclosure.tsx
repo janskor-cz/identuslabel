@@ -2,6 +2,33 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { DisclosureLevel, DISCLOSURE_PRESETS, FIELD_LABELS } from '../types/invitations';
 import { extractCredentialSubject } from '../utils/vcValidation';
 import { getFieldsForDisclosureLevel, applySelectiveDisclosure } from '../utils/selectiveDisclosure';
+import { usePhotoDID } from '../hooks/usePhotoDID';
+
+const PhotoFieldPreview: React.FC<{ value: string }> = ({ value }) => {
+  const resolvedPhoto = usePhotoDID(value.startsWith('data:image/') ? null : value.startsWith('did:') ? value : null);
+  const src = value.startsWith('data:image/') ? value : resolvedPhoto;
+
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt="ID Photo"
+        className="w-16 h-20 object-cover object-top rounded-lg border border-slate-600 inline-block align-middle"
+      />
+    );
+  }
+
+  if (value.startsWith('did:')) {
+    return (
+      <span className="inline-flex items-center space-x-1 text-xs font-mono text-slate-400 bg-slate-700/50 px-2 py-1 rounded-lg align-middle">
+        <span className="animate-pulse">📷</span>
+        <span className="max-w-[140px] truncate">{value}</span>
+      </span>
+    );
+  }
+
+  return <span className="text-white">{value}</span>;
+};
 
 interface SelectiveDisclosureProps {
   credential: any;
@@ -126,22 +153,27 @@ export const SelectiveDisclosure: React.FC<SelectiveDisclosureProps> = ({
         <div className="custom-fields mb-6">
           <h4 className="text-md font-medium mb-3 text-slate-300">Select Fields:</h4>
           <div className="space-y-2">
-            {availableFields.map(field => (
-              <label key={field} className="flex items-center space-x-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={customFields.includes(field)}
-                  onChange={() => handleCustomFieldToggle(field)}
-                  className="h-4 w-4 text-cyan-500 accent-cyan-500"
-                />
-                <span className="font-medium text-white">
-                  {FIELD_LABELS[field as keyof typeof FIELD_LABELS] || field}
-                </span>
-                <span className="text-sm text-slate-400">
-                  ({credentialSubject[field]})
-                </span>
-              </label>
-            ))}
+            {availableFields.map(field => {
+              const raw = credentialSubject[field];
+              const isPhotoDID = field === 'photo' || (typeof raw === 'string' && (raw.startsWith('data:image/') || raw.startsWith('did:')));
+              const fieldHint = isPhotoDID
+                ? '(photo)'
+                : `(${String(raw).length > 40 ? String(raw).substring(0, 40) + '…' : raw})`;
+              return (
+                <label key={field} className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={customFields.includes(field)}
+                    onChange={() => handleCustomFieldToggle(field)}
+                    className="h-4 w-4 text-cyan-500 accent-cyan-500"
+                  />
+                  <span className="font-medium text-white">
+                    {FIELD_LABELS[field as keyof typeof FIELD_LABELS] || field}
+                  </span>
+                  <span className="text-sm text-slate-400">{fieldHint}</span>
+                </label>
+              );
+            })}
           </div>
         </div>
       )}
@@ -154,14 +186,22 @@ export const SelectiveDisclosure: React.FC<SelectiveDisclosureProps> = ({
             <div className="text-slate-500 italic">No fields selected for sharing</div>
           ) : (
             <div className="space-y-2">
-              {Object.entries(previewData).map(([field, value]) => (
-                <div key={field} className="flex justify-between">
-                  <span className="font-medium text-slate-300">
-                    {FIELD_LABELS[field as keyof typeof FIELD_LABELS] || field}:
-                  </span>
-                  <span className="text-white">{value}</span>
-                </div>
-              ))}
+              {Object.entries(previewData).map(([field, value]) => {
+                const isPhotoValue = typeof value === 'string' && (
+                  (value as string).startsWith('data:image/') || (value as string).startsWith('did:')
+                );
+                return (
+                  <div key={field} className={`flex ${isPhotoValue ? 'items-start' : 'justify-between'} gap-2`}>
+                    <span className="font-medium text-slate-300 flex-shrink-0">
+                      {FIELD_LABELS[field as keyof typeof FIELD_LABELS] || field}:
+                    </span>
+                    {isPhotoValue
+                      ? <PhotoFieldPreview value={value as string} />
+                      : <span className="text-white">{value as string}</span>
+                    }
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

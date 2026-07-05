@@ -13,11 +13,10 @@ import { getConnectionMetadata } from './connectionMetadata';
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 
 /**
- * Trusted Security Clearance VC schema and issuer
- * Only VCs matching these values will be accepted as legitimate Security Clearance VCs
+ * Trusted Security Clearance VC issuer.
+ * Only VCs signed by this DID will be accepted as legitimate Security Clearance VCs.
  */
 const TRUSTED_CA_DID = "did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c";
-const SECURITY_CLEARANCE_SCHEMA = "http://91.99.4.54:8000/cloud-agent/schema-registry/schemas/c2cf96fb-c7c2-34c4-9aea-8db348f828c0";
 
 /**
  * Validate that a VC is a legitimate Security Clearance VC from a trusted issuer.
@@ -46,9 +45,14 @@ export function validateSecurityClearanceVC(vc: any): boolean {
     return false;
   }
 
-  // Check 1: Verify VC has a credentialSchema (basic structure check)
-  // Note: We don't validate exact schema ID because the CA may update schema versions
-  // Trust is based on CA issuer DID, not schema version
+  // Check 1: Verify VC has a credentialSchema (basic structure check).
+  // We deliberately do NOT match schema.id against a hardcoded URL: the CA's schema
+  // registry host/UUID has changed before (e.g. IP-based -> identuslabel.cz) and will
+  // again, and a hardcoded match silently breaks every legitimately-issued credential
+  // when that happens (confirmed live: a real, correctly-signed, correctly-issued VC
+  // was rejected here after the CA moved its schema registry to a new domain/UUID).
+  // Trust is anchored on the CA issuer DID (Check 2) plus the semantic credentialType
+  // claim (below), not on a specific schema URL.
   let schema = vc.credentialSchema?.[0];
 
   // Try W3C VC structure inside JWT if not found at top level
@@ -57,11 +61,29 @@ export function validateSecurityClearanceVC(vc: any): boolean {
     console.log('✅ [validateSecurityClearanceVC] Found schema via vc.vc.credentialSchema');
   }
 
-  if (!schema || !schema.id) {
-    console.warn('⚠️ [validateSecurityClearanceVC] VC missing credentialSchema');
+  if (!schema) {
+    console.warn('⚠️ [validateSecurityClearanceVC] VC has no credentialSchema');
     return false;
   }
-  console.log('✅ [validateSecurityClearanceVC] VC has schema:', schema.id);
+  console.log('✅ [validateSecurityClearanceVC] VC schema present:', schema.id);
+
+  // Check 1b: Verify credentialType claim identifies this specifically as a Security
+  // Clearance credential (same field/locations used by credentialTypeDetector.ts
+  // elsewhere in this codebase), rather than any other CA-issued credential type that
+  // happens to also carry a clearanceLevel-shaped claim.
+  let credentialType = vc.credentialSubject?.credentialType;
+  if (!credentialType && vc.claims && vc.claims.length > 0) {
+    credentialType = vc.claims[0]?.credentialType;
+  }
+  if (!credentialType && vc.vc?.credentialSubject?.credentialType) {
+    credentialType = vc.vc.credentialSubject.credentialType;
+  }
+  if (credentialType !== 'SecurityClearance') {
+    console.warn('⚠️ [validateSecurityClearanceVC] credentialType is not SecurityClearance', {
+      actual: credentialType || 'none'
+    });
+    return false;
+  }
 
   // Check 2: Verify issuer is trusted CA
   // JWT credentials can store issuer in multiple locations:

@@ -4,15 +4,27 @@ import path from 'path';
 
 const REGISTRY_PATH = path.join(process.cwd(), 'data', 'wallet-registry.json');
 
-function loadRegistry(): Record<string, { fileId: string; updatedAt: string }> {
+interface RegistryEntry {
+    fileId: string;
+    contentHash: string;
+    updatedAt: string;
+}
+
+interface Registry {
+    wallets: Record<string, RegistryEntry>;
+}
+
+function loadRegistry(): Registry {
     try {
         if (fs.existsSync(REGISTRY_PATH)) {
-            return JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf-8'));
+            const parsed = JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf-8'));
+            if (!parsed.wallets) return { wallets: {} };
+            return parsed as Registry;
         }
     } catch {
-        // ignore
+        // ignore read/parse errors
     }
-    return {};
+    return { wallets: {} };
 }
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -20,16 +32,21 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const { username } = req.body;
-    if (!username || typeof username !== 'string') {
-        return res.status(400).json({ error: 'username required' });
+    const { credHash } = req.body;
+    if (!credHash || typeof credHash !== 'string' || !/^[0-9a-f]{64}$/.test(credHash)) {
+        return res.status(400).json({ error: 'credHash required (64-char hex)' });
     }
 
     const registry = loadRegistry();
-    const entry = registry[username.toLowerCase()];
+    const entry = registry.wallets[credHash];
 
     if (entry) {
-        return res.status(200).json({ exists: true, fileId: entry.fileId, updatedAt: entry.updatedAt });
+        return res.status(200).json({
+            exists: true,
+            fileId: entry.fileId,
+            contentHash: entry.contentHash,
+            updatedAt: entry.updatedAt,
+        });
     }
 
     return res.status(200).json({ exists: false });

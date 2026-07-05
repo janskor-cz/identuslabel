@@ -7,6 +7,7 @@ import { Loading } from "./Loading";
 import { Credential } from "./Credential";
 import { refreshConnections } from "@/actions";
 import { MESSAGE_TYPES } from "@/utils/messageFilters";
+import { filterCredentialsByRequestedFields, aggregateRequestedFields } from "@/utils/proofRequestFieldMatching";
 
 function MessageTitle(props) {
   const { message, title } = props;
@@ -882,10 +883,13 @@ export function Message({ message }) {
     if (requestPresentationFormat === SDK.Domain.AttachmentFormats.PRESENTATION_EXCHANGE_DEFINITIONS) {
 
       if (SDK.isPresentationDefinitionRequestType(requestPresentation, SDK.Domain.CredentialType.SDJWT)) {
-        const credentials: SDK.Domain.Credential[] = app.credentials.filter((c) => c instanceof SDK.SDJWTCredential);
         const fields: SDK.Domain.InputField[] = requestPresentation.presentation_definition ?
-          requestPresentation.presentation_definition.input_descriptors.at(0)?.constraints.fields ?? [] :
+          aggregateRequestedFields(requestPresentation.presentation_definition) :
           [];
+        const credentials: SDK.Domain.Credential[] = filterCredentialsByRequestedFields(
+          app.credentials.filter((c) => c instanceof SDK.SDJWTCredential),
+          fields
+        );
 
         return <div
           className="w-full mt-5 p-6 bg-white border border-gray-200 rounded-lg shadow dark:bg-gray-800 dark:border-gray-700 "
@@ -984,10 +988,13 @@ export function Message({ message }) {
 
       if (SDK.isPresentationDefinitionRequestType(requestPresentation, SDK.Domain.CredentialType.JWT)) {
 
-        const credentials: SDK.Domain.Credential[] = app.credentials.filter((c) => c instanceof SDK.JWTCredential);
         const fields: SDK.Domain.InputField[] = requestPresentation.presentation_definition ?
-          requestPresentation.presentation_definition.input_descriptors.at(0)?.constraints.fields ?? [] :
+          aggregateRequestedFields(requestPresentation.presentation_definition) :
           [];
+        const credentials: SDK.Domain.Credential[] = filterCredentialsByRequestedFields(
+          app.credentials.filter((c) => c instanceof SDK.JWTCredential),
+          fields
+        );
 
         // ✅ HIDE UI for Security Clearance VC requests (auto-responded in background)
         // Check if this is a Security Clearance request by looking for clearanceLevel field

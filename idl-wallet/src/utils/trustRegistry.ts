@@ -44,8 +44,30 @@ export interface TrustedIssuer {
  */
 const TRUSTED_ISSUERS: Record<string, TrustedIssuer> = {
   /**
-   * Certification Authority — current DID (active after DID rotation)
-   * Used for credentials issued to ACME, TechCorp, etc. after rotation
+   * Certification Authority — primary DID (original, actively used for issuance)
+   * This is the DID the CA cloud agent actually uses to sign credentials: RealPerson,
+   * CompanyIdentity, SecurityClearance, etc. Confirmed via /did-registrar/dids (PUBLISHED).
+   * Also referenced as TRUSTED_CA_DID in keyVCBinding.ts.
+   */
+  'did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c': {
+    name: 'Certification Authority',
+    authorizedCredentialTypes: [
+      'SecurityClearance',
+      'CompanyIdentity',
+      'RealPerson',
+      'EmployeeIdentity',
+      'OrganizationCredential',
+      'CertificationAuthorityIdentity',
+      'CISTrainingCertificate'
+    ],
+    organizationType: 'Certification Authority',
+    jurisdiction: 'Hyperledger Identus Ecosystem',
+    trustedSince: '2025-01-01'
+  },
+
+  /**
+   * Certification Authority — second published DID (created after primary)
+   * Also active on the CA cloud agent. Some credentials may be issued under this DID.
    */
   'did:prism:462a7196585b9737497d1959880439f09c68d8f534691a0eaed7d64fe22d866d': {
     name: 'Certification Authority',
@@ -55,7 +77,8 @@ const TRUSTED_ISSUERS: Record<string, TrustedIssuer> = {
       'RealPerson',
       'EmployeeIdentity',
       'OrganizationCredential',
-      'CertificationAuthorityIdentity'
+      'CertificationAuthorityIdentity',
+      'CISTrainingCertificate'
     ],
     organizationType: 'Certification Authority',
     jurisdiction: 'Hyperledger Identus Ecosystem',
@@ -83,12 +106,24 @@ const TRUSTED_ISSUERS: Record<string, TrustedIssuer> = {
   }
 
   /**
-   * ACME Corporation
-   * Trusted to issue ServiceConfiguration VCs to their employees
+   * TechCorp Corporation
+   * Trusted to issue EmployeeRole VCs to their employees via multitenancy cloud agent
    */,
+  'did:prism:6ee757c2913a76aa4eb2f09e9cd3cc40ead73cfaffc7d712c303ee5bc38f21bf': {
+    name: 'TechCorp Corporation',
+    authorizedCredentialTypes: ['EmployeeRole', 'ServiceConfiguration'],
+    organizationType: 'Company',
+    jurisdiction: 'Hyperledger Identus Ecosystem',
+    trustedSince: '2026-03-14'
+  },
+
+  /**
+   * ACME Corporation
+   * Trusted to issue EmployeeRole and ServiceConfiguration VCs to their employees
+   */
   'did:prism:474c91516a875ba9af9f39a3b9747cb70ad7684f0b3fb8ee2b7b145efac286b9': {
     name: 'ACME Corporation',
-    authorizedCredentialTypes: ['ServiceConfiguration'],
+    authorizedCredentialTypes: ['EmployeeRole', 'ServiceConfiguration'],
     organizationType: 'Company',
     jurisdiction: 'Hyperledger Identus Ecosystem',
     trustedSince: '2026-03-14'
