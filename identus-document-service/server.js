@@ -892,14 +892,19 @@ function _generateNullSig() {
 // Lazy-initialised singleton — populated in the startup block below
 let _didcommSvc = null;
 
-// GET /connect — returns a fresh OOB connection invitation from the service wallet
+// GET /connect — returns a fresh OOB connection invitation from the service wallet, plus this
+// service's stable published DID (serviceDid). The two identify different things: the invitation's
+// peer DID is per-connection and meant to be established once then reused (see the wallet's
+// getOrCreateDocumentServiceConnection); serviceDid is this deployment's long-term identity,
+// resolvable independent of any particular connection, delivered here over the same TLS channel
+// callers already trust to reach identuslabel.cz/document-service.
 app.get('/connect', async (req, res) => {
   if (!DocumentServiceStartup.isInitialized() || !_didcommSvc) {
     return res.status(503).json({ error: 'NOT_INITIALIZED', message: 'DIDComm identity not yet initialized' });
   }
   try {
     const invitation = await _didcommSvc.createConnectionInvitation();
-    return res.json({ success: true, invitation });
+    return res.json({ success: true, invitation, serviceDid: DocumentServiceStartup.getServiceDid() });
   } catch (err) {
     console.error('[GET /connect]', err.message);
     return res.status(500).json({ error: 'INVITATION_FAILED', message: err.message });

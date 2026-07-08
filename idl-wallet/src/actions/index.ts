@@ -2042,6 +2042,167 @@ export const sendDocumentAccessRequest = createAsyncThunk<
     api.dispatch(reduxActions.messageSuccess([finalMessage]));
 });
 
+// Connection states this custom Cloud Agent build reports as "handshake complete, usable for
+// messaging" — same list used at pages/connections.tsx:179/998 and pages/messages.tsx:189.
+const DOC_SERVICE_ACTIVE_STATES = new Set(['ConnectionResponseSent', 'ConnectionResponseReceived', 'Active', 'ACTIVE', 'active']);
+
+// Guards concurrent callers (e.g. a double-click) from racing past the listConnections() check
+// and each minting their own "Document Service" connection before either finishes.
+let _docServiceConnectionPromise: Promise<string> | null = null;
+
+/**
+ * Reuse an existing "Document Service" connection on the enterprise agent if one is already
+ * usable, instead of always requesting a fresh OOB invitation. The enterprise agent's connection
+ * list is server-side (shared across browsers/devices for the company), so this also dedupes
+ * across sessions, not just within one — it's what previously caused a distinct connection to be
+ * minted on every login (see /connect always returning a brand-new invitation, and this caller
+ * unconditionally accepting it).
+ */
+async function getOrCreateDocumentServiceConnection(client: any, DOC_SERVICE_BASE: string): Promise<string> {
+    if (_docServiceConnectionPromise) return _docServiceConnectionPromise;
+
+    _docServiceConnectionPromise = (async () => {
+        const listResp = await client.listConnections().catch((e: any) => {
+            console.warn('[DocService] listConnections() threw, will create a new connection:', e?.message || e);
+            return null;
+        });
+        if (listResp && !listResp.success) {
+            console.warn('[DocService] listConnections() returned an error, will create a new connection:', listResp.error);
+        }
+        // Match on goalCode, not label: this Cloud Agent build only persists/returns `label` for
+        // the inviter side of a connection — the wallet is always the Invitee here, and its
+        // connection records come back with an empty label regardless of what was passed to
+        // acceptInvitation(). goalCode ("document-access", set by DocumentDIDCommService's
+        // createConnectionInvitation) survives on both sides and is what's actually queryable.
+        const existing = (listResp?.data?.contents || []).find((c: any) =>
+            (c?.goalCode === 'document-access' || c?.label === 'Document Service') && DOC_SERVICE_ACTIVE_STATES.has(c?.state)
+        );
+        if (existing?.connectionId) {
+            return existing.connectionId as string;
+        }
+
+        const connectRes = await fetch(`${DOC_SERVICE_BASE}/connect`);
+        const connectJson = await connectRes.json();
+        if (!connectRes.ok || !connectJson.success) {
+            throw new Error(connectJson.message || connectJson.error || 'Could not get a document service invitation');
+        }
+        const inv = connectJson.invitation;
+        const invitationUrl = inv?.invitation?.invitationUrl || inv?.invitationUrl || inv?.invitation || inv;
+        if (!invitationUrl || typeof invitationUrl !== 'string') {
+            throw new Error('Document service returned no invitation URL');
+        }
+
+        // serviceDid is Document Service's own published, stable identity — distinct from the
+        // peer DID this invitation will establish for the connection itself (see
+        // DocumentServiceStartup.js's _ensureServiceDid). It isn't used to gate the connection
+        // (an older, not-yet-upgraded deployment simply won't send it), but surfacing it lets an
+        // operator pin it into idl-wallet/src/config/serviceTrust.ts's TRUSTED_SERVICES, the way
+        // that file's own doc comment already anticipates for a service with one fixed DID.
+        if (connectJson.serviceDid) {
+            console.info(`[DocService] Connected to Document Service, published DID: ${connectJson.serviceDid}`);
+        } else {
+            console.warn('[DocService] Document service did not return a serviceDid — deployment may need updating');
+        }
+
+        const acceptResp = await client.acceptInvitation(invitationUrl, 'Document Service');
+        const connectionId = acceptResp?.data?.connectionId;
+        if (!acceptResp?.success || !connectionId) {
+            throw new Error(acceptResp?.error || 'Failed to connect to the document service');
+        }
+        return connectionId as string;
+    })();
+
+    try {
+        return await _docServiceConnectionPromise;
+    } finally {
+        _docServiceConnectionPromise = null;
+    }
+}
+
+/**
+ * Request document access via the ENTERPRISE-AGENT channel (correct holder binding for
+ * enterprise-custodied credentials — the enterprise agent holds the credential subject key and
+ * signs the challenge-bound VP, per SSI proof-of-possession requirements).
+ *
+ * Flow:
+ *   1. Reuse an existing DIDComm connection to the document service on the enterprise agent, or
+ *      open a new one (via /connect) if none is usable yet.
+ *   2. Send a service-access/1.0 "document-access" request over it (carries the ephemeral X25519
+ *      public key the DEK will be sealed to).
+ *   3. The document service sends a present-proof RequestPresentation to the enterprise wallet;
+ *      the running enterprise proof poller surfaces it in UnifiedProofRequestModal, the user
+ *      approves, and the enterprise agent signs the challenge-bound VP.
+ *   4. The document service independently verifies the VP and posts a grant (DEK nacl.box-sealed
+ *      to our ephemeral key + Iagon link) to an HTTP-pollable transport keyed by requestId.
+ *   5. We poll access-grant-status and return the grant for the caller to decrypt.
+ */
+export const requestDocumentAccessViaEnterprise = createAsyncThunk<
+    { sections: any[]; iagonDownloadUrl: string; filename?: string; documentDID: string },
+    { documentDID: string; ephemeralPublicKey: string; timeoutMs?: number }
+>('requestDocumentAccessViaEnterprise', async ({ documentDID, ephemeralPublicKey, timeoutMs = 3 * 60 * 1000 }, api) => {
+    const DOC_SERVICE_BASE = 'https://identuslabel.cz/document-service';
+    const state = api.getState() as RootState;
+    const client: any = (state as any).enterpriseAgent?.client;
+    if (!client) {
+        throw new Error('Company wallet not configured — cannot request document access via the enterprise agent.');
+    }
+
+    const connectionId = await getOrCreateDocumentServiceConnection(client, DOC_SERVICE_BASE);
+
+    // 2. Wait until the connection is usable before messaging over it (no-op if reused, since
+    //    it was already filtered to an active state above).
+    const connDeadline = Date.now() + 30000;
+    while (Date.now() < connDeadline) {
+        const c = await client.getConnection(connectionId);
+        const st = c?.data?.state;
+        if (st && st !== 'InvitationGenerated' && st !== 'ConnectionRequestPending') break;
+        await new Promise(r => setTimeout(r, 1500));
+    }
+
+    // 3. Send the service-access/1.0 document-access request (with the ephemeral key to seal the DEK to).
+    //    - requestId: high-entropy UUID (not a guessable timestamp) so the grant poll can't be raced.
+    //    - accessToken: a fresh secret that gates grant retrieval (server binds consumeGrant to it).
+    //    - ts: request timestamp so the service can reject stale/replayed requests.
+    const requestId = `dar-${crypto.randomUUID()}`;
+    const tokenBytes = new Uint8Array(32);
+    crypto.getRandomValues(tokenBytes);
+    const accessToken = btoa(String.fromCharCode(...tokenBytes))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const envelope = JSON.stringify({
+        type: 'https://identuslabel.cz/protocols/service-access/1.0/request',
+        id: requestId,
+        body: { capability: 'document-access', documentDID, ephemeralPublicKey, accessToken, ts: Date.now() }
+    });
+    const sendResp = await client.sendBasicMessage(connectionId, envelope);
+    if (!sendResp?.success) {
+        throw new Error(sendResp?.error || 'Failed to send the access request to the document service');
+    }
+
+    // 4. Poll for the grant. Meanwhile the user approves the incoming proof request in the wallet.
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2500));
+        try {
+            const gs = await fetch(`${DOC_SERVICE_BASE}/access-grant-status?requestId=${encodeURIComponent(requestId)}&token=${encodeURIComponent(accessToken)}`);
+            const gj = await gs.json();
+            if (gj.status === 'granted' && gj.grant) {
+                // service-access/1.0 `mode: "payload"` grants nest the capability payload
+                // (sections, iagonDownloadUrl, deliveryId) under `grant.result` — the outer
+                // object only carries protocol metadata (capability, label, mode, expiresAt).
+                const payload = gj.grant.result || gj.grant;
+                return { ...payload, documentDID };
+            }
+            if (gj.status === 'error') {
+                throw new Error(gj.message || gj.error || 'Document access denied');
+            }
+        } catch (e: any) {
+            // Network blips are transient; keep polling until the deadline.
+            if (e?.message && /denied|rejected/i.test(e.message)) throw e;
+        }
+    }
+    throw new Error('Timed out waiting for the document access grant — did you approve the credential request in your wallet?');
+});
+
 export const initiatePresentationRequest = createAsyncThunk<
     any,
     {
