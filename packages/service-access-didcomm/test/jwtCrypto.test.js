@@ -40,11 +40,13 @@ async function run() {
   const rightPurpose = await verifyES256KSignature(decoded, issuerDID, resolveIssuerDID, 'authentication');
   assert.strictEqual(rightPurpose, true, 'must verify against the authentication key when keyPurpose="authentication" is requested');
 
-  // Fallback still works: if the DID document has NO keys at all under the requested purpose,
-  // verification should fall back to trying every secp256k1 verificationMethod.
+  // Fail closed: if the DID document has NO keys at all under the requested purpose,
+  // verification must NOT fall back to trying every secp256k1 verificationMethod (that would let
+  // a key authorized for a DIFFERENT purpose, e.g. assertionMethod, verify a signature that
+  // requires authentication, or vice versa) — it must simply reject.
   const docWithEmptyAuth = { ...didDoc, authentication: [] };
   const fallbackResult = await verifyES256KSignature(decoded, issuerDID, async () => docWithEmptyAuth, 'authentication');
-  assert.strictEqual(fallbackResult, true, 'must fall back to all secp256k1 VMs when the requested purpose array is empty');
+  assert.strictEqual(fallbackResult, false, 'must NOT fall back to other secp256k1 VMs when the requested purpose array is empty — fail closed instead');
 
   console.log('jwtCrypto: all tests passed');
 }

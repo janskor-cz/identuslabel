@@ -17,9 +17,10 @@ import { getCredentialLayout } from './CredentialCardTypeLayouts';
 import {
   getCredentialType,
   getCredentialHolderName,
-  isCredentialExpired
+  isCredentialExpired,
+  getCredentialTypeAccent
 } from '@/utils/credentialTypeDetector';
-import { checkCredentialStatus, CredentialStatus } from '@/utils/credentialStatus';
+import { CredentialStatus } from '@/utils/credentialStatus';
 
 interface CredentialCardProps {
   credential: any;
@@ -45,27 +46,11 @@ export function CredentialCard({ credential, onDelete, status, protocolStateBadg
   const isExpired = isCredentialExpired(credential);
 
   // Determine overall status
-  const displayStatus = isExpired ? 'expired' : (status === 'revoked' ? 'revoked' : 'valid');
+  const displayStatus = isExpired ? 'expired' : ((status?.revoked || status?.suspended) ? 'revoked' : 'valid');
 
-  // Get type display name and icon
-  const getTypeInfo = () => {
-    switch (credentialType) {
-      case 'RealPersonIdentity':
-        return { name: 'Identity', icon: '🪪', color: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30' };
-      case 'SecurityClearance':
-        return { name: 'Clearance', icon: '🛡️', color: 'bg-red-500/20 text-red-400 border-red-500/30' };
-      case 'ServiceConfiguration':
-        return { name: 'Enterprise Config', icon: '🏢', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' };
-      case 'EmployeeRole':
-        return { name: 'Enterprise ID', icon: '🏢', color: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30' };
-      case 'CISTrainingCertificate':
-        return { name: 'CIS Training', icon: '🎓', color: 'bg-green-500/20 text-green-400 border-green-500/30' };
-      default:
-        return { name: 'Unknown', icon: '❓', color: 'bg-slate-500/20 text-slate-400 border-slate-500/30' };
-    }
-  };
-
-  const typeInfo = getTypeInfo();
+  // Type display name/icon/color — shared with ConnectionAvatar's ring color via
+  // getCredentialTypeAccent, so the two never drift into separate color choices.
+  const typeInfo = getCredentialTypeAccent(credentialType);
 
   // Get status badge
   const getStatusBadge = () => {
@@ -146,7 +131,7 @@ export function CredentialCard({ credential, onDelete, status, protocolStateBadg
               <button
                 onClick={handleDelete}
                 disabled={isDeleting}
-                className="p-2 rounded-xl hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors disabled:opacity-50"
+                className="p-2 min-h-11 min-w-11 flex items-center justify-center rounded-xl hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors disabled:opacity-50"
                 title="Delete credential"
               >
                 <TrashIcon className="w-5 h-5" />

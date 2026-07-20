@@ -753,7 +753,20 @@ export class EnterpriseAgentClient {
   }
 
   public async getColleagues(): Promise<ApiResponse<ColleagueRecord[]>> {
-    return this.portalRequest<ColleagueRecord[]>('/api/employee-portal/colleagues');
+    // The portal responds { success, colleagues: [...] } — portalRequest returns the whole
+    // parsed body as .data, so unwrap the named array here rather than leaving every caller to
+    // guess at (or silently mishandle) the envelope shape.
+    const result = await this.portalRequest<{ colleagues: ColleagueRecord[] }>('/api/employee-portal/colleagues');
+    if (!result.success) return result as ApiResponse<ColleagueRecord[]>;
+    return { success: true, data: result.data?.colleagues ?? [] };
+  }
+
+  public async getConnectionNames(): Promise<ApiResponse<Record<string, string>>> {
+    // { connectionId: name } for this wallet's own colleague connections — see getColleagues'
+    // comment on the envelope-unwrapping pattern; this one wraps a keyed object, not an array.
+    const result = await this.portalRequest<{ names: Record<string, string> }>('/api/employee-portal/connection-names');
+    if (!result.success) return result as ApiResponse<Record<string, string>>;
+    return { success: true, data: result.data?.names ?? {} };
   }
 
   public async sendColleagueInvite(toEmail: string, oobBase64: string, connectionId?: string, toName?: string): Promise<ApiResponse<{ id: string }>> {
@@ -765,7 +778,11 @@ export class EnterpriseAgentClient {
 
 
   public async getColleagueInvitations(): Promise<ApiResponse<PendingColleagueInvitation[]>> {
-    return this.portalRequest<PendingColleagueInvitation[]>('/api/employee-portal/colleague-invitations');
+    // Server responds { success, invitations: [...] } — see getColleagues' comment on why this
+    // unwraps here rather than at each call site.
+    const result = await this.portalRequest<{ invitations: PendingColleagueInvitation[] }>('/api/employee-portal/colleague-invitations');
+    if (!result.success) return result as ApiResponse<PendingColleagueInvitation[]>;
+    return { success: true, data: result.data?.invitations ?? [] };
   }
 
   public async consumeColleagueInvitation(id: string, connectionId: string): Promise<ApiResponse<void>> {
@@ -776,8 +793,15 @@ export class EnterpriseAgentClient {
   }
 
   public async getColleagueMessages(since?: number): Promise<ApiResponse<ColleagueMessage[]>> {
+    // Server responds { success, messages: [...] } — see getColleagues' comment on why this
+    // unwraps here rather than at each call site. Previously this returned the whole envelope
+    // object as .data, so every `result.data.length > 0` / `.filter(...)` check in messages.tsx's
+    // poll loop silently evaluated to a no-op (an object has no .length) instead of throwing —
+    // admin replies were always being fetched successfully and then discarded unrendered.
     const qs = since ? `?since=${since}` : '';
-    return this.portalRequest<ColleagueMessage[]>(`/api/employee-portal/colleague-messages${qs}`);
+    const result = await this.portalRequest<{ messages: ColleagueMessage[] }>(`/api/employee-portal/colleague-messages${qs}`);
+    if (!result.success) return result as ApiResponse<ColleagueMessage[]>;
+    return { success: true, data: result.data?.messages ?? [] };
   }
 
   public async getConnectionStats(): Promise<ApiResponse<Record<string, number>>> {

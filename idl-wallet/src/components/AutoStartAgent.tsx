@@ -134,9 +134,12 @@ export function AutoStartAgent() {
     };
   }, [app.agent.hasStarted, serviceConfigCredentialId]); // Re-run when the ServiceConfiguration VC itself appears/changes, not on every unrelated credential
 
-  // Initialize agent when database connects
+  // Initialize agent when database connects.
+  // Gated on app.defaultSeed being present: a fresh per-user seed (new username) or a
+  // restored seed (existing username with an Iagon backup) must exist before the agent
+  // is allowed to start, since there is no hardcoded fallback seed anymore.
   useEffect(() => {
-    if (!app.agent.instance && db.instance) {
+    if (!app.agent.instance && db.instance && app.defaultSeed) {
       try {
         initAgent({ mediatorDID, pluto: db.instance, defaultSeed: app.defaultSeed });
         setInitError(null); // Clear any previous errors
@@ -146,7 +149,7 @@ export function AutoStartAgent() {
         setInitError(errorMessage);
       }
     }
-  }, [db.instance, app.agent.instance]);
+  }, [db.instance, app.agent.instance, app.defaultSeed]);
 
   // Auto-start agent when it becomes available.
   // Block while a backup restore is in progress — agent.start() writes mediator data

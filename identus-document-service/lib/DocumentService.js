@@ -18,6 +18,7 @@ const fetch  = require('node-fetch');
 
 const { IagonStorageClient } = require('./IagonStorageClient');
 const { resolveDocumentDID } = require('./DIDDocumentResolver');
+const { fireAudit }          = require('./AuditEmitter');
 
 const VALID_CLEARANCE_LEVELS = ['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET'];
 
@@ -52,6 +53,7 @@ class DocumentService {
    * @param {string[]} params.releasableTo       Array of issuer DIDs
    * @param {string}   [params.department]
    * @param {string}   [params.auditWebhookUrl]
+   * @param {string}   [params.ownerCompanyDID]  Issuer DID of the company that owns this document
    * @returns {Promise<object>}
    */
   async createDocument(params) {
@@ -64,6 +66,7 @@ class DocumentService {
       releasableTo,
       department,
       auditWebhookUrl,
+      ownerCompanyDID,
       previousVersion  // optional: DID of the parent version (for branching)
     } = params;
 
@@ -112,6 +115,7 @@ class DocumentService {
     }
 
     // Step 5: Build DID service endpoints
+    const resolvedAuditUrl = auditWebhookUrl || this.config.AUDIT_FALLBACK_URL || null;
     const services = this._buildServices({
       iagonFileId:       iagonResult.fileId,
       iagonFilename:     iagonResult.filename,
@@ -120,7 +124,7 @@ class DocumentService {
       clearanceLevel:    level,
       releasableTo:      releasable,
       iagonEncManifestId,
-      auditWebhookUrl:   auditWebhookUrl || this.config.AUDIT_FALLBACK_URL || null,
+      auditWebhookUrl:   resolvedAuditUrl,
       previousVersion:   previousVersion || null
     });
 
@@ -136,6 +140,7 @@ class DocumentService {
     const createdAt = new Date().toISOString();
 
     // Step 8: Update Iagon-backed index
+    let indexWriteOk = true;
     await this._withIndex(entries => [
       ...entries,
       {
@@ -143,10 +148,30 @@ class DocumentService {
         title:          title.trim(),
         clearanceLevel: level,
         department:     department || null,
+        ownerCompanyDID: ownerCompanyDID || null,
         createdAt,
         status:         'active'
       }
-    ]).catch(err => console.warn('[DocumentService] Index update failed (non-fatal):', err.message));
+    ]).catch(err => {
+      indexWriteOk = false;
+      console.warn('[DocumentService] Index update failed (non-fatal):', err.message);
+    });
+
+    // Step 9: Fire CREATED audit event — same mechanism as the access pipeline
+    // (emitAuditEvent + Slack + local JSONL), reusing the audit URL already
+    // resolved above (own DID service endpoint / AUDIT_FALLBACK_URL).
+    // Skipped when this call is actually a version-bump made internally by
+    // updateDocument() (previousVersion set) — that path fires its own
+    // 'UPDATED' event instead, so a single PUT doesn't log as both.
+    if (indexWriteOk && !previousVersion) {
+      fireAudit(resolvedAuditUrl, {
+        event:          'CREATED',
+        documentDID:    longFormDid,
+        ownerCompanyDID: ownerCompanyDID || null,
+        title:          title.trim(),
+        clearanceLevel: level
+      });
+    }
 
     return {
       documentDID:        longFormDid,
@@ -157,6 +182,8 @@ class DocumentService {
       clearanceLevel:     level,
       releasableTo:       releasable,
       title:              title.trim(),
+      ownerCompanyDID:    ownerCompanyDID || null,
+      auditEndpointUsed:  resolvedAuditUrl,
       createdAt,
       note: 'DID blockchain publication in progress. Long-form DID is immediately usable.'
     };
@@ -193,15 +220,23 @@ class DocumentService {
       throw _notFound(`Document DID not found: ${oldDocumentDID}`);
     }
 
+    // ownerCompanyDID isn't part of the DID document (see createDocument) — it only
+    // lives in the Iagon-backed index, so read it back from there rather than oldMeta.
+    const oldIndexEntry = await this._findIndexEntry(oldDocumentDID);
+    const ownerCompanyDID = oldIndexEntry?.ownerCompanyDID || null;
+
     // Merge old metadata as defaults for fields not provided
     const mergedParams = {
       clearanceLevel: oldMeta.clearanceLevel,
       releasableTo:   oldMeta.releasableTo,
+      ownerCompanyDID,
       ...params
     };
 
     // Create the new version with a backward previousVersion link.
     // The parent DID is left completely untouched — no forward-link patch.
+    // (createDocument() skips its own CREATED audit event when previousVersion is
+    // set, since this call fires 'UPDATED' below instead.)
     const newResult      = await this.createDocument({ ...mergedParams, previousVersion: oldDocumentDID });
     const newDocumentDID = newResult.documentDID;
 
@@ -212,12 +247,21 @@ class DocumentService {
         title:          newResult.title,
         clearanceLevel: newResult.clearanceLevel,
         department:     mergedParams.department || null,
+        ownerCompanyDID,
         parentDID:      oldDocumentDID,
         publisherDID:   mergedParams.publisherDID || null,
         createdAt:      newResult.createdAt,
         status:         'active'
       }])
     ).catch(err => console.warn('[DocumentService] Index update failed (non-fatal):', err.message));
+
+    fireAudit(newResult.auditEndpointUsed, {
+      event:           'UPDATED',
+      documentDID:     newDocumentDID,
+      ownerCompanyDID,
+      title:           newResult.title,
+      clearanceLevel:  newResult.clearanceLevel
+    });
 
     return {
       success:        true,
@@ -242,6 +286,12 @@ class DocumentService {
     } catch (_) {
       throw _notFound(`Document DID not found: ${documentDID}`);
     }
+
+    // ownerCompanyDID/title live only in the Iagon-backed index (not the DID document) —
+    // read them back from there for the DELETED audit event, same lookup pattern as
+    // updateDocument().
+    const indexEntry      = await this._findIndexEntry(documentDID);
+    const ownerCompanyDID = indexEntry?.ownerCompanyDID || null;
 
     let iagonFilesDeleted = 0;
 
@@ -295,6 +345,14 @@ class DocumentService {
         : e
       )
     ).catch(err => console.warn('[DocumentService] Index update failed (non-fatal):', err.message));
+
+    fireAudit(meta.auditEndpoint || this.config.AUDIT_FALLBACK_URL || null, {
+      event:           'DELETED',
+      documentDID,
+      ownerCompanyDID,
+      title:           indexEntry?.title || null,
+      clearanceLevel:  indexEntry?.clearanceLevel || meta.clearanceLevel || null
+    });
 
     return {
       success:           true,
@@ -431,6 +489,14 @@ class DocumentService {
     });
     this._indexMutex = result.catch(() => {});
     return result;
+  }
+
+  /** Find a single index entry by documentDID (used to read back ownerCompanyDID,
+   *  title, clearanceLevel for update/delete audit events — these fields exist
+   *  only in the Iagon-backed index, not the DID document itself). */
+  async _findIndexEntry(documentDID) {
+    const index = await this._loadIndex();
+    return (index.documents || []).find(d => d.documentDID === documentDID) || null;
   }
 
   async _loadIndex() {

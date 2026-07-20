@@ -14,8 +14,16 @@ const dotenvPath = path.join(__dirname, '.env');
 require('dotenv').config({ path: dotenvPath });
 
 const SlackNotifier = require('./lib/SlackNotifier');
+const { buildLogEntry, buildLogEntryFromAuditWebhook, VALID_AUDIT_EVENT_TYPES, enrichLogEntryTitle } = require('./lib/AccessGateLogEntry');
+const { shouldSkipDuplicateLog } = require('./lib/AccessGateLogDedup');
 
 const ACCESS_GATE_LOG_PATH = path.join(__dirname, 'data', 'access-gate-log.jsonl');
+
+// documentDID -> epoch ms of the last access-gate-log.jsonl write for that document.
+// Populated by the /api/access-gate/present grant write and by /api/access-gate/notify itself;
+// checked by /api/access-gate/notify to suppress duplicate "cached-key reopen" rows that land
+// within DEDUP_WINDOW_MS of an already-logged event for the same document (see AccessGateLogDedup.js).
+const recentDocumentLogTimestamps = new Map();
 
 const express = require('express');
 const session = require('express-session');
@@ -69,6 +77,8 @@ const {
   getAllCompanies,
   isValidCompany
 } = require('./lib/companies');
+const { resolveEmployerCompany } = require('./lib/resolveEmployerCompany');
+const { resolveDocumentAccessTenant } = require('./lib/resolveDocumentAccessTenant');
 
 // Employee API Key Management (for Enterprise Cloud Agent)
 const EmployeeApiKeyManager = require('./lib/EmployeeApiKeyManager');
@@ -79,6 +89,7 @@ const SchemaManager = require('./lib/SchemaManager');
 const EmployeePortalDatabase = require('./lib/EmployeePortalDatabase');
 const DocumentRegistry = require('./lib/DocumentRegistry');
 const FolderRegistry = require('./lib/FolderRegistry');
+const ReleasablePartnersRegistry = require('./lib/ReleasablePartnersRegistry');
 const EnterpriseDocumentManager = require('./lib/EnterpriseDocumentManager');
 const ReEncryptionService = require('./lib/ReEncryptionService');
 const { ServiceAccessService, createTrustRegistry, createIssuerResolver, verifyPresentationCredentials, decodeJWT, verifyES256KSignature } = require('service-access-didcomm');
@@ -945,7 +956,7 @@ app.get('/api/company/connections', requireCompany, async (req, res) => {
     let dbConnectionMap = new Map();
     if (process.env.ENTERPRISE_DB_PASSWORD) {
       try {
-        dbConnectionMap = await getEnterpriseDb().getEmployeeConnectionMap();
+        dbConnectionMap = await getEnterpriseDb().getEmployeeConnectionMap(req.company.id);
       } catch (e) { console.warn('[connections] DB enrich skipped:', e.message); }
     }
 
@@ -977,19 +988,32 @@ app.get('/api/company/connections', requireCompany, async (req, res) => {
     }
 
     // HR-invited connections (non-↔)
-    const hrEmployees = connections
+    let hrEmployees = connections
       .filter(conn => isEmployeeConnection(conn, softDeleted))
       .map(enrichConn);
 
-    // EmployeeWalletManager (↔) connections: include if DB-backed and not already shown by name
-    const shownNames = new Set(hrEmployees.map(e => (e.employeeName || '').toLowerCase()).filter(Boolean));
+    // An employee's techcorp_connection_id (dbConnectionMap) is the DB's canonical connection
+    // for that email — same fix as /api/admin/employee-index applies here (see its comment for
+    // the full rationale). The old name-based dedup below let any connection resolving to the
+    // same employeeEmail (e.g. via a stale pendingInvitations/label match) silently shadow the
+    // real DB-canonical connection, hiding the vast majority of a company's actual employees
+    // (confirmed: 39 of TechCorp's 43 active employees were being dropped this way).
+    const canonicalConnIdByEmail = new Map();
+    for (const [connId, row] of dbConnectionMap.entries()) {
+      if (row.email) canonicalConnIdByEmail.set(row.email.toLowerCase(), connId);
+    }
+    hrEmployees = hrEmployees.filter(e => {
+      const canonical = e.employeeEmail && canonicalConnIdByEmail.get(e.employeeEmail.toLowerCase());
+      return !canonical || canonical === e.connectionId;
+    });
+
+    // Add DB-backed canonical connections not already shown
     const shownIds = new Set(hrEmployees.map(e => e.connectionId));
     const connById = new Map(connections.map(c => [c.connectionId, c]));
 
     const dbEmployees = [];
     for (const [connId, dbRow] of dbConnectionMap.entries()) {
       if (shownIds.has(connId)) continue;
-      if (dbRow.full_name && shownNames.has(dbRow.full_name.toLowerCase())) continue;
       const conn = connById.get(connId);
       if (!conn) continue;
       if (softDeleted.has(connId)) continue;
@@ -1604,7 +1628,7 @@ app.get('/api/company/connections/:connectionId/invitation-data', requireCompany
  * Shared helper: issue ServiceConfiguration VC to a connection.
  * Extracted so both auto-issue-config and rp-proof-status can call it.
  */
-async function issueServiceConfigVC(connectionId, name, email, rawDepartment, company, realPersonClaims = null) {
+async function issueServiceConfigVC(connectionId, name, email, rawDepartment, company, realPersonClaims = null, existingWallet = null) {
   const VALID_DEPTS = ['HR', 'IT', 'Security'];
   const resolvedDepartment = VALID_DEPTS.includes(rawDepartment) ? rawDepartment : 'IT';
 
@@ -1614,7 +1638,7 @@ async function issueServiceConfigVC(connectionId, name, email, rawDepartment, co
   console.log(`\n📝 [AUTO-ISSUE] Issuing ServiceConfiguration to ${name} (${email})`);
   const claims = await ServiceConfigVCBuilder.buildServiceConfigClaims({
     email, name, department: resolvedDepartment, connectionId
-  }, company, realPersonClaims);
+  }, company, realPersonClaims, existingWallet);
 
   const schemaId = await SchemaManager.ensureServiceConfigSchema(
     MULTITENANCY_CLOUD_AGENT_URL,
@@ -2395,54 +2419,202 @@ async function resolveConnectionByDID(agentUrl, apiKey, fromDid) {
 // RealPerson fallback branch that certification-authority's copy had — the shared ClaimExtractor's
 // one rule table restores it; (2) real ES256K signature verification + a fail-closed trust
 // registry check are now performed post-hoc, not just relied on via Cloud Agent's internal state.
-const employeeRoleTrustRegistry = createTrustRegistry([
-  { did: COMPANIES.techcorp.did, vcTypes: ['EmployeeRole'] },
-  { did: COMPANIES.acme.did,     vcTypes: ['EmployeeRole'] },
-]);
+// Config-driven registry: builds one ServiceAccessService (+ shared trust registry entry) per
+// company returned by getAllCompanies(), instead of hand-wiring each tenant at this call site.
+// Adding (or fixing, as with evilcorp — defined in lib/companies.js but previously never wired
+// up here, so its employee-portal login silently did nothing) a tenant is now a lib/companies.js
+// -only change. See lib/companyPortalRegistry.js for the full rationale.
+const { buildCompanyPortalRegistry } = require('./lib/companyPortalRegistry');
 
-const techcorpDIDComm = new ServiceAccessService({
+const companyPortalRegistry = buildCompanyPortalRegistry({
+  companies: getAllCompanies(),
   cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL,
-  apiKey:        COMPANIES.techcorp.apiKey,
   publicBaseUrl: COMPANY_PUBLIC_BASE_URL,
-  accessPath:    '/api/access',
-  tokenTTLMs:    5 * 60 * 1000,
-  verifiedEventAdapter: 'polling', // no PresentationVerified webhook wired for this Cloud Agent yet
-  async resolveConnection(fromDid) {
-    return resolveConnectionByDID(MULTITENANCY_CLOUD_AGENT_URL, COMPANIES.techcorp.apiKey, fromDid);
-  },
-  resolveIssuerDID: createIssuerResolver({ cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL, apiKey: COMPANIES.techcorp.apiKey }),
-  trustRegistry: employeeRoleTrustRegistry,
-  capabilities: {
-    'techcorp-employee-portal': {
-      label: 'TechCorp Employee Portal', icon: '🏢', mode: 'redirect',
-      redirectPath: '/company-admin/employee-portal-dashboard.html',
-      trustedIssuerVcType: 'EmployeeRole',
-      proofSpec: makeEmployeePortalProofSpec('TechCorp', COMPANIES.techcorp.did)
-    }
-  }
+  resolveConnectionByDID,
+  createIssuerResolver,
+  makeEmployeePortalProofSpec,
+  ServiceAccessService,
+  createTrustRegistry,
+  accessPath: '/api/access',
+  tokenTTLMs: 5 * 60 * 1000,
+  redirectPath: '/company-admin/employee-portal-dashboard.html',
 });
 
-const acmeDIDComm = new ServiceAccessService({
-  cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL,
-  apiKey:        COMPANIES.acme.apiKey,
-  publicBaseUrl: COMPANY_PUBLIC_BASE_URL,
-  accessPath:    '/api/access',
-  tokenTTLMs:    5 * 60 * 1000,
-  verifiedEventAdapter: 'polling',
-  async resolveConnection(fromDid) {
-    return resolveConnectionByDID(MULTITENANCY_CLOUD_AGENT_URL, COMPANIES.acme.apiKey, fromDid);
-  },
-  resolveIssuerDID: createIssuerResolver({ cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL, apiKey: COMPANIES.acme.apiKey }),
-  trustRegistry: employeeRoleTrustRegistry,
-  capabilities: {
-    'acme-employee-portal': {
-      label: 'ACME Employee Portal', icon: '⚙️', mode: 'redirect',
-      redirectPath: '/company-admin/employee-portal-dashboard.html',
-      trustedIssuerVcType: 'EmployeeRole',
-      proofSpec: makeEmployeePortalProofSpec('ACME', COMPANIES.acme.did)
+// ── Prover-side auto-responder: answer inbound present-proof requests for each company's own
+// CompanyIdentity credential ────────────────────────────────────────────────────────────────
+//
+// This is company-admin-portal's half of the wallet-side live challenge/response added
+// alongside liveIdentityVerification.ts's RealPerson/SecurityClearance flow: once a wallet has
+// connected to a company (e.g. via the OOB invitation that embeds a one-time PREVIEW of
+// CompanyIdentity, until now trusted only via TOFU DID-pinning), it can send a fresh
+// present-proof/3.0/request-presentation over the established connection and expect a
+// live-signed presentation back — cryptographic proof, not just a cached/pinned claim. The Cloud
+// Agent surfaces such an inbound request as a present-proof record with role="Prover",
+// status="RequestReceived" — the opposite role from techcorpDIDComm/acmeDIDComm above, which only
+// ever act as Verifier (requester) for EmployeeRole presentations. No generic inbound
+// present-proof poller existed for this role before; this is it.
+//
+// Multi-tenant: each company has its own wallet/apiKey on the multitenancy Cloud Agent, so this
+// polls and resolves per-company rather than globally (see resolveCompanyIdentityRecord /
+// pollInboundProofRequests below, which iterate Object.values(COMPANIES)).
+//
+// Auto-accept, no human review: CompanyIdentity is each company's own public organizational
+// identity, meant to be shown to anyone who asks — unlike techcorpDIDComm/acmeDIDComm's Verifier
+// flows above (which gate access to holder-specific employee data behind an explicit wallet
+// approval), there's nothing sensitive here for a human to gate. The one defense worth having is
+// against a confused-deputy-style request that explicitly constrains by a schema that is clearly
+// NOT the company's identity credential — see the schema check in _respondToInboundProofRequest.
+
+const PROVER_RESPONDER_POLL_MS = 10 * 1000;
+// `${companyId}:${presentationId}` currently being handled — guards against a slow prior poll
+// tick still running when the next interval fires.
+const _proverResponderInFlight = new Set();
+// companyId -> { recordId, schemaId } once resolved live, so we don't re-resolve every 10s tick.
+const _cachedCompanyIdentity = new Map();
+
+/** Best-effort extraction of a decoded credential JWT's `vc.credentialSchema.id`, or null. */
+function _decodedCredentialSchemaId(record) {
+  try {
+    const jwtString = Buffer.from(record.credential, 'base64').toString('utf-8');
+    const decoded = jwt.decode(jwtString, { complete: true });
+    return decoded?.payload?.vc?.credentialSchema?.id || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Resolve a live (still CredentialReceived/CredentialSent) issue-credentials recordId for
+ * `company`'s own CompanyIdentity credential, plus its schemaId (used by the confused-deputy
+ * check below). Live lookup every time the cache is stale, not from a static file — reuses the
+ * exact same filter this codebase already relies on when embedding CompanyIdentity into employee
+ * OOB invitations (server.js's employee-invitation handler, ~line 1097-1128), rather than
+ * re-deriving the logic.
+ */
+async function resolveCompanyIdentityRecord(company) {
+  const cached = _cachedCompanyIdentity.get(company.id);
+  if (cached) {
+    try {
+      const r = await cloudAgentRequest(company.apiKey, `/issue-credentials/records/${cached.recordId}`);
+      if (r.data.protocolState === 'CredentialReceived' || r.data.protocolState === 'CredentialSent') {
+        return cached;
+      }
+    } catch (_) { /* fall through to re-resolve */ }
+    console.warn(`[ProverResponder] Cached CompanyIdentity recordId for ${company.displayName} is no longer live — re-resolving`);
+    _cachedCompanyIdentity.delete(company.id);
+  }
+
+  try {
+    const credentialsResult = await cloudAgentRequest(company.apiKey, '/issue-credentials/records?limit=200');
+    const allRecords = credentialsResult.data.contents || [];
+    for (const r of allRecords) {
+      const isIssued = r.protocolState === 'CredentialReceived' || r.protocolState === 'CredentialSent';
+      if (!isIssued) continue;
+      let decoded;
+      try { decoded = decodeCredential(r); } catch (_) { continue; }
+      if (decoded && decoded.credentialType === 'CompanyIdentity') {
+        const entry = { recordId: r.recordId, schemaId: _decodedCredentialSchemaId(r) };
+        _cachedCompanyIdentity.set(company.id, entry);
+        console.log(`[ProverResponder] Live search found CompanyIdentity record for ${company.displayName}: ${r.recordId}`);
+        return entry;
+      }
+    }
+  } catch (e) {
+    console.error(`[ProverResponder] Live search for ${company.displayName}'s CompanyIdentity record failed:`, e.message);
+  }
+
+  return null;
+}
+
+/**
+ * Accept a single inbound present-proof request (role=Prover, status=RequestReceived) using
+ * `company`'s own CompanyIdentity credential. Never throws — all failures are logged and
+ * swallowed so one bad record (or one company) can't crash the poll loop or block any other
+ * request-handling code path.
+ */
+async function _respondToInboundProofRequest(company, presentationId) {
+  const key = `${company.id}:${presentationId}`;
+  if (_proverResponderInFlight.has(key)) return;
+  _proverResponderInFlight.add(key);
+  try {
+    // Re-fetch the record fresh — the list-poll summary could be stale by the time we get here,
+    // and we need the full `proofs` constraint for the confused-deputy check below.
+    const record = (await cloudAgentRequest(company.apiKey, `/present-proof/presentations/${presentationId}`)).data;
+    if (record.role !== 'Prover' || record.status !== 'RequestReceived') {
+      return; // already handled (by an earlier tick) or moved on for some other reason
+    }
+
+    const identity = await resolveCompanyIdentityRecord(company);
+    if (!identity) {
+      console.error(`[ProverResponder] No live CompanyIdentity credential for ${company.displayName} — cannot respond to ${presentationId}`);
+      return;
+    }
+
+    // Confused-deputy defense: if the request explicitly constrains by a schemaId that is NOT
+    // this company's identity credential's schema, this responder has no business auto-
+    // satisfying it — skip rather than attach the wrong credential. An empty/absent proofs
+    // constraint (the common case for a "prove who you are" request, matching the schema-less
+    // present-proof idiom already used elsewhere in this file, e.g. employee login) is treated
+    // as "no constraint" and accepted. Deliberately fail CLOSED (skip) rather than accept when
+    // identity.schemaId itself couldn't be resolved — previously `identity.schemaId &&` guarded
+    // the whole comparison, so an explicitly-scoped request for an unrelated schema would still
+    // get answered with this company's identity credential whenever the schemaId lookup failed.
+    const requestedSchemaIds = (record.proofs || []).map(p => p.schemaId).filter(Boolean);
+    if (requestedSchemaIds.length > 0 &&
+        !requestedSchemaIds.includes(identity.schemaId)) {
+      console.log(`[ProverResponder] Skipping ${presentationId} (${company.displayName}) — requested schema(s) [${requestedSchemaIds.join(', ')}] don't match CompanyIdentity schema (${identity.schemaId})`);
+      return;
+    }
+
+    await cloudAgentRequest(company.apiKey, `/present-proof/presentations/${presentationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ action: 'request-accept', proofId: [identity.recordId] })
+    });
+    console.log(`[ProverResponder] ✅ Accepted inbound present-proof request ${presentationId} for ${company.displayName} using CompanyIdentity record ${identity.recordId}`);
+  } catch (e) {
+    console.error(`[ProverResponder] Error handling ${presentationId} (${company.displayName}):`, e.message);
+  } finally {
+    _proverResponderInFlight.delete(key);
+  }
+}
+
+/**
+ * Poll every configured company for inbound present-proof requests where that company is being
+ * asked to prove (role=Prover) and hasn't yet responded (status=RequestReceived). Runs
+ * per-company sequentially (small, fixed company count — not worth parallelizing). Never throws
+ * — errors are logged per-company so one company's outage doesn't stop the others or kill the
+ * interval.
+ */
+async function pollInboundProofRequests() {
+  for (const company of Object.values(COMPANIES)) {
+    try {
+      // No pagination loop: the Cloud Agent's /present-proof/presentations endpoint ignores
+      // both `limit` and `offset` and always returns the full collection for the wallet in one
+      // response (confirmed: limit=2 still returned all 513 records). The old `while(true) { ...;
+      // if (page.length < pageSize) break; }` loop could therefore never observe page.length <
+      // pageSize once the wallet held more than `pageSize` records, so it never terminated —
+      // spinning forever, re-fetching and re-decoding the entire history on every iteration, for
+      // every tick of this 10s interval. That was the dominant source of this process's CPU/GC
+      // load, not the polling interval itself.
+      const result = await cloudAgentRequest(company.apiKey, `/present-proof/presentations`);
+      const page = result.data.contents || [];
+      for (const rec of page) {
+        if (rec.role === 'Prover' && rec.status === 'RequestReceived') {
+          const id = rec.presentationId || rec.id;
+          if (id) {
+            _respondToInboundProofRequest(company, id).catch(e =>
+              console.error('[ProverResponder] Unhandled error:', e.message));
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`[ProverResponder] Poll error for ${company.displayName}:`, e.message);
     }
   }
-});
+}
+
+pollInboundProofRequests();
+setInterval(pollInboundProofRequests, PROVER_RESPONDER_POLL_MS).unref();
 
 // Employee authentication configuration - uses Multitenancy Cloud Agent (port 8200)
 // This connects to TechCorp's tenant wallet for employee authentication via DIDComm
@@ -2747,6 +2919,7 @@ async function requireEmployeeWalletKey(req, res, next) {
         if (employeeRecord) {
           req.employee.email = employeeRecord.email;
           req.employee.full_name = employeeRecord.full_name;
+          req.employee.company_id = employeeRecord.company_id;
         }
       } catch (e) {
         console.warn('[requireEmployeeWalletKey] Employee lookup failed:', e.message);
@@ -2763,15 +2936,47 @@ async function requireEmployeeWalletKey(req, res, next) {
 // ─── Colleague Chat Endpoints ───────────────────────────────────────────────
 
 /**
+ * GET /api/employee-portal/connection-names
+ * Returns { connectionId: name } for the authenticated employee's own colleague connections.
+ * The enterprise Cloud Agent doesn't persist the `label` sent on the accept-side
+ * /connection-invitations call, so a colleague connection's own connectionId has no name
+ * attached at the agent level once established — connectionColleagueMap (populated at both
+ * invite-send and invite-accept time, see colleague-invite/colleague-invitations below) is the
+ * only place that name still lives.
+ */
+app.get('/api/employee-portal/connection-names', requireEmployeeWalletKey, (req, res) => {
+  const prefix = `${req.employee.wallet_id}:`;
+  const names = {};
+  for (const [key, mapping] of connectionColleagueMap.entries()) {
+    if (key.startsWith(prefix)) {
+      names[key.slice(prefix.length)] = mapping.colleagueName || mapping.colleagueEmail;
+    }
+  }
+  res.json({ success: true, names });
+});
+
+/**
  * GET /api/employee-portal/colleagues
  * Returns all active employees (excluding self) for the colleague directory.
  */
 app.get('/api/employee-portal/colleagues', requireEmployeeWalletKey, async (req, res) => {
   try {
     const db = getEnterpriseDb();
-    const all = await db.getAllActiveEmployees();
+    if (!req.employee.company_id) {
+      console.warn(`[colleagues] ${req.employee.email || req.employee.wallet_id} has no company_id on record — returning empty colleague list rather than leaking cross-tenant data`);
+      return res.json({ success: true, colleagues: [] });
+    }
+    const all = await db.getAllActiveEmployees(req.employee.company_id);
+    // is_active only means "not soft-deleted at the DB row level" — it says nothing about
+    // whether the admin has since removed this employee's connection via Employee Management's
+    // "Remove" button, which only records the connectionId in global.softDeletedConnections
+    // (a separate, admin-portal-local list) and never touches this table. Cross-reference it so
+    // the colleague directory matches what the admin's own employee list actually shows instead
+    // of listing everyone ever onboarded, including employees already removed long ago.
+    const softDeleted = global.softDeletedConnections.get(req.employee.company_id) || new Set();
     const colleagues = all
       .filter(e => e.wallet_id !== req.employee.wallet_id)
+      .filter(e => !e.techcorp_connection_id || !softDeleted.has(e.techcorp_connection_id))
       .map(e => ({ email: e.email, full_name: e.full_name, department: e.department, wallet_id: e.wallet_id }));
     res.json({ success: true, colleagues });
   } catch (err) {
@@ -2984,7 +3189,7 @@ app.get('/api/admin/employee-index', requireCompany, async (req, res) => {
     let dbConnectionMap = new Map();
     if (process.env.ENTERPRISE_DB_PASSWORD) {
       try {
-        dbConnectionMap = await getEnterpriseDb().getEmployeeConnectionMap();
+        dbConnectionMap = await getEnterpriseDb().getEmployeeConnectionMap(req.company.id);
         for (const [connId, row] of dbConnectionMap.entries()) {
           if (!connToEmployee[connId]) {
             connToEmployee[connId] = { email: row.email, name: row.full_name };
@@ -3007,17 +3212,31 @@ app.get('/api/admin/employee-index', requireCompany, async (req, res) => {
       };
     }
 
-    const hrIndex = conns.filter(c => isEmployeeConnection(c, softDeleted)).map(resolveEntry);
+    let hrIndex = conns.filter(c => isEmployeeConnection(c, softDeleted)).map(resolveEntry);
 
-    // Add DB-backed ↔ connections not already shown
-    const shownNames = new Set(hrIndex.map(e => (e.name || '').toLowerCase()).filter(Boolean));
+    // An employee's techcorp_connection_id (dbConnectionMap) is the DB's canonical connection
+    // for that email. Drop any other hrIndex entry resolving to the same email — e.g. a
+    // personal-wallet onboarding connection left behind (with a stale pending-invitations.json
+    // name/email record) when the employee's flow pivoted to an enterprise wallet — otherwise it
+    // shows as an indistinguishable duplicate "employee" and can shadow the canonical one below
+    // (same name → treated as "already shown" → the real, listening connection never appears,
+    // and admin messages silently go to a connection nothing is watching).
+    const canonicalConnIdByEmail = new Map();
+    for (const [connId, row] of dbConnectionMap.entries()) {
+      if (row.email) canonicalConnIdByEmail.set(row.email.toLowerCase(), connId);
+    }
+    hrIndex = hrIndex.filter(e => {
+      const canonical = e.email && canonicalConnIdByEmail.get(e.email.toLowerCase());
+      return !canonical || canonical === e.connectionId;
+    });
+
+    // Add DB-backed canonical connections not already shown
     const shownIds = new Set(hrIndex.map(e => e.connectionId));
     const connByIdMap = new Map(conns.map(c => [c.connectionId, c]));
     const activeStates = ['ConnectionResponseSent', 'ConnectionResponseReceived', 'Active', 'ACTIVE', 'active'];
 
     for (const [connId, row] of dbConnectionMap.entries()) {
       if (shownIds.has(connId)) continue;
-      if (row.full_name && shownNames.has(row.full_name.toLowerCase())) continue;
       const conn = connByIdMap.get(connId);
       if (!conn || !activeStates.includes(conn.state)) continue;
       if (softDeleted.has(connId)) continue;
@@ -3047,11 +3266,12 @@ app.post('/api/admin/send-message', requireCompany, async (req, res) => {
     if (!result.success) return res.status(502).json({ error: result.error });
 
     // Store the sent message in admin inbox too (as admin's own sent message)
+    const timestamp = Date.now();
     const msgs = adminInbox.get(connectionId) || [];
-    msgs.push({ from: 'admin', fromLabel: 'Admin', content, timestamp: Date.now(), messageId: result.data.id || crypto.randomUUID(), sentByAdmin: true });
+    msgs.push({ from: 'admin', fromLabel: 'Admin', content, timestamp, messageId: result.data.id || crypto.randomUUID(), sentByAdmin: true });
     adminInbox.set(connectionId, msgs.slice(-MAX_ADMIN_MSGS));
 
-    res.json({ success: true, messageId: result.data.id });
+    res.json({ success: true, messageId: result.data.id, timestamp });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -3069,6 +3289,47 @@ app.get('/api/admin/messages/:connectionId', requireCompany, (req, res) => {
   // Mark as read
   all.forEach(m => { m._adminRead = true; });
   res.json({ success: true, messages: filtered });
+});
+
+/**
+ * GET /api/admin/releasable-partners
+ * List the caller's own company's admin-managed "Releasable To" partner list.
+ */
+app.get('/api/admin/releasable-partners', requireCompany, (req, res) => {
+  try {
+    const partners = ReleasablePartnersRegistry.getPartnersForCompany(req.company.id);
+    res.json({ success: true, partners });
+  } catch (e) {
+    res.status(500).json({ success: false, error: 'InternalServerError', message: e.message });
+  }
+});
+
+/**
+ * POST /api/admin/releasable-partners
+ * Add a partner (Name + DID) to the caller's own company's list.
+ * Body: { name, did }
+ */
+app.post('/api/admin/releasable-partners', requireCompany, async (req, res) => {
+  try {
+    const { name, did } = req.body || {};
+    const partner = await ReleasablePartnersRegistry.addPartner(req.company.id, { name, did });
+    res.json({ success: true, partner });
+  } catch (e) {
+    res.status(400).json({ success: false, error: 'BadRequest', message: e.message });
+  }
+});
+
+/**
+ * DELETE /api/admin/releasable-partners/:partnerId
+ * Remove a partner from the caller's own company's list (no-op if not found).
+ */
+app.delete('/api/admin/releasable-partners/:partnerId', requireCompany, async (req, res) => {
+  try {
+    await ReleasablePartnersRegistry.removePartner(req.company.id, req.params.partnerId);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: 'InternalServerError', message: e.message });
+  }
 });
 
 /**
@@ -3120,6 +3381,27 @@ app.post('/api/enterprise-messages-webhook', async (req, res) => {
     adminMsgs.push({ from: mapping.colleagueEmail, fromLabel: mapping.colleagueName || mapping.colleagueEmail, content, timestamp: Date.now(), messageId: msg.id });
     adminInbox.set(connectionId, adminMsgs.slice(-MAX_ADMIN_MSGS));
   }
+});
+
+/**
+ * POST /api/audit/document-event
+ * Unauthenticated inbound receiver (matches the existing convention of
+ * /api/enterprise-messages-webhook and /api/didcomm-webhook/:company — trusts
+ * network topology, no shared secret) for CRUD/access audit events emitted by
+ * identus-document-service's AuditEmitter (see AUDIT_FALLBACK_URL in its .env).
+ * Merges into the same access-gate-log.jsonl collector the admin dashboard reads.
+ */
+app.post('/api/audit/document-event', (req, res) => {
+  const { event, documentDID, ownerCompanyDID, title, actorEmail, clearanceLevel } = req.body || {};
+  if (!VALID_AUDIT_EVENT_TYPES.includes(event) || !documentDID) {
+    return res.status(400).json({ success: false, error: 'BadRequest', message: 'event must be one of ' + VALID_AUDIT_EVENT_TYPES.join('|') + ' and documentDID is required' });
+  }
+  res.json({ success: true }); // ack immediately, matching /api/enterprise-messages-webhook's fire-and-forget style
+  const logEntry = buildLogEntryFromAuditWebhook({
+    event, documentDID, ownerCompanyDID, title, actorEmail, clearanceLevel,
+    clientIp: req.ip || req.connection?.remoteAddress || null
+  });
+  fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify(logEntry) + '\n', () => {});
 });
 
 /**
@@ -3922,15 +4204,18 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
     // Issue SecurityClearanceGrant VC if a valid clearance was provided in the login VP
     // and no active grant already exists for this holder+level combination
     if (hasClearanceVC && clearanceLevel && clearanceLevel !== 'UNKNOWN') {
-      const techCorp = getCompany('techcorp');
+      // Resolve the employee's actual employer from the session's issuerDID (falls back
+      // to techcorp for legacy sessions predating issuerDID storage) — issuance must go
+      // through the employer's own tenant wallet/apiKey, not always TechCorp's.
+      const employerCompany = resolveEmployerCompany(session.issuerDID);
       const enterpriseConnectionId = session.connectionId;
-      if (techCorp && enterpriseConnectionId) {
+      if (employerCompany && enterpriseConnectionId) {
         const SECURITY_CLEARANCE_GRANT_SCHEMA_GUID = 'f33eedc7-aa47-3e05-bc80-cf5388d00562';
 
         // Check if an active SecurityClearanceGrant already exists to avoid duplicate offers
         let alreadyHasGrant = false;
         try {
-          const existing = await cloudAgentRequest(techCorp.apiKey, '/issue-credentials/records?limit=200');
+          const existing = await cloudAgentRequest(employerCompany.apiKey, '/issue-credentials/records?limit=200');
           const records = existing.data?.contents || [];
           alreadyHasGrant = records.some(r =>
             (r.claims?.credentialType === 'SecurityClearanceGrant' || r.claims?.clearanceLevel) &&
@@ -3948,7 +4233,7 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
           const grantedAt = new Date().toISOString();
           const validUntil = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
           const credentialOffer = {
-            issuingDID: techCorp.did,
+            issuingDID: employerCompany.did,
             connectionId: enterpriseConnectionId,
             schemaId: `${MULTITENANCY_CLOUD_AGENT_URL}/schema-registry/schemas/${SECURITY_CLEARANCE_GRANT_SCHEMA_GUID}`,
             credentialFormat: 'JWT',
@@ -3960,7 +4245,7 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
               credentialType: 'SecurityClearanceGrant',
               clearanceLevel: clearanceLevel.toUpperCase(),
               holderDID: prismDid || '',
-              issuerDID: techCorp.did,
+              issuerDID: employerCompany.did,
               grantedAt,
               validUntil,
             },
@@ -3968,7 +4253,7 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
             awaitConfirmation: false
           };
 
-          cloudAgentRequest(techCorp.apiKey, '/issue-credentials/credential-offers', {
+          cloudAgentRequest(employerCompany.apiKey, '/issue-credentials/credential-offers', {
             method: 'POST',
             body: JSON.stringify(credentialOffer)
           }).then(result => {
@@ -4122,8 +4407,7 @@ function handleDIDCommWebhook(didCommService, companyLabel) {
   });
 }
 
-app.use('/api/didcomm-webhook/techcorp', handleDIDCommWebhook(techcorpDIDComm, 'TechCorp'));
-app.use('/api/didcomm-webhook/acme',     handleDIDCommWebhook(acmeDIDComm, 'ACME'));
+companyPortalRegistry.mountAllWebhooks(app, handleDIDCommWebhook);
 
 /**
  * GET /api/enterprise-portal/grant-status?requestId=<the original service-access/1.0/request id>
@@ -4136,7 +4420,7 @@ app.get('/api/enterprise-portal/grant-status', (req, res) => {
   const key = req.query.requestId || req.query.proofId;
   if (!key) return res.status(400).json({ success: false, error: 'Missing requestId' });
 
-  const result = techcorpDIDComm.consumeGrant(key) ?? acmeDIDComm.consumeGrant(key);
+  const result = companyPortalRegistry.consumeGrant(key);
   if (result?.grant) {
     console.log(`[EnterprisePortalGrant] Grant consumed for key ${String(key).slice(0, 12)}...: ${result.grant.accessUrl}`);
     return res.json({ success: true, grant: result.grant });
@@ -4154,13 +4438,12 @@ app.get('/api/access', async (req, res) => {
   const { token } = req.query;
   if (!token) return res.status(400).send(accessDeniedPage('Missing token parameter.'));
 
-  const techcorpEntry = techcorpDIDComm.getToken(token);
-  const acmeEntry = techcorpEntry ? null : acmeDIDComm.getToken(token);
-  const entry = techcorpEntry || acmeEntry;
+  const found = companyPortalRegistry.getToken(token);
+  const entry = found ? found.entry : null;
   if (!entry)              return res.status(404).send(accessDeniedPage('Token not found. It may have expired or never existed.'));
   if (entry.used)          return res.status(410).send(accessDeniedPage('This access link has already been used. Request a new one from your wallet.'));
   if (Date.now() > entry.expiresAt) return res.status(410).send(accessDeniedPage('This access link has expired. Request a new one from your wallet.'));
-  const entryCompanyId = techcorpEntry ? 'techcorp' : (acmeEntry ? 'acme' : null);
+  const entryCompanyId = found ? found.companyId : null;
   const entryCompany = entryCompanyId ? getAllCompanies().find(c => c.id === entryCompanyId) : null;
 
   entry.used = true;
@@ -4423,11 +4706,19 @@ setInterval(async () => {
             }
           }
 
-          await issueServiceConfigVC(connectionId, fullName, email, data.department || '', company, claims);
-
           // SSI-compliant enterprise onboarding gate: EmployeeRole VC is only issued AFTER
           // the personal wallet has presented the RealPerson VC and photoDID is in DB.
           // Pass realPersonClaims so photo is embedded directly in the EmployeeRole VC.
+          //
+          // This wallet creation runs BEFORE issueServiceConfigVC (and its result is passed
+          // into that call below) rather than each independently calling createEmployeeWallet.
+          // They used to run as two separate full 14-step onboarding flows for the same
+          // employee — two wallets, two PRISM DIDs, two EmployeeRole VCs, with whichever DB
+          // write landed last silently winning — and the second one always passed
+          // companyDID=null (falling back to TECHCORP_PRISM_DID), so every ACME/EvilCorp
+          // employee's "canonical" EmployeeRole VC falsely claimed TechCorp as issuer. One
+          // wallet, created once with the correct companyDID, fixes both.
+          let employeeWallet = null;
           if (data.triggerEnterpriseOnboarding && !data.enterpriseOnboardingStarted) {
             data.enterpriseOnboardingStarted = true;
             global.pendingInvitations.set(connectionId, data);
@@ -4444,12 +4735,14 @@ setInterval(async () => {
             // no credential, and no way to retry since 'complete' is a terminal state the loop
             // skips forever. Now a thrown error here falls through to this loop's own outer
             // catch block, which already handles the 'issuing' → 'failed' transition correctly.
-            const w = await EmployeeWalletManager.createEmployeeWallet(
+            employeeWallet = await EmployeeWalletManager.createEmployeeWallet(
               { email, name: fullName, department: data.department || 'IT' },
-              null, // companyDID — resolved inside manager
+              company, // full employer config — the EmployeeRole VC is now cryptographically
+              // signed with company.did (previously always signed with TechCorp's DID
+              // regardless of the employee's real employer; see EmployeeWalletManager.js)
               rpClaims
             );
-            console.log(`[AUTO-PROOF] ✅ Enterprise wallet created for ${email}: walletId=${w.walletId}`);
+            console.log(`[AUTO-PROOF] ✅ Enterprise wallet created for ${email}: walletId=${employeeWallet.walletId}`);
             // DB row now exists — persist photoDid (the earlier call found no row). Best-effort:
             // a failure here is logged but doesn't undo the wallet creation that already succeeded.
             if ((data.uniqueId || data.photo) && process.env.ENTERPRISE_DB_PASSWORD) {
@@ -4462,6 +4755,8 @@ setInterval(async () => {
               }
             }
           }
+
+          await issueServiceConfigVC(connectionId, fullName, email, data.department || '', company, claims, employeeWallet);
 
           data.proofState = 'complete';
           global.pendingInvitations.set(connectionId, data);
@@ -4507,6 +4802,20 @@ setInterval(async () => {
       if (data.proofState === 'issuing') {
         data.proofState = 'failed';
         data.proofError = err.message;
+        global.pendingInvitations.set(connectionId, data);
+      }
+      // Initial connection-lookup itself failed (data.proofState still falsy — never even
+      // reached 'sending'). Unlike the two states above, this path previously had no retry cap:
+      // a connection that will never exist (e.g. 404 RecordIdNotFound) was retried every 4s
+      // forever, surviving restarts via pending-invitations.json persistence. Bound it the same
+      // way the RequestSent-timeout path already bounds itself (5 attempts, then terminal).
+      if (!data.proofState) {
+        data.lookupFailCount = (data.lookupFailCount || 0) + 1;
+        if (data.lookupFailCount > 5) {
+          data.proofState = 'failed';
+          data.proofError = `Connection lookup failed after 5 attempts: ${err.message}`;
+          console.warn(`[AUTO-PROOF] Giving up on ${connectionId.substring(0,8)}... after ${data.lookupFailCount} failed connection lookups`);
+        }
         global.pendingInvitations.set(connectionId, data);
       }
     } finally {
@@ -4569,10 +4878,13 @@ app.post('/api/employee-portal/training/complete', requireEmployeeSession, async
 
     console.log(`[Training] Using connection: ${connectionId}`);
 
-    // Get TechCorp company info
-    const techCorp = getCompany('techcorp');
-    if (!techCorp) {
-      throw new Error('TechCorp company not found');
+    // Resolve the employee's actual employer from the session's issuerDID (falls back to
+    // techcorp for legacy sessions predating issuerDID storage) — the connectionId above
+    // lives on the employer's own tenant wallet on the multitenancy Cloud Agent, so
+    // issuance must use that same tenant's apiKey/did or it 404s (RecordIdNotFound).
+    const employerCompany = resolveEmployerCompany(session.issuerDID);
+    if (!employerCompany) {
+      throw new Error('Employer company not found');
     }
 
     // Generate certificate details
@@ -4584,7 +4896,7 @@ app.post('/api/employee-portal/training/complete', requireEmployeeSession, async
     const trainingYear = completionDate.getFullYear().toString();
 
     // Get cached CIS Training schema GUID
-    const schemaManager = new SchemaManager(techCorp.apiKey, MULTITENANCY_CLOUD_AGENT_URL);
+    const schemaManager = new SchemaManager(employerCompany.apiKey, MULTITENANCY_CLOUD_AGENT_URL);
     const schemaCache = await schemaManager.loadCache();
 
     if (!schemaCache.cisTrainingSchemaGuid) {
@@ -4612,7 +4924,7 @@ app.post('/api/employee-portal/training/complete', requireEmployeeSession, async
 
     // Issue credential via Cloud Agent
     const credentialOffer = {
-      issuingDID: techCorp.did, // TechCorp's PRISM DID for signing the credential
+      issuingDID: employerCompany.did, // Employer's PRISM DID for signing the credential
       connectionId,
       schemaId: `${MULTITENANCY_CLOUD_AGENT_URL}/schema-registry/schemas/${schemaGuid}`,
       credentialFormat: 'JWT',
@@ -4622,7 +4934,7 @@ app.post('/api/employee-portal/training/complete', requireEmployeeSession, async
     };
 
     const result = await cloudAgentRequest(
-      techCorp.apiKey,
+      employerCompany.apiKey,
       '/issue-credentials/credential-offers',
       {
         method: 'POST',
@@ -4674,15 +4986,17 @@ app.get('/api/employee-portal/training/status/:recordId', requireEmployeeSession
   const session = req.employeeSession;
 
   try {
-    // Get TechCorp company info
-    const techCorp = getCompany('techcorp');
-    if (!techCorp) {
-      throw new Error('TechCorp company not found');
+    // Resolve the employee's actual employer from the session's issuerDID (falls back to
+    // techcorp for legacy sessions predating issuerDID storage) — must match whichever
+    // tenant the credential-offer above was actually created on.
+    const employerCompany = resolveEmployerCompany(session.issuerDID);
+    if (!employerCompany) {
+      throw new Error('Employer company not found');
     }
 
     // Query Cloud Agent for credential record status
     const result = await cloudAgentRequest(
-      techCorp.apiKey,
+      employerCompany.apiKey,
       `/issue-credentials/records/${recordId}`
     );
 
@@ -4708,6 +5022,61 @@ app.get('/api/employee-portal/training/status/:recordId', requireEmployeeSession
       success: false,
       error: 'InternalServerError',
       message: error.message || 'Failed to check training status'
+    });
+  }
+});
+
+/**
+ * GET /api/employee-portal/releasable-options
+ * Returns the caller's own company plus its admin-managed "Releasable To"
+ * partner list, for rendering the document-upload modal's checkbox list.
+ * Company identity is derived exclusively from the verified session's
+ * issuerDID (via resolveEmployerCompany) — never from client-supplied input.
+ *
+ * SECURITY: resolveEmployerCompany() silently falls back to techcorp when
+ * issuerDID is missing or matches no known company (documented as covering
+ * legacy sessions predating issuerDID storage). That fallback is appropriate
+ * for the credential-issuance routes it was designed for (they need *some*
+ * tenant apiKey to proceed), but this route discloses company-identifying
+ * data (another tenant's admin-curated partner names + DIDs) — trusting a
+ * silent fallback here would leak techcorp's specific partner list to a
+ * session that was never confirmed to belong to techcorp. Only the branch
+ * where session.issuerDID actually matches the resolved company's own DID is
+ * trusted; anything else returns an empty partner list rather than another
+ * tenant's data.
+ */
+app.get('/api/employee-portal/releasable-options', requireEmployeeSession, (req, res) => {
+  try {
+    const session = req.employeeSession;
+    const employerCompany = resolveEmployerCompany(session.issuerDID);
+    if (!employerCompany) {
+      throw new Error('Employer company not found');
+    }
+
+    const isConfidentMatch = !!session.issuerDID && prismDidsMatch(session.issuerDID, employerCompany.did);
+    if (!isConfidentMatch) {
+      console.warn(`[ReleasableOptions] issuerDID (${session.issuerDID || 'none'}) did not confidently match a known company — returning empty partner list rather than falling back to ${employerCompany.id}`);
+      return res.json({
+        success: true,
+        ownCompany: { name: 'Your Company', did: session.issuerDID || null },
+        partners: []
+      });
+    }
+
+    const partners = ReleasablePartnersRegistry.getPartnersForCompany(employerCompany.id)
+      .filter(p => p.did !== employerCompany.did);
+
+    res.json({
+      success: true,
+      ownCompany: { name: employerCompany.name, did: employerCompany.did },
+      partners
+    });
+  } catch (error) {
+    console.error('[ReleasableOptions] Error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'InternalServerError',
+      message: error.message || 'Failed to load releasable-to options'
     });
   }
 });
@@ -5556,34 +5925,47 @@ function extractDIDInfo(documentDID) {
 
 /**
  * GET /api/documents/discover
- * Discover documents by issuer DID (from employee's EmployeeRole VC)
+ * Discover documents released to the caller's own employer.
  *
  * Query Parameters:
- * - issuerDID: Company DID from employee's EmployeeRole credential
+ * - sessionId (or x-session-id header): employee session token — required
+ *
+ * SECURITY: issuerDID is deliberately NOT read from the query string. It used to be, which
+ * meant any authenticated employee could ask "show me <any other company>'s documents" simply
+ * by changing the query parameter — the server never checked it against who was actually
+ * logged in. The company being queried must come from the caller's own authenticated session,
+ * exactly like every other per-employer field it exposes (clearanceLevel, department, etc.).
  *
  * Returns: Array of discoverable documents (filtered by clearance level from session)
  */
 app.get('/api/documents/discover', async (req, res) => {
   try {
-    const { issuerDID } = req.query;
-
-    if (!issuerDID) {
-      return res.status(400).json({
-        success: false,
-        error: 'BadRequest',
-        message: 'issuerDID query parameter is required'
-      });
-    }
-
-    // Extract clearance level from employee session (if authenticated)
-    // If no session or no clearance, defaults to null (INTERNAL access only)
     const sessionIdFromQuery = req.query.sessionId;
     const sessionIdFromHeader = req.headers['x-session-id'];
     console.log(`[DocumentRegistry] Session lookup - query: ${sessionIdFromQuery?.substring(0,20)}..., header: ${sessionIdFromHeader?.substring(0,20)}...`);
     console.log(`[DocumentRegistry] Active sessions: ${employeeSessions.size}`);
 
     const session = employeeSessions.get(sessionIdFromQuery) || employeeSessions.get(sessionIdFromHeader);
-    const clearanceLevel = session?.clearanceLevel || null;
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized',
+        message: 'A valid employee session is required to discover documents'
+      });
+    }
+
+    // Authoritative company identifier — the session's own issuerDID, set at login time from
+    // the employee's cryptographically-verified EmployeeRole VC. Never the query string.
+    const issuerDID = session.issuerDID;
+    if (!issuerDID) {
+      return res.status(403).json({
+        success: false,
+        error: 'NoEmployer',
+        message: 'Session has no associated employer DID'
+      });
+    }
+
+    const clearanceLevel = session.clearanceLevel || null;
 
     console.log(`[DocumentRegistry] Document discovery request for issuerDID: ${issuerDID}`);
     console.log(`[DocumentRegistry] Session found: ${!!session}, clearanceLevel: ${clearanceLevel || 'NONE (INTERNAL only)'}`);
@@ -6073,7 +6455,13 @@ app.get('/api/admin/access-logs', requireCompany, async (req, res) => {
     }).filter(Boolean);
 
     const filtered = entries.filter(e => e.companyDID === companyDID);
-    const page = filtered.reverse().slice(offset, offset + limit);
+    // Read-time enrichment: backfill documentTitle from the live DocumentRegistry for any
+    // entry whose own documentTitle is falsy (covers historical rows written before the
+    // write-site field-name bug was fixed — see lib/AccessGateLogEntry.js#enrichLogEntryTitle).
+    // Only the returned page is enriched, not the full `filtered` set, to avoid unnecessary
+    // registry lookups for rows that are never sent to the client.
+    const page = filtered.reverse().slice(offset, offset + limit)
+      .map(e => enrichLogEntryTitle(e, (did) => DocumentRegistry.documents.get(did)));
     res.json({ success: true, total: filtered.length, logs: page });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -6277,18 +6665,24 @@ app.post('/api/company/sync-clearance', requireCompany, async (req, res) => {
 
 // ============================================================================
 // Folder Registry API
+//
+// SECURITY: every route below used to take `ownerCompanyDID` from the client
+// (query string or request body) and trust it verbatim. FolderRegistry's own
+// mutators (renameFolder/deleteFolder/addDocumentToFolder) do check that a
+// folder actually belongs to the given ownerCompanyDID — but nothing stopped
+// an authenticated employee of one company from simply passing a DIFFERENT
+// company's DID in the request and reading or mutating that company's
+// folders. All routes now require a valid employee session (requireEmployeeSession)
+// and take the company identifier from req.employeeSession.issuerDID only.
 // ============================================================================
 
 /**
- * GET /api/folders?ownerCompanyDID=...
- * List all folders for a company, with document counts.
+ * GET /api/folders
+ * List all folders for the caller's own company, with document counts.
  */
-app.get('/api/folders', async (req, res) => {
+app.get('/api/folders', requireEmployeeSession, async (req, res) => {
   try {
-    const { ownerCompanyDID } = req.query;
-    if (!ownerCompanyDID) {
-      return res.status(400).json({ success: false, error: 'BadRequest', message: 'ownerCompanyDID is required' });
-    }
+    const ownerCompanyDID = req.employeeSession.issuerDID;
     const folders = FolderRegistry.getFoldersForCompany(ownerCompanyDID);
     res.json({ success: true, folders });
   } catch (err) {
@@ -6299,14 +6693,15 @@ app.get('/api/folders', async (req, res) => {
 
 /**
  * POST /api/folders
- * Create a new folder.
- * Body: { name, parentFolderId?, ownerCompanyDID }
+ * Create a new folder for the caller's own company.
+ * Body: { name, parentFolderId? }
  */
-app.post('/api/folders', async (req, res) => {
+app.post('/api/folders', requireEmployeeSession, async (req, res) => {
   try {
-    const { name, parentFolderId, ownerCompanyDID } = req.body;
-    if (!name || !ownerCompanyDID) {
-      return res.status(400).json({ success: false, error: 'BadRequest', message: 'name and ownerCompanyDID are required' });
+    const { name, parentFolderId } = req.body;
+    const ownerCompanyDID = req.employeeSession.issuerDID;
+    if (!name) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'name is required' });
     }
     const folder = await FolderRegistry.createFolder({ name, parentFolderId: parentFolderId || null, ownerCompanyDID });
     res.json({ success: true, folder });
@@ -6317,16 +6712,14 @@ app.post('/api/folders', async (req, res) => {
 });
 
 /**
- * DELETE /api/folders/:folderId?ownerCompanyDID=...
- * Delete a folder (children re-parented, documents moved to root).
+ * DELETE /api/folders/:folderId
+ * Delete a folder owned by the caller's own company (children re-parented,
+ * documents moved to root).
  */
-app.delete('/api/folders/:folderId', async (req, res) => {
+app.delete('/api/folders/:folderId', requireEmployeeSession, async (req, res) => {
   try {
     const { folderId } = req.params;
-    const { ownerCompanyDID } = req.query;
-    if (!ownerCompanyDID) {
-      return res.status(400).json({ success: false, error: 'BadRequest', message: 'ownerCompanyDID is required' });
-    }
+    const ownerCompanyDID = req.employeeSession.issuerDID;
     const result = await FolderRegistry.deleteFolder(folderId, ownerCompanyDID);
     res.json({ success: true, ...result });
   } catch (err) {
@@ -6337,15 +6730,16 @@ app.delete('/api/folders/:folderId', async (req, res) => {
 
 /**
  * PATCH /api/folders/:folderId
- * Rename a folder.
- * Body: { name, ownerCompanyDID }
+ * Rename a folder owned by the caller's own company.
+ * Body: { name }
  */
-app.patch('/api/folders/:folderId', async (req, res) => {
+app.patch('/api/folders/:folderId', requireEmployeeSession, async (req, res) => {
   try {
     const { folderId } = req.params;
-    const { name, ownerCompanyDID } = req.body;
-    if (!name || !ownerCompanyDID) {
-      return res.status(400).json({ success: false, error: 'BadRequest', message: 'name and ownerCompanyDID are required' });
+    const { name } = req.body;
+    const ownerCompanyDID = req.employeeSession.issuerDID;
+    if (!name) {
+      return res.status(400).json({ success: false, error: 'BadRequest', message: 'name is required' });
     }
     const folder = await FolderRegistry.renameFolder(folderId, name.trim(), ownerCompanyDID);
     res.json({ success: true, folder });
@@ -6357,17 +6751,16 @@ app.patch('/api/folders/:folderId', async (req, res) => {
 
 /**
  * PUT /api/folders/:folderId/documents/:documentDID
- * Move a document into a folder.
- * Body: { ownerCompanyDID }
+ * Move a document into a folder. Both the folder and the document must
+ * belong to the caller's own company — FolderRegistry checks the folder;
+ * DocumentRegistry.getDocument (releasableTo check) validates the document.
  */
-app.put('/api/folders/:folderId/documents/:documentDID', async (req, res) => {
+app.put('/api/folders/:folderId/documents/:documentDID', requireEmployeeSession, async (req, res) => {
   try {
     const { folderId, documentDID } = req.params;
-    const { ownerCompanyDID } = req.body;
-    if (!ownerCompanyDID) {
-      return res.status(400).json({ success: false, error: 'BadRequest', message: 'ownerCompanyDID is required' });
-    }
+    const ownerCompanyDID = req.employeeSession.issuerDID;
     const decodedDID = decodeURIComponent(documentDID);
+    await DocumentRegistry.getDocument(decodedDID, ownerCompanyDID); // throws if not released to this company
     await FolderRegistry.addDocumentToFolder(decodedDID, folderId, ownerCompanyDID);
     res.json({ success: true });
   } catch (err) {
@@ -6379,10 +6772,14 @@ app.put('/api/folders/:folderId/documents/:documentDID', async (req, res) => {
 /**
  * DELETE /api/folders/root/documents/:documentDID
  * Remove a document from any folder (move back to root/uncategorized).
+ * Validates the document belongs to the caller's own company before mutating —
+ * FolderRegistry's membership map has no per-document company field of its own.
  */
-app.delete('/api/folders/root/documents/:documentDID', async (req, res) => {
+app.delete('/api/folders/root/documents/:documentDID', requireEmployeeSession, async (req, res) => {
   try {
+    const ownerCompanyDID = req.employeeSession.issuerDID;
     const decodedDID = decodeURIComponent(req.params.documentDID);
+    await DocumentRegistry.getDocument(decodedDID, ownerCompanyDID); // throws if not released to this company
     await FolderRegistry.removeDocumentFromFolder(decodedDID);
     res.json({ success: true });
   } catch (err) {
@@ -6418,6 +6815,15 @@ app.post('/api/document-access/initiate', async (req, res) => {
       return res.status(400).json({ success: false, error: 'BadRequest', message: 'documentDID, employeeIdentifier, and ephemeralPublicKey are required' });
     }
 
+    // Stable email fallback (see Strategy 3 below). The wallet sends this from its EmployeeRole
+    // VC; it survives re-onboarding because email is the DB upsert key, whereas the PRISM DID in
+    // an old cached VC drifts away from the DB after the same employee is re-onboarded. Accept it
+    // from the dedicated field, or derive it if the identifier itself is already an email.
+    const employeeEmail =
+      (typeof req.body.employeeEmail === 'string' && req.body.employeeEmail.includes('@'))
+        ? req.body.employeeEmail
+        : (employeeIdentifier.includes('@') ? employeeIdentifier : null);
+
     // Validate document exists
     const document = DocumentRegistry.documents.get(documentDID);
     if (!document) {
@@ -6426,24 +6832,30 @@ app.post('/api/document-access/initiate', async (req, res) => {
 
     // Look up DIDComm connection for this employee (mirrors the employee login flow)
     let connectionId = null;
+    // Only Strategy 1 (the mapping file) carries any tenant hint — capture it so we can resolve
+    // the owning company below instead of hardcoding TechCorp (see resolveDocumentAccessTenant).
+    let mappingCompanyLabel = null;
 
     // Strategy 1: in-memory mapping file
     if (global.employeeConnectionMappings && global.employeeConnectionMappings.has(employeeIdentifier)) {
-      connectionId = global.employeeConnectionMappings.get(employeeIdentifier).connectionId;
+      const mappingEntry = global.employeeConnectionMappings.get(employeeIdentifier);
+      connectionId = mappingEntry.connectionId;
+      mappingCompanyLabel = mappingEntry.company || null;
       console.log(`[DocumentAccess] Found connection via mapping: ${employeeIdentifier} → ${connectionId}`);
     }
 
-    // Strategy 2: database fallback (email or PRISM DID)
+    // Strategy 2: database lookup by the presented identifier (PRISM DID or email)
+    // Strategy 3: stable-email fallback when the DID has drifted (re-onboarding)
     if (!connectionId && process.env.ENTERPRISE_DB_PASSWORD) {
+      const { Pool } = require('pg');
+      const enterprisePool = new Pool({
+        host: process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
+        port: process.env.ENTERPRISE_DB_PORT || 5434,
+        database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
+        user: process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
+        password: process.env.ENTERPRISE_DB_PASSWORD,
+      });
       try {
-        const { Pool } = require('pg');
-        const enterprisePool = new Pool({
-          host: process.env.ENTERPRISE_DB_HOST || '91.99.4.54',
-          port: process.env.ENTERPRISE_DB_PORT || 5434,
-          database: process.env.ENTERPRISE_DB_NAME || 'pollux_enterprise',
-          user: process.env.ENTERPRISE_DB_USER || 'identus_enterprise',
-          password: process.env.ENTERPRISE_DB_PASSWORD,
-        });
         const employeeDb = new EmployeePortalDatabase(enterprisePool);
         let employee = null;
         if (employeeIdentifier.includes('@')) {
@@ -6451,13 +6863,29 @@ app.post('/api/document-access/initiate', async (req, res) => {
         } else if (employeeIdentifier.startsWith('did:prism:')) {
           employee = await employeeDb.getEmployeeByDid(employeeIdentifier);
         }
+
+        // Strategy 3: the DID lookup found no row (common after re-onboarding leaves the wallet
+        // holding an EmployeeRole VC whose PRISM DID the DB has since overwritten). Fall back to
+        // the stable email, which still points at the current row. Safe: this only selects which
+        // DIDComm connection receives the proof request — the VP verification that follows is the
+        // real access gate, so routing by email cannot grant access to anyone who can't also
+        // present a valid, holder-bound VP over that connection.
+        if (!employee?.techcorp_connection_id && employeeEmail && employeeEmail !== employeeIdentifier) {
+          const byEmail = await employeeDb.getEmployeeByEmail(employeeEmail);
+          if (byEmail?.techcorp_connection_id) {
+            employee = byEmail;
+            console.warn(`[DocumentAccess] Identifier ${employeeIdentifier} not found in DB; resolved via stable email ${employeeEmail} (wallet VC likely predates a re-onboarding)`);
+          }
+        }
+
         if (employee?.techcorp_connection_id) {
           connectionId = employee.techcorp_connection_id;
           console.log(`[DocumentAccess] Found connection via DB: ${employeeIdentifier} → ${connectionId}`);
         }
-        await enterprisePool.end();
       } catch (dbErr) {
         console.warn('[DocumentAccess] DB fallback error:', dbErr.message);
+      } finally {
+        await enterprisePool.end();
       }
     }
 
@@ -6465,13 +6893,29 @@ app.post('/api/document-access/initiate', async (req, res) => {
       return res.status(404).json({ success: false, error: 'ConnectionNotFound', message: 'No DIDComm connection found for this employee. Please complete onboarding first.' });
     }
 
+    // Resolve which tenant's wallet actually owns this connectionId — each company has an
+    // isolated wallet/apiKey on the shared multitenancy Cloud Agent, and a present-proof request
+    // created with the wrong tenant's apiKey against this connectionId will fail (or silently
+    // never resolve) since each tenant only sees its own connections. Strategy 1 (mapping file)
+    // carries a company label; Strategy 2/3 (DB) carries none, so we probe each tenant in turn.
+    // Fails closed (404) rather than defaulting to TechCorp — see lib/resolveDocumentAccessTenant.js.
+    const tenant = await resolveDocumentAccessTenant({
+      connectionId,
+      mappingCompanyLabel,
+      cloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL
+    });
+    if (!tenant) {
+      return res.status(404).json({ success: false, error: 'TenantNotFound', message: 'Could not determine which company tenant owns this DIDComm connection.' });
+    }
+
     const challenge  = crypto.randomUUID();
     const domain     = 'document-access.company-admin';
 
-    // Create DIDComm present-proof request via Cloud Agent
-    const proofResponse = await fetch(`${TECHCORP_CLOUD_AGENT_URL}/present-proof/presentations`, {
+    // Create DIDComm present-proof request via Cloud Agent — using the resolved tenant's own
+    // apiKey (not TechCorp's) against the shared multitenancy Cloud Agent.
+    const proofResponse = await fetch(`${MULTITENANCY_CLOUD_AGENT_URL}/present-proof/presentations`, {
       method: 'POST',
-      headers: { 'apikey': TECHCORP_API_KEY, 'Content-Type': 'application/json' },
+      headers: { 'apikey': tenant.apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         connectionId,
         options: { challenge, domain },
@@ -6491,10 +6935,13 @@ app.post('/api/document-access/initiate', async (req, res) => {
     const presentationId  = proofData.presentationId || proofData.id;
     const sessionId       = presentationId;
 
-    // Store session
+    // Store session — including the resolved tenant's apiKey/cloudAgentUrl, so /status and
+    // /complete reuse the exact same tenant that created this presentation rather than
+    // re-resolving independently (which could pick a different/wrong tenant if ambiguous).
     pendingDocumentAccessSessions.set(sessionId, {
       presentationId, documentDID, connectionId, ephemeralPublicKey, challenge, domain,
-      employeeIdentifier, timestamp: Date.now(), status: 'pending'
+      employeeIdentifier, timestamp: Date.now(), status: 'pending',
+      tenantApiKey: tenant.apiKey, tenantCloudAgentUrl: MULTITENANCY_CLOUD_AGENT_URL, tenantId: tenant.id
     });
 
     // Clean up sessions older than 5 minutes
@@ -6524,8 +6971,8 @@ app.get('/api/document-access/status/:sessionId', async (req, res) => {
     }
 
     const stateRes = await fetch(
-      `${TECHCORP_CLOUD_AGENT_URL}/present-proof/presentations/${session.presentationId}`,
-      { headers: { 'apikey': TECHCORP_API_KEY } }
+      `${session.tenantCloudAgentUrl}/present-proof/presentations/${session.presentationId}`,
+      { headers: { 'apikey': session.tenantApiKey } }
     );
 
     if (!stateRes.ok) {
@@ -6567,12 +7014,14 @@ app.post('/api/document-access/complete', async (req, res) => {
     // Consume session (one-time use)
     pendingDocumentAccessSessions.delete(sessionId);
 
-    const { documentDID, ephemeralPublicKey, challenge, domain, presentationId } = session;
+    const { documentDID, ephemeralPublicKey, challenge, domain, presentationId, tenantApiKey, tenantCloudAgentUrl } = session;
 
-    // Fetch the verified presentation from Cloud Agent
+    // Fetch the verified presentation from Cloud Agent — using the same tenant apiKey that
+    // /initiate used to create this presentation (Cloud Agent presentations, like connections,
+    // are tenant-scoped, so this must not be re-resolved independently).
     const presentationRes = await fetch(
-      `${TECHCORP_CLOUD_AGENT_URL}/present-proof/presentations/${presentationId}`,
-      { headers: { 'apikey': TECHCORP_API_KEY } }
+      `${tenantCloudAgentUrl}/present-proof/presentations/${presentationId}`,
+      { headers: { 'apikey': tenantApiKey } }
     );
     if (!presentationRes.ok) {
       return res.status(502).json({ success: false, error: 'AgentError', message: 'Could not retrieve presentation from Cloud Agent' });
@@ -6818,7 +7267,7 @@ app.post('/api/access-gate/present', async (req, res) => {
         timestamp: new Date().toISOString(),
         viewerName: viewerName || null,
         documentDID,
-        documentTitle: document?.metadata?.title || null,
+        documentTitle: document?.title || null,
         clearanceLevel: clearanceLevel || null,
         companyDID: document.ownerCompanyDID || null,
         accessGranted: false,
@@ -6839,7 +7288,7 @@ app.post('/api/access-gate/present', async (req, res) => {
         timestamp: new Date().toISOString(),
         viewerName: viewerName || null,
         documentDID,
-        documentTitle: document?.metadata?.title || null,
+        documentTitle: document?.title || null,
         clearanceLevel: clearanceLevel || null,
         companyDID: document.ownerCompanyDID || null,
         accessGranted: false,
@@ -6866,7 +7315,7 @@ app.post('/api/access-gate/present', async (req, res) => {
             timestamp: new Date().toISOString(),
             viewerName: viewerName || null,
             documentDID,
-            documentTitle: document?.metadata?.title || null,
+            documentTitle: document?.title || null,
             clearanceLevel: clearanceLevel || null,
             companyDID: document.ownerCompanyDID || null,
             accessGranted: false,
@@ -7020,7 +7469,7 @@ app.post('/api/access-gate/present', async (req, res) => {
       timestamp: new Date().toISOString(),
       viewerName: viewerName || null,
       documentDID,
-      documentTitle: document?.metadata?.title || null,
+      documentTitle: document?.title || null,
       clearanceLevel: clearanceLevel || null,
       companyDID: document.ownerCompanyDID || null,
       accessGranted: true,
@@ -7028,6 +7477,9 @@ app.post('/api/access-gate/present', async (req, res) => {
       copyId,
       clientIp: req.ip || req.connection?.remoteAddress || null
     }) + '\n', () => {});
+    // Record for /api/access-gate/notify's dedup check — the wallet's first cached-key
+    // decrypt (right after this grant) must not produce a second "reopen" log row.
+    recentDocumentLogTimestamps.set(documentDID, Date.now());
 
     console.log(`[AccessGate] ✅ Access GRANTED — ephemeralDID: ${ephemeralMetadata.ephemeralDID.substring(0, 50)}...`);
 
@@ -7102,13 +7554,23 @@ app.post('/api/access-gate/notify', async (req, res) => {
       return res.status(400).json({ success: false, error: 'MissingDocumentDID' });
     }
 
+    // Dedup: skip the write if this documentDID was already logged (grant or a previous
+    // reopen) within the last DEDUP_WINDOW_MS — see lib/AccessGateLogDedup.js. This is what
+    // keeps the very first /notify call (fired immediately after a fresh grant) from
+    // producing a second, viewerName:null noise row alongside the grant's own "Granted" entry.
+    const now = Date.now();
+    if (shouldSkipDuplicateLog(recentDocumentLogTimestamps.get(documentDID), now)) {
+      console.log(`[AccessGate] 📖 Cached-key reopen suppressed (recently logged) — documentDID: ${String(documentDID).substring(0, 50)}...`);
+      return res.json({ success: true });
+    }
+
     const document = DocumentRegistry.documents.get(documentDID);
 
     fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
       timestamp: new Date().toISOString(),
       viewerName: null,
       documentDID,
-      documentTitle: document?.metadata?.title || null,
+      documentTitle: document?.title || null,
       clearanceLevel: clearanceLevel || null,
       companyDID: document?.ownerCompanyDID || null,
       accessGranted: true,
@@ -7117,6 +7579,7 @@ app.post('/api/access-gate/notify', async (req, res) => {
       clientIp: req.ip || req.connection?.remoteAddress || null,
       accessType: 'CACHED_KEY_REOPEN'
     }) + '\n', () => {});
+    recentDocumentLogTimestamps.set(documentDID, now);
 
     console.log(`[AccessGate] 📖 Cached-key reopen logged — documentDID: ${String(documentDID).substring(0, 50)}...`);
     res.json({ success: true });
@@ -7502,21 +7965,27 @@ app.post('/api/document-update/submit', uploadDocx.single('file'), async (req, r
       })();
     }
 
-    // 10. Audit log
-    fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify({
-      timestamp:     new Date().toISOString(),
-      viewerName:    editorDID,
+    // 10. Audit log — eventType "UPDATED" so it renders as "✏️ Updated" in the admin
+    // Document Access Logs table (public/app.js switches on eventType), matching the
+    // convention already used by the CREATE-event log writes above.
+    // companyDID MUST be the document's own ownerCompanyDID, not the editor's token companyDID —
+    // the edit token's companyDID reflects the *presenting editor's* employer (set at
+    // /api/document-update/request-edit time), which can legitimately differ from the
+    // document's actual owning company now that cross-company edit access is possible via
+    // Releasable-To-Partners. Attributing the update to the editor's company instead of the
+    // document's owning company would misfile it in the wrong admin's log.
+    fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify(buildLogEntry({
+      eventType:      'UPDATED',
+      viewerName:     editorDID,
       documentDID,
-      documentTitle: document?.metadata?.title || null,
-      companyDID:    document.ownerCompanyDID || companyDID || null,
-      accessGranted: true,
-      action:        'DOCUMENT_EDITED',
-      previousFileId: previousDocxFileId,
-      newFileId:     newResult.fileId,
-      versionId:     newVersion.versionId,
-      contentHash,
-      clientIp:      req.ip || null
-    }) + '\n', () => {});
+      documentTitle:  document.title || null,
+      clearanceLevel: document.classificationLevel || null,
+      companyDID:     document.ownerCompanyDID || null,
+      accessGranted:  true,
+      denialReason:   null,
+      copyId:         null,
+      clientIp:       req.ip || req.connection?.remoteAddress || null
+    })) + '\n', () => {});
 
     console.log(`[DocumentUpdate] ✅ Version ${newVersion.versionId} created for ${documentDID}`);
 
@@ -8054,7 +8523,11 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
         proofs: [],
         options: {
           challenge: require('crypto').randomBytes(16).toString('hex'),
-          domain: 'identuslabel.cz'
+          // Must contain the 'clearance' token — the wallet's DOMAIN_SCHEMA_HINTS matcher
+          // (idl-wallet/src/actions/index.ts) uses this to filter credential selection down
+          // to SecurityClearance; without it the wallet offers all shareable credential types
+          // and may present the wrong one (e.g. RealPersonIdentity).
+          domain: 'clearance.identuslabel.cz'
         }
       })
     });
@@ -8222,10 +8695,18 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
                       console.log('[ClearanceVerification] Parsed VC credentialSubject:',
                         vcPayload.vc?.credentialSubject?.credentialType || 'unknown type');
 
-                      // Check if this is a SecurityClearance VC
+                      // Check if this is a SecurityClearance VC. Issuer must be trusted — same
+                      // ACCEPTED_ISSUER_DIDS check the login flow applies to this VC type
+                      // (see isSecurityClearanceCred handling above) — otherwise any VC carrying
+                      // a self-asserted clearanceLevel/securityLevel claim from an untrusted
+                      // issuer would be accepted as a real clearance.
                       if (vcPayload.vc && vcPayload.vc.credentialSubject) {
                         const subject = vcPayload.vc.credentialSubject;
-                        if (subject.clearanceLevel) {
+                        if (!ACCEPTED_ISSUER_DIDS.includes(vcPayload.iss)) {
+                          if (subject.clearanceLevel || subject.securityLevel) {
+                            console.warn(`[ClearanceVerification] Ignoring clearanceLevel/securityLevel claim from untrusted issuer: ${vcPayload.iss}`);
+                          }
+                        } else if (subject.clearanceLevel) {
                           // Capture the personal CA DID (sub of VC JWT) for sync linkage
                           if (vcPayload.sub && !caPersonalDID) {
                             caPersonalDID = vcPayload.sub;
@@ -8267,6 +8748,20 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
         }
       }
 
+      // The wallet may have presented a credential other than SecurityClearance (e.g. the
+      // request wasn't scoped tightly enough, or the user picked the wrong VC) — 'UNKNOWN' is
+      // a not-found sentinel, not a real clearance level. Treat it as a failed verification
+      // rather than silently marking the session as cleared.
+      if (clearanceLevel === 'UNKNOWN') {
+        console.error('[ClearanceVerification] Presentation verified but no SecurityClearance credential (with clearanceLevel/securityLevel claim) was found among the presented credentials');
+        verification.status = 'failed';
+        return res.status(422).json({
+          success: false,
+          error: 'NoClearanceCredentialPresented',
+          message: 'The presented credential was not a Security Clearance credential. Please select your Security Clearance VC when approving the request in your wallet.'
+        });
+      }
+
       // Update local verification record
       verification.status = 'verified';
       verification.clearanceLevel = clearanceLevel;
@@ -8282,15 +8777,20 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
 
       // Issue SecurityClearanceGrant VC to the employee's enterprise wallet (IDL Wallet)
       // This VC appears in the employee's credential list as company confirmation of their clearance
-      const techCorp = getCompany('techcorp');
+      //
+      // Resolve the employee's actual employer from the session's issuerDID (falls back to
+      // techcorp for legacy sessions predating issuerDID storage) — enterpriseConnectionId
+      // below lives on the employer's own tenant wallet, so issuance must use that same
+      // tenant's apiKey/did or it 404s (RecordIdNotFound).
+      const employerCompany = resolveEmployerCompany(employeeSession?.issuerDID);
       const enterpriseConnectionId = employeeSession?.connectionId;
-      if (techCorp && enterpriseConnectionId && clearanceLevel !== 'UNKNOWN') {
+      if (employerCompany && enterpriseConnectionId && clearanceLevel !== 'UNKNOWN') {
         const SECURITY_CLEARANCE_GRANT_SCHEMA_GUID = 'f33eedc7-aa47-3e05-bc80-cf5388d00562';
 
         // Check if an active SecurityClearanceGrant already exists
         let alreadyHasGrant = false;
         try {
-          const existing = await cloudAgentRequest(techCorp.apiKey, '/issue-credentials/records?limit=200');
+          const existing = await cloudAgentRequest(employerCompany.apiKey, '/issue-credentials/records?limit=200');
           const records = existing.data?.contents || [];
           alreadyHasGrant = records.some(r =>
             (r.claims?.credentialType === 'SecurityClearanceGrant' || r.claims?.clearanceLevel) &&
@@ -8309,7 +8809,7 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
         const validUntil = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
 
         const credentialOffer = {
-          issuingDID: techCorp.did,
+          issuingDID: employerCompany.did,
           connectionId: enterpriseConnectionId,
           schemaId: `${MULTITENANCY_CLOUD_AGENT_URL}/schema-registry/schemas/${SECURITY_CLEARANCE_GRANT_SCHEMA_GUID}`,
           credentialFormat: 'JWT',
@@ -8317,7 +8817,7 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
             credentialType: 'SecurityClearanceGrant',
             clearanceLevel: clearanceLevel.toUpperCase(),
             holderDID: verification.prismDid || '',
-            issuerDID: techCorp.did,
+            issuerDID: employerCompany.did,
             grantedAt,
             validUntil,
           },
@@ -8325,7 +8825,7 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
           awaitConfirmation: false
         };
 
-        cloudAgentRequest(techCorp.apiKey, '/issue-credentials/credential-offers', {
+        cloudAgentRequest(employerCompany.apiKey, '/issue-credentials/credential-offers', {
           method: 'POST',
           body: JSON.stringify(credentialOffer)
         }).then(async result => {
@@ -8362,7 +8862,7 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
         });
         } // end else (!alreadyHasGrant)
       } else {
-        console.warn(`[ClearanceVerification] Skipping SecurityClearanceGrant VC issuance: techCorp=${!!techCorp}, connectionId=${enterpriseConnectionId}, clearanceLevel=${clearanceLevel}`);
+        console.warn(`[ClearanceVerification] Skipping SecurityClearanceGrant VC issuance: employerCompany=${!!employerCompany}, connectionId=${enterpriseConnectionId}, clearanceLevel=${clearanceLevel}`);
       }
 
       return res.json({
@@ -9315,9 +9815,21 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
         title: req.body.title || file.originalname,
         classificationLevel: classLevel,
         releasableTo: releasableDIDs,
+        ownerCompanyDID: session.issuerDID || null,
         metadata: { originalFilename: file.originalname, fileSize: file.size, mimeType: file.mimetype, createdBy: session.email, department: session.department, createdAt: new Date().toISOString() },
         iagonStorage: { fileId: iagonResult.fileId, nodeId: iagonResult.nodeId, filename: file.originalname, encryptionInfo: { algorithm: fileAlgorithm || 'AES-256-GCM', iv: fileIv, authTag: fileAuthTag } }
       });
+
+      fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify(buildLogEntry({
+        eventType: 'CREATED',
+        viewerName: session.email,
+        documentDID,
+        documentTitle: req.body.title || file.originalname,
+        clearanceLevel: classLevel,
+        companyDID: session.issuerDID || null,
+        accessGranted: true,
+        clientIp: req.ip || req.connection?.remoteAddress || null
+      })) + '\n', () => {});
 
       // Push KeyManifest VC to document service (versioned)
       let preEncVCId = null;
@@ -9608,6 +10120,7 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
       classificationLevel: parsedDocument.metadata.overallClassification, // DocumentRegistry requires this field name
       contentEncryptionKey: encryptedPackage.keyring?.INTERNAL || 'classified-section-keys', // Required by registry
       releasableTo: releasableDIDs,
+      ownerCompanyDID: session.issuerDID || null,
       metadata: {
         sectionCount: encryptedPackage.encryptedSections.length,
         sectionMetadata: SectionEncryptionService.getSectionMetadata(encryptedPackage),
@@ -9641,6 +10154,17 @@ app.post('/api/classified-documents/upload', requireEmployeeSession, upload.sing
     await DocumentRegistry.registerDocument(registryEntry);
 
     console.log(`   [ClassifiedUpload] Registered document: ${documentDID}`);
+
+    fs.appendFile(ACCESS_GATE_LOG_PATH, JSON.stringify(buildLogEntry({
+      eventType: 'CREATED',
+      viewerName: session.email,
+      documentDID,
+      documentTitle: parsedDocument.metadata.title,
+      clearanceLevel: parsedDocument.metadata.overallClassification,
+      companyDID: session.issuerDID || null,
+      accessGranted: true,
+      clientIp: req.ip || req.connection?.remoteAddress || null
+    })) + '\n', () => {});
 
     // =========================================================================
     // STEP 5: Push KeyManifest VC to document-service
@@ -11093,6 +11617,15 @@ app.listen(PORT, async () => {
     console.error(`   ❌ FolderRegistry initialization failed:`, error.message);
   }
 
+  // Initialize ReleasablePartnersRegistry
+  console.log('🔧 Initializing ReleasablePartnersRegistry...');
+  try {
+    await ReleasablePartnersRegistry.initialize();
+    console.log(`   ✅ ReleasablePartnersRegistry loaded (${ReleasablePartnersRegistry.partners.size} companies with partner lists)`);
+  } catch (error) {
+    console.error(`   ❌ ReleasablePartnersRegistry initialization failed:`, error.message);
+  }
+
   // Register enterprise agent webhook for ALL entity wallets (BasicMessageReceived requires per-wallet registration)
   // The /events/webhooks endpoint does not accept x-admin-api-key; per-wallet registration is required.
   // We use a deterministic key per entity (so restarts stay idempotent) and register in the background.
@@ -11155,16 +11688,11 @@ app.listen(PORT, async () => {
     }
   })();
 
-  // Register DIDComm command service webhooks with each company's Cloud Agent (idempotent)
+  // Register DIDComm command service webhooks with each company's Cloud Agent (idempotent).
+  // Runs for every company in the registry (not just techcorp/acme) — each registration is
+  // independently caught so one company's failure doesn't abort the others.
   console.log('🔧 Registering DIDComm access-request webhooks...');
-  const techcorpWebhookUrl = `${COMPANY_PUBLIC_BASE_URL}/api/didcomm-webhook/techcorp`;
-  const acmeWebhookUrl     = `${COMPANY_PUBLIC_BASE_URL}/api/didcomm-webhook/acme`;
-  techcorpDIDComm.registerWebhook(techcorpWebhookUrl).catch(e =>
-    console.error('[DIDCommAccess] TechCorp webhook registration error:', e.message)
-  );
-  acmeDIDComm.registerWebhook(acmeWebhookUrl).catch(e =>
-    console.error('[DIDCommAccess] ACME webhook registration error:', e.message)
-  );
+  companyPortalRegistry.registerAllWebhooks((id) => `${COMPANY_PUBLIC_BASE_URL}/api/didcomm-webhook/${id}`);
 
   console.log('='.repeat(70));
   console.log('✅ Server ready for connections\n');

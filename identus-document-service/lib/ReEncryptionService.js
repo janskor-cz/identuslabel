@@ -109,6 +109,27 @@ function getLevelLabel(level) {
 }
 
 // ---------------------------------------------------------------------------
+// Releasability matching
+// ---------------------------------------------------------------------------
+// PRISM DIDs compare by hash segment: releasableTo stores short-form DIDs, but the
+// issuer DID extracted from a VP may be long-form (JWT `iss`). Same convention as
+// company-admin's prismDidsMatch and the shared TrustRegistry's normalizeDid.
+function prismHash(did) {
+  return (typeof did === 'string' && did.startsWith('did:prism:')) ? did.split(':')[2] : did;
+}
+function releasableToIncludes(list, did) {
+  const h = prismHash(did);
+  return list.some(d => prismHash(d) === h);
+}
+// True if ANY of the presenter's cryptographically-verified credential issuers is on the
+// document's allowlist — checked regardless of which credential TYPE each issuer came from.
+// A document with a non-empty releasableTo must reject every presenter for whom this is false,
+// not just ones lacking one particular credential type.
+function anyIssuerReleasable(list, verifiedIssuerDIDs) {
+  return (verifiedIssuerDIDs || []).some(did => releasableToIncludes(list, did));
+}
+
+// ---------------------------------------------------------------------------
 // Replay detection
 // ---------------------------------------------------------------------------
 function checkReplay(nonce) {
@@ -292,6 +313,11 @@ function getMimeType(metadata) {
 async function processAccessRequest(opts) {
   const {
     documentDID, requestorDID, issuerDID, companyDID,
+    // Cryptographically-verified issuer of EVERY credential in the VP (see
+    // VPVerificationService.verifiedIssuerDIDs). Falls back to [companyDID] for any caller that
+    // hasn't been updated to pass the full set yet, so releasability degrades to the old
+    // single-issuer check rather than silently accepting everything.
+    verifiedIssuerDIDs = companyDID ? [companyDID] : [],
     clearanceLevelNum, clearanceLevelStr,
     ephemeralPublicKey,
     signature, ephemeralDID, timestamp, nonce,
@@ -321,13 +347,15 @@ async function processAccessRequest(opts) {
     return { success: false, error: 'REPLAY_DETECTED', message: 'Request nonce has already been used' };
   }
 
-  // Step 3: Releasability — issuer DID must be in releasableTo (when the list is non-empty).
-  // Skip for personal wallet path (companyDID === null = SecurityClearance-only VP).
-  // Also skip when releasableTo is [] — this means the DID was created without an issuer
-  // allowlist (new format that avoids PRISM's service-endpoint size limit); clearance
-  // level alone governs access in that case.
-  if (companyDID !== null && docMeta.releasableTo.length > 0 && !docMeta.releasableTo.includes(companyDID)) {
-    console.warn(`[ReEncryptionService] Releasability denied. companyDID=${companyDID}`);
+  // Step 3: Releasability — at least one presented credential's verified issuer must be in
+  // releasableTo (when the list is non-empty). Checked against EVERY verified issuer in the VP,
+  // not just an EmployeeRole's — a company-restricted document must reject a presenter who has
+  // no credential from an authorized company, no matter which credential type they chose to
+  // present. Skipped only when releasableTo is genuinely empty — this means the DID was created
+  // without an issuer allowlist (new format that avoids PRISM's service-endpoint size limit);
+  // clearance level alone governs access in that case.
+  if (docMeta.releasableTo.length > 0 && !anyIssuerReleasable(docMeta.releasableTo, verifiedIssuerDIDs)) {
+    console.warn(`[ReEncryptionService] Releasability denied. verifiedIssuerDIDs=${JSON.stringify(verifiedIssuerDIDs)}`);
     return { success: false, error: 'RELEASABILITY_DENIED', message: 'Your credential issuer is not authorized for this document' };
   }
 
@@ -380,11 +408,11 @@ async function processAccessRequest(opts) {
 
     const claims = verification.claims;
 
-    // Releasability enforced from VC — single authoritative source.
-    if (companyDID !== null &&
-        Array.isArray(claims.releasableTo) && claims.releasableTo.length > 0 &&
-        !claims.releasableTo.includes(companyDID)) {
-      console.warn(`[ReEncryptionService] Releasability denied (from VC manifest). companyDID=${companyDID}`);
+    // Releasability enforced from VC — single authoritative source. Checked against every
+    // verified issuer in the VP, not just companyDID/EmployeeRole — see anyIssuerReleasable.
+    if (Array.isArray(claims.releasableTo) && claims.releasableTo.length > 0 &&
+        !anyIssuerReleasable(claims.releasableTo, verifiedIssuerDIDs)) {
+      console.warn(`[ReEncryptionService] Releasability denied (from VC manifest). verifiedIssuerDIDs=${JSON.stringify(verifiedIssuerDIDs)}`);
       return {
         success: false,
         error:   'RELEASABILITY_DENIED',
@@ -419,9 +447,9 @@ async function processAccessRequest(opts) {
       const manifestReleasableTo = Array.isArray(manifest.releasableTo) && manifest.releasableTo.length > 0
         ? manifest.releasableTo : null;
 
-      if (companyDID !== null && docMeta.releasableTo.length === 0 && manifestReleasableTo) {
-        if (!manifestReleasableTo.includes(issuerDID)) {
-          console.warn(`[ReEncryptionService] Releasability denied (legacy manifest). issuerDID=${issuerDID}`);
+      if (docMeta.releasableTo.length === 0 && manifestReleasableTo) {
+        if (!anyIssuerReleasable(manifestReleasableTo, verifiedIssuerDIDs)) {
+          console.warn(`[ReEncryptionService] Releasability denied (legacy manifest). verifiedIssuerDIDs=${JSON.stringify(verifiedIssuerDIDs)}`);
           return { success: false, error: 'RELEASABILITY_DENIED', message: 'Your credential issuer is not authorized for this document' };
         }
       }
@@ -515,7 +543,11 @@ async function processAccessRequest(opts) {
  *                 | { success: false, error, message }>}
  */
 async function resolveDocumentDEK(opts) {
-  const { documentDID, companyDID, clearanceLevelNum, credentialStatuses, docMeta } = opts;
+  const {
+    documentDID, companyDID,
+    verifiedIssuerDIDs = companyDID ? [companyDID] : [],
+    clearanceLevelNum, credentialStatuses, docMeta
+  } = opts;
 
   // Clearance check
   const requiredLevel = getLevelNumber(docMeta.clearanceLevel);
@@ -524,9 +556,9 @@ async function resolveDocumentDEK(opts) {
       message: `Document requires ${docMeta.clearanceLevel}` };
   }
 
-  // Releasability from DID metadata
-  if (companyDID !== null && docMeta.releasableTo?.length > 0 &&
-      !docMeta.releasableTo.includes(companyDID)) {
+  // Releasability from DID metadata — checked against every verified issuer, not just companyDID
+  if (docMeta.releasableTo?.length > 0 &&
+      !anyIssuerReleasable(docMeta.releasableTo, verifiedIssuerDIDs)) {
     return { success: false, error: 'RELEASABILITY_DENIED',
       message: 'Your credential issuer is not authorized for this document' };
   }
@@ -553,8 +585,8 @@ async function resolveDocumentDEK(opts) {
 
   const claims = verification.claims;
 
-  if (companyDID !== null && Array.isArray(claims.releasableTo) && claims.releasableTo.length > 0
-      && !claims.releasableTo.includes(companyDID)) {
+  if (Array.isArray(claims.releasableTo) && claims.releasableTo.length > 0
+      && !anyIssuerReleasable(claims.releasableTo, verifiedIssuerDIDs)) {
     return { success: false, error: 'RELEASABILITY_DENIED', message: 'Your credential issuer is not authorized' };
   }
 
@@ -578,4 +610,4 @@ async function resolveDocumentDEK(opts) {
 }
 
 // ---------------------------------------------------------------------------
-module.exports = { processAccessRequest, resolveDocumentDEK, getLevelNumber, getLevelLabel };
+module.exports = { processAccessRequest, resolveDocumentDEK, encryptForEphemeralKey, getLevelNumber, getLevelLabel };

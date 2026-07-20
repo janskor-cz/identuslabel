@@ -89,17 +89,21 @@ async function verifyES256KSignature(decoded, issuerDID, resolveIssuerDID, keyPu
   const purposeRefs = issuerDoc[keyPurpose] || [];
   const allVMs       = issuerDoc.verificationMethod || [];
 
-  let keysToTry = purposeRefs
+  // SECURITY: only keys referenced by the required verification relationship (assertionMethod for
+  // credential-issuance signatures, per the W3C VC Data Model) may verify the signature. We MUST
+  // NOT fall back to trying every secp256k1 key in `verificationMethod`: PRISM DID documents
+  // routinely carry additional secp256k1 keys under OTHER relationships (e.g. an `#auth-key-1`
+  // for `authentication`), and accepting a signature from one of those would let a key that is
+  // NOT authorized for assertions issue credentials. Fail closed when no assertionMethod key
+  // matches. (Verified live: legitimate issuers reference their assertion key under
+  // assertionMethod, so this path is unaffected.)
+  const keysToTry = purposeRefs
     .map(ref => typeof ref === 'object' ? ref : allVMs.find(vm => vm.id === ref) || null)
     .filter(k => k && k.publicKeyJwk && k.publicKeyJwk.crv === 'secp256k1');
 
   if (keysToTry.length === 0) {
-    keysToTry = allVMs.filter(vm => vm.publicKeyJwk && vm.publicKeyJwk.crv === 'secp256k1');
-    if (keysToTry.length === 0) {
-      console.warn(`[jwtCrypto] No secp256k1 keys found for ${issuerDID}`);
-      return false;
-    }
-    console.warn(`[jwtCrypto] No ${keyPurpose} keys — trying all ${keysToTry.length} secp256k1 VMs`);
+    console.warn(`[jwtCrypto] No secp256k1 ${keyPurpose} key for issuer ${issuerDID} — rejecting (fail closed)`);
+    return false;
   }
 
   let sigDER;

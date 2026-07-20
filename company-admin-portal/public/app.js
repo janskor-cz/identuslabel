@@ -157,6 +157,7 @@ const app = {
         await loadCompanyCredentials(); // Load credentials after authentication
         this.loadAccessLogs();
         this.loadAdminChat();
+        this.loadReleasablePartners();
     },
 
     /**
@@ -323,6 +324,114 @@ const app = {
         if (this._autoRefreshTimer) {
             clearInterval(this._autoRefreshTimer);
             this._autoRefreshTimer = null;
+        }
+    },
+
+    /**
+     * Load this company's admin-managed "Releasable To" partner list.
+     */
+    async loadReleasablePartners() {
+        console.log('[DATA] Loading releasable partners');
+
+        try {
+            const response = await fetch('/company-admin/api/admin/releasable-partners');
+            const data = await response.json();
+
+            if (data.success) {
+                this.renderReleasablePartners(data.partners);
+            } else {
+                this.showNotification(data.error || 'Failed to load partners', 'error');
+            }
+        } catch (error) {
+            console.error('[DATA] Error loading releasable partners:', error);
+            this.showNotification('Failed to load releasable partners', 'error');
+        }
+    },
+
+    /**
+     * Render the releasable partners table.
+     */
+    renderReleasablePartners(partners) {
+        const tbody = document.getElementById('releasable-partners-table-body');
+        if (!tbody) return;
+
+        if (!partners || partners.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="3" class="empty-row">No partners added yet.</td>
+                </tr>
+            `;
+            return;
+        }
+
+        tbody.innerHTML = partners.map(p => `
+            <tr>
+                <td>${escapeHtml(p.name)}</td>
+                <td><code>${escapeHtml(p.did)}</code></td>
+                <td>
+                    <button class="btn btn-secondary btn-sm" onclick="app.removeReleasablePartner('${escapeHtml(p.id)}')">
+                        🗑️ Remove
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    },
+
+    /**
+     * Add a partner (Name + DID) to this company's releasable-to list.
+     */
+    async addReleasablePartner() {
+        const nameInput = document.getElementById('new-partner-name');
+        const didInput = document.getElementById('new-partner-did');
+        const name = nameInput ? nameInput.value.trim() : '';
+        const did = didInput ? didInput.value.trim() : '';
+
+        if (!name || !did) {
+            this.showNotification('Name and DID are both required', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch('/company-admin/api/admin/releasable-partners', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, did })
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                if (nameInput) nameInput.value = '';
+                if (didInput) didInput.value = '';
+                this.showNotification(`Added ${name}`, 'success');
+                await this.loadReleasablePartners();
+            } else {
+                this.showNotification(data.message || data.error || 'Failed to add partner', 'error');
+            }
+        } catch (error) {
+            console.error('[DATA] Error adding releasable partner:', error);
+            this.showNotification('Failed to add partner', 'error');
+        }
+    },
+
+    /**
+     * Remove a partner from this company's releasable-to list.
+     */
+    async removeReleasablePartner(partnerId) {
+        try {
+            const response = await fetch(`/company-admin/api/admin/releasable-partners/${encodeURIComponent(partnerId)}`, {
+                method: 'DELETE'
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                this.showNotification('Partner removed', 'success');
+                await this.loadReleasablePartners();
+            } else {
+                this.showNotification(data.message || data.error || 'Failed to remove partner', 'error');
+            }
+        } catch (error) {
+            console.error('[DATA] Error removing releasable partner:', error);
+            this.showNotification('Failed to remove partner', 'error');
         }
     },
 
@@ -697,15 +806,24 @@ const app = {
                 tbody.innerHTML = '<tr><td colspan="6">No access events recorded yet.</td></tr>';
                 return;
             }
-            tbody.innerHTML = data.logs.map(e => `
+            tbody.innerHTML = data.logs.map(e => {
+                const statusCell = e.eventType === 'CREATED' ? '🆕 Created'
+                  : e.eventType === 'UPDATED' ? '✏️ Updated'
+                  : e.eventType === 'DELETED' ? '🗑️ Deleted'
+                  : (e.accessGranted ? '✅ Granted' : '❌ Denied');
+                return `
               <tr class="${e.accessGranted ? '' : 'denied-row'}">
                 <td>${new Date(e.timestamp).toLocaleString()}</td>
                 <td>${e.viewerName || '—'}</td>
-                <td title="${e.documentDID}">${e.documentTitle || (e.documentDID?.substring(0, 20) + '…')}</td>
+                <td title="${e.documentDID}">
+                  <div>${e.documentTitle || '(untitled)'}</div>
+                  <div style="color:#94a3b8; font-size:13px;">${e.documentDID ? e.documentDID.substring(0, 24) + '…' : '—'}</div>
+                </td>
                 <td>${e.clearanceLevel || '—'}</td>
-                <td>${e.accessGranted ? '✅ Granted' : '❌ Denied'}</td>
+                <td>${statusCell}</td>
                 <td>${e.denialReason || '—'}</td>
-              </tr>`).join('');
+              </tr>`;
+            }).join('');
         } catch (err) {
             console.error('[AccessLogs] Failed to load:', err);
         }
@@ -1164,9 +1282,14 @@ Object.assign(app, {
             });
             const data = await res.json();
             if (!data.success) { showNotification('Failed to send message: ' + (data.error || 'Unknown error'), 'error'); return; }
-            // Optimistically add sent message
-            this._renderAdminChatMessages(this._adminChatSelectedConnectionId, [{
-                from: 'admin', fromLabel: 'Admin', content, timestamp: Date.now(), sentByAdmin: true
+            const connId = this._adminChatSelectedConnectionId;
+            const timestamp = data.timestamp || Date.now();
+            // Advance the poll cursor with the server's own timestamp for this message so the
+            // next _pollAdminChat() doesn't re-fetch (and re-render, duplicated) the message we
+            // just added optimistically below.
+            this._adminChatLastSeen[connId] = timestamp;
+            this._renderAdminChatMessages(connId, [{
+                from: 'admin', fromLabel: 'Admin', content, timestamp, sentByAdmin: true
             }], false);
         } catch (e) {
             showNotification('Send failed: ' + e.message, 'error');

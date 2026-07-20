@@ -31,6 +31,13 @@ export interface ConnectionMetadata {
   // service-access/1.0 migration window; removed once every reader is repointed (see
   // packages/service-access-didcomm and idl-wallet/src/utils/serviceAccessGrant.ts).
   isCAConnection?: boolean;
+  // Set at connection-establishment time for a connection to a company (employee OOB invitation
+  // carrying goal_code 'company-employee-verification' — see OOB.tsx's isCompanyInvitation), or
+  // backfilled by connectionAccessTargets.ts's name-match fallback for a connection that predates
+  // this flag. Mirrors isCAConnection's role but is not deprecated — unlike the CA (a single
+  // fixed service), there is no single well-known company DID this could collapse into, so the
+  // flag plus the per-connection `capabilities` entry below remain the mechanism going forward.
+  isCompanyConnection?: boolean;
   // service-access/1.0 capability keys this connection's peer is trusted to grant (e.g.
   // ['portal','login','security-clearance'] for a CA connection). Set at connection-
   // establishment time from real evidence (e.g. fetched directly from a pinned HTTPS
@@ -41,6 +48,35 @@ export interface ConnectionMetadata {
   supportedTargets?: Array<{ key: string; label: string; icon: string }>;
   // Peer DID used by the remote party for this connection (resolved at credential issuance time)
   remotePartyDid?: string;
+  // Outcome of the POST-CONNECTION live identity verification round trip (RealPerson-typed
+  // invitations only) — see utils/liveIdentityVerification.ts and components/OOB.tsx. Distinct
+  // from `establishedWithVCProof`/`vcProofType` above, which only record that a pre-connection
+  // vc-proof-0 PREVIEW was attached — not that its claimed identity was ever cryptographically
+  // proven live. Absent entirely for connections that never carried a RealPerson preview.
+  identityVerificationStatus?: 'pending' | 'verified' | 'failed';
+  identityVerificationError?: string;
+  identityVerifiedAt?: number;
+  // Full credentialSubject from the LIVE, cryptographically-verified credential (never the
+  // unverified pre-connection preview — see liveIdentityVerification.ts's `verifiedSubject` on
+  // LiveIdentityVerificationResult), persisted only once that live post-connection verification
+  // has actually passed (OOB.tsx's performLiveIdentityVerificationAndMaybeRespond and its CA/
+  // Company counterpart / ConnectionRequest.tsx's performLiveIdentityVerificationOfInvitee — all
+  // three now funnel through liveIdentityVerification.ts's shared verifyAndRecordLiveIdentity).
+  // The wallet never received an actual stored Credential from this peer (live verification
+  // proves possession without issuing/storing a VC), so there is otherwise no record at all for
+  // this connection's peer identity — this is that record, in the SAME shape as a real
+  // credential's credentialSubject (whatever fields the issuer put there: photo/firstName/
+  // lastName/uniqueId for a live-verified RealPersonIdentity, clearanceLevel/holderName/
+  // holderUniqueId/etc. for a live-verified SecurityClearance, or organizationName/companyName/
+  // registrationNumber/etc. for a live-verified CertificationAuthorityIdentity/CompanyIdentity),
+  // so it can be rendered through the same type-specific layout a real held
+  // credential uses (see CredentialCardTypeLayouts.tsx's getCredentialLayout, wired up in
+  // ConnectionCredentialsModal.tsx). Never set for an unverified/failed result. SSI-Agent
+  // security-reviewed as safe to cache (display-only, no signing material, sourced
+  // post-verification) but flagged as a point-in-time snapshot with no ongoing revocation check —
+  // readers should apply a staleness cutoff against `identityVerifiedAt` (see connections.tsx's
+  // PREVIEW_PHOTO_TTL_MS) rather than trusting it indefinitely.
+  verifiedCredentialSubject?: Record<string, any>;
 }
 
 /**
@@ -183,6 +219,35 @@ export function updateConnectionMetadata(hostDID: string, updates: Partial<Omit<
     console.log(`✅ [ConnectionMetadata] Updated metadata for: ${hostDID.substring(0, 40)}...`);
   } catch (error: any) {
     console.error('[ConnectionMetadata] Error updating connection metadata:', error);
+  }
+}
+
+/**
+ * Record the outcome of a live identity verification round trip (see
+ * utils/liveIdentityVerification.ts) for a connection, without risking clobbering unrelated
+ * fields already stored for it.
+ *
+ * `updateConnectionMetadata()` merges but silently no-ops if no metadata record exists yet for
+ * this `hostDID` — and `saveConnectionMetadata()` fully REPLACES whatever was there (it does not
+ * merge). Some connection-establishment code paths (notably OOB.tsx's RFC 0434 branch) don't
+ * call `saveConnectionMetadata()` at connection time at all, so there may be no existing record
+ * to update. This helper picks the non-destructive option in both cases: merge if a record
+ * exists, otherwise create a minimal new one (never overwriting fields it doesn't know about).
+ *
+ * @param hostDID    our own local peer DID for this connection (same key used elsewhere)
+ * @param walletType only used if no metadata record exists yet and one must be created
+ */
+export function recordIdentityVerificationResult(
+  hostDID: string,
+  walletType: WalletType,
+  patch: Pick<ConnectionMetadata, 'identityVerificationStatus'> &
+    Partial<Pick<ConnectionMetadata, 'identityVerificationError' | 'identityVerifiedAt' | 'establishedWithVCProof' | 'vcProofType' | 'verifiedCredentialSubject'>>
+): void {
+  const existing = getConnectionMetadata(hostDID);
+  if (existing) {
+    updateConnectionMetadata(hostDID, patch);
+  } else {
+    saveConnectionMetadata(hostDID, { walletType, ...patch });
   }
 }
 

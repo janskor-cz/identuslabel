@@ -107,11 +107,20 @@ implements the service side of this.
   "id": "<uuid>",
   "thid": "<the request's id>",
   "body": {
-    "error": "UNKNOWN_CAPABILITY" | "PROOF_REJECTED" | "PROOF_TIMEOUT" | "UNTRUSTED_ISSUER" | "<other capability-specific code>",
+    "error": "UNKNOWN_CAPABILITY" | "PROOF_REJECTED" | "PROOF_TIMEOUT" | "UNTRUSTED_ISSUER" | "HOLDER_BINDING_FAILED" | "<other capability-specific code>",
     "message": "human-readable detail"
   }
 }
 ```
+
+| Code | Meaning |
+|---|---|
+| `UNKNOWN_CAPABILITY` | The request's `capability` doesn't match any of this service's configured capabilities. |
+| `PROOF_REJECTED` | The Cloud Agent presentation reached a terminal non-verified state (rejected, abandoned, or its own post-hoc schema/structure check failed). |
+| `PROOF_TIMEOUT` | No verified presentation arrived within the polling timeout. |
+| `UNTRUSTED_ISSUER` | The presented credential's issuer signature verified, but that issuer is not on this capability's trust registry. |
+| `HOLDER_BINDING_FAILED` | Protocol-level (not capability-specific): either the outer VP-JWT's own signature did not verify against its `iss` DID's `authentication` key, or a contained credential's subject DID does not match that `iss` DID. Means the presenter could not be proven to be the credential's rightful holder — e.g. a copied/stolen VC-JWT replayed by a different DID. See "Trust model" below. |
+| `CHALLENGE_MISMATCH` / `STALE_REQUEST` | Anti-replay: the presentation's bound nonce didn't match the request's challenge, or the request itself was too old. |
 
 ## State machine
 
@@ -144,6 +153,18 @@ Symmetrically, a service must only grant a capability after independently verify
 presented VC's cryptographic signature against the issuer's resolved DID document and checking
 that issuer DID against its own capability-scoped trust registry — Cloud Agent's internal
 presentation-verified state is necessary but not sufficient on its own.
+
+**This is now enforced by the shared library itself, not just documented as an expectation.**
+`verifyPresentationCredentials` (`lib/verifyPresentation.js`), given the outer VP-JWT the
+presenter actually signed, additionally verifies that JWT's own signature against its `iss` DID's
+`authentication` key and rejects the presentation (`HOLDER_BINDING_FAILED`) if any contained
+credential's subject DID doesn't match that `iss` DID — i.e. it independently proves "the sender's
+own DID... is [the credential's rightful holder]", not just that some issuer once signed the
+credential for someone. `ServiceAccessService` (this package's `_onProofVerified`) always supplies
+the outer VP-JWT and fails closed if it cannot recover one from the underlying transport — there
+is no configuration flag anywhere in this package to skip this check once a service is using
+`ServiceAccessService`. A holder's own trust decision (points 1–4 above) still cannot be replaced
+by anything the service does; it remains the holder's responsibility per its own agent/wallet.
 
 ## Non-goals
 

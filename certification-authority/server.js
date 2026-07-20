@@ -5,6 +5,7 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 const axios = require('axios');
 const FormData = require('form-data');
+const pako = require('pako');
 
 // PRISM DID Parser for extracting keys from long-form PRISM DIDs
 const {
@@ -13,6 +14,7 @@ const {
 } = require('./lib/prismDIDParser');
 
 const { ServiceAccessService, createTrustRegistry, createIssuerResolver } = require('service-access-didcomm');
+const { CredentialIssuanceService } = require('credential-issuance-didcomm');
 
 const app = express();
 const PORT = process.env.PORT || 3005;
@@ -315,6 +317,18 @@ try {
   console.log('📸 [PHOTO-DIDS] Starting with empty photo DID store');
 }
 
+// ── Default avatar placeholder (used when a RealPersonIdentity VC is issued without a photo,
+// so every VC still carries a resolvable `photo` DID from day one — see createPhotoDID / the
+// LinkedPhoto service endpoint can be updated in-place later via /api/photos/update/:uniqueId) ──
+let DEFAULT_AVATAR_DATA_URI = null;
+try {
+  const defaultAvatarBase64 = fs.readFileSync(path.join(__dirname, 'assets', 'default-avatar.png')).toString('base64');
+  DEFAULT_AVATAR_DATA_URI = `data:image/png;base64,${defaultAvatarBase64}`;
+  console.log('📸 [PHOTO-DID] Default avatar placeholder loaded');
+} catch (e) {
+  console.error('❌ [PHOTO-DID] Failed to load default avatar placeholder:', e.message);
+}
+
 function savePhotoDIDs() {
   try {
     fs.writeFileSync(PHOTO_DIDS_FILE, JSON.stringify(photoDIDs, null, 2), 'utf8');
@@ -360,6 +374,50 @@ async function getTrustedIssuerDIDs() {
 }
 
 /**
+ * Live StatusList2021 revocation check — the server-side twin of
+ * revocation-management.html's decodeStatusList/checkRevocationStatus (identical algorithm,
+ * same pako dependency). Fetches and decodes the actual current status list rather than trusting
+ * any cached "verified" flag, so credential validity is always derived from present reality.
+ * Used by /api/request-clearance and /api/session/clearance-level instead of the permanent
+ * session.clearanceData.verified cache those endpoints used to short-circuit on — that cache
+ * never got invalidated when a credential was revoked, so a revoked user's session went on
+ * reporting "already verified" forever and a fresh clearance request/issuance was silently
+ * skipped (issuing a VC must be stateless: each check has to reflect current revocation state,
+ * not memory of a past presentation).
+ *
+ * @returns {Promise<{revoked: boolean|null, checked: boolean}>} revoked/checked are both null
+ *   when no statusListCredential/statusListIndex was recorded (e.g. an older session predating
+ *   this field) or the live check itself failed — callers should treat `checked: false` as
+ *   "can't confirm still valid" and fail toward re-verifying rather than trusting the cache.
+ */
+async function isClearanceCredentialRevoked(statusListCredentialUrl, statusListIndex) {
+  if (!statusListCredentialUrl || statusListIndex === null || statusListIndex === undefined) {
+    return { revoked: null, checked: false };
+  }
+  try {
+    const response = await fetch(statusListCredentialUrl);
+    if (!response.ok) throw new Error(`Status list fetch failed: ${response.status}`);
+    const statusListCredential = await response.json();
+    const encodedList = statusListCredential.credentialSubject?.encodedList;
+    if (!encodedList) throw new Error('Status list credential has no encodedList');
+
+    const base64 = encodedList.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const decompressed = pako.inflate(Buffer.from(padded, 'base64'));
+
+    let bits = '';
+    for (let i = 0; i < decompressed.length; i++) {
+      bits += decompressed[i].toString(2).padStart(8, '0');
+    }
+
+    return { revoked: bits[statusListIndex] === '1', checked: true };
+  } catch (error) {
+    console.warn('⚠️ [CLEARANCE-LIVE-CHECK] Failed to check revocation status:', error.message);
+    return { revoked: null, checked: false };
+  }
+}
+
+/**
  * Upload a raw JPEG buffer to Iagon (no encryption — photos are served publicly via CA proxy)
  * @param {Buffer} jpegBuffer
  * @param {string} filename
@@ -385,6 +443,60 @@ async function uploadPhotoToIagon(jpegBuffer, filename) {
   if (!fileId) throw new Error(`Iagon upload returned no fileId: ${JSON.stringify(response.data)}`);
   console.log(`📸 [IAGON] Uploaded photo: ${fileId}`);
   return fileId;
+}
+
+/**
+ * Create a brand-new photo PRISM DID for a uniqueId that doesn't have one yet:
+ * upload the photo to Iagon, create a PRISM DID with a `LinkedPhoto` service endpoint,
+ * fire-and-forget publish it to the blockchain, and persist the `photoDIDs[uniqueId]` mapping.
+ *
+ * Extracted (behavior-preserving) from the RealPersonIdentity issuance handler's inline
+ * `if (photo) { ... }` "create new" branch, so other endpoints that need to create a photo DID
+ * for a uniqueId that never got one at issuance time (photo added later) can share this logic
+ * instead of re-implementing it.
+ *
+ * @param {string} uniqueId
+ * @param {string} photoDataUri - base64 data URI (e.g. "data:image/jpeg;base64,...")
+ * @returns {Promise<{photoDID: string, iagonFileId: string, proxyUrl: string}>}
+ */
+async function createPhotoDID(uniqueId, photoDataUri) {
+  // 1. Upload photo to Iagon (raw JPEG bytes, no encryption)
+  const base64 = photoDataUri.replace(/^data:image\/\w+;base64,/, '');
+  const buffer = Buffer.from(base64, 'base64');
+  const iagonFileId = await uploadPhotoToIagon(buffer, `photo-${uniqueId}-${Date.now()}.jpg`);
+  const proxyUrl = `${PUBLIC_BASE_URL}/photo-proxy/${iagonFileId}`;
+
+  // 2. Create PRISM DID with #photo service endpoint
+  const didCreateResp = await fetch(`${CLOUD_AGENT_URL}/did-registrar/dids`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
+    body: JSON.stringify({
+      documentTemplate: {
+        publicKeys: [{ id: 'auth-0', purpose: 'authentication' }],
+        services: [{
+          id: 'photo',
+          type: 'LinkedPhoto',
+          serviceEndpoint: proxyUrl
+        }]
+      }
+    })
+  });
+  if (!didCreateResp.ok) throw new Error(`DID create failed: ${await didCreateResp.text()}`);
+  const didData = await didCreateResp.json();
+  const longFormDid = didData.longFormDid;
+
+  // 3. Publish to blockchain (async fire-and-forget)
+  fetch(`${CLOUD_AGENT_URL}/did-registrar/dids/${encodeURIComponent(longFormDid)}/publications`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': API_KEY }
+  }).then(r => console.log(`📸 [PHOTO-DID] Published: ${r.status}`))
+    .catch(e => console.warn(`⚠️ [PHOTO-DID] Publish error (non-fatal): ${e.message}`));
+
+  // 4. Store mapping
+  photoDIDs[uniqueId] = { photoDID: longFormDid, iagonFileId, proxyUrl, createdAt: new Date().toISOString() };
+  savePhotoDIDs();
+
+  return { photoDID: longFormDid, iagonFileId, proxyUrl };
 }
 
 /**
@@ -641,7 +753,16 @@ app.post('/api/photos/update/:uniqueId', async (req, res) => {
     if (!photo) return res.status(400).json({ error: 'photo is required' });
 
     const existing = photoDIDs[uniqueId];
-    if (!existing) return res.status(404).json({ error: 'No photo DID registered for this user' });
+    if (!existing) {
+      // No photo DID yet — create one, but first confirm this is a known user to avoid
+      // creating orphaned photo DIDs for arbitrary/typo'd uniqueIds.
+      const mapping = global.userConnectionMappings.get(uniqueId);
+      if (!mapping) return res.status(404).json({ error: `No user mapping found for uniqueId: ${uniqueId}` });
+
+      const created = await createPhotoDID(uniqueId, photo);
+      console.log(`📸 [PHOTO-UPDATE] Created new photo DID for ${uniqueId}: ${created.iagonFileId}`);
+      return res.json({ success: true, action: 'photo-created', proxyUrl: created.proxyUrl, photoDID: created.photoDID });
+    }
 
     // Decode base64 to buffer
     const base64 = photo.replace(/^data:image\/\w+;base64,/, '');
@@ -2813,17 +2934,10 @@ app.post('/api/credentials/issue-restricted-clearance', async (req, res) => {
   }
 });
 
-// Issue RealPerson credential
-app.post('/api/credentials/issue-realperson', async (req, res) => {
-  try {
-    const {
-      connectionId,
-      credentialData,
-      selectedDID,
-      selectedSchemaGuid,
-      photo
-    } = req.body;
-    
+// Issue RealPerson credential — callable directly (e.g. from CredentialIssuanceService's
+// `realperson` capability) as well as via the HTTP route below. Behavior-preserving extraction:
+// this used to be entirely inline in the route handler.
+async function issueRealPersonCredential({ connectionId, credentialData, selectedDID, selectedSchemaGuid, photo }) {
     console.log(`🎫 Issuing RealPerson credential to connection: ${connectionId}`);
     console.log(`🆔 Using DID: ${selectedDID || 'auto-selected'}`);
     console.log(`📋 Using Schema: ${selectedSchemaGuid || 'auto-selected'}`);
@@ -2915,59 +3029,27 @@ app.post('/api/credentials/issue-realperson', async (req, res) => {
     const expiryDate = new Date(Date.now() + 63072000000).toISOString().split('T')[0]; // 2 years
     const credentialId = `REALPERSON-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
 
-    // Handle photo: upload to Iagon → create photo PRISM DID → store DID reference in VC
+    // Handle photo: upload to Iagon → create photo PRISM DID → store DID reference in VC.
+    // Always create a photo DID, even when no photo was uploaded at issuance time — falling
+    // back to a placeholder image — so every RealPersonIdentity VC carries a resolvable `photo`
+    // claim from day one. The LinkedPhoto service endpoint can be updated in-place later via
+    // /api/credentials/update-realperson or /api/photos/update/:uniqueId with no VC re-issuance.
     let photoDIDRef = null;
-    if (photo) {
-      try {
-        const uniqueId = credentialData.uniqueId;
+    try {
+      const uniqueId = credentialData.uniqueId;
 
-        // Reuse existing photo DID if one exists for this uniqueId
-        if (photoDIDs[uniqueId]) {
-          photoDIDRef = photoDIDs[uniqueId].photoDID;
-          console.log(`📸 Reusing existing photo DID for ${uniqueId}: ${photoDIDRef.substring(0, 60)}...`);
-        } else {
-          // 1. Upload photo to Iagon (raw JPEG bytes, no encryption)
-          const base64 = photo.replace(/^data:image\/\w+;base64,/, '');
-          const buffer = Buffer.from(base64, 'base64');
-          const iagonFileId = await uploadPhotoToIagon(buffer, `photo-${uniqueId}-${Date.now()}.jpg`);
-          const proxyUrl = `${PUBLIC_BASE_URL}/photo-proxy/${iagonFileId}`;
-
-          // 2. Create PRISM DID with #photo service endpoint
-          const didCreateResp = await fetch(`${CLOUD_AGENT_URL}/did-registrar/dids`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
-            body: JSON.stringify({
-              documentTemplate: {
-                publicKeys: [{ id: 'auth-0', purpose: 'authentication' }],
-                services: [{
-                  id: 'photo',
-                  type: 'LinkedPhoto',
-                  serviceEndpoint: proxyUrl
-                }]
-              }
-            })
-          });
-          if (!didCreateResp.ok) throw new Error(`DID create failed: ${await didCreateResp.text()}`);
-          const didData = await didCreateResp.json();
-          const longFormDid = didData.longFormDid;
-
-          // 3. Publish to blockchain (async fire-and-forget)
-          fetch(`${CLOUD_AGENT_URL}/did-registrar/dids/${encodeURIComponent(longFormDid)}/publications`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'apikey': API_KEY }
-          }).then(r => console.log(`📸 [PHOTO-DID] Published: ${r.status}`))
-            .catch(e => console.warn(`⚠️ [PHOTO-DID] Publish error (non-fatal): ${e.message}`));
-
-          // 4. Store mapping
-          photoDIDs[uniqueId] = { photoDID: longFormDid, iagonFileId, proxyUrl, createdAt: new Date().toISOString() };
-          savePhotoDIDs();
-          photoDIDRef = longFormDid;
-          console.log(`📸 [PHOTO-DID] Created for ${uniqueId}: ${longFormDid.substring(0, 60)}...`);
-        }
-      } catch (photoErr) {
-        console.error('❌ [PHOTO-DID] Photo processing failed (issuing VC without photo):', photoErr.message);
-        photoDIDRef = null;
+      // Reuse existing photo DID if one exists for this uniqueId
+      if (photoDIDs[uniqueId]) {
+        photoDIDRef = photoDIDs[uniqueId].photoDID;
+        console.log(`📸 Reusing existing photo DID for ${uniqueId}: ${photoDIDRef.substring(0, 60)}...`);
+      } else {
+        const created = await createPhotoDID(uniqueId, photo || DEFAULT_AVATAR_DATA_URI);
+        photoDIDRef = created.photoDID;
+        console.log(`📸 [PHOTO-DID] Created for ${uniqueId}${photo ? '' : ' (placeholder — no photo provided)'}: ${photoDIDRef.substring(0, 60)}...`);
       }
+    } catch (photoErr) {
+      console.error('❌ [PHOTO-DID] Photo DID creation failed (issuing VC without photo claim):', photoErr.message);
+      photoDIDRef = null;
     }
 
     const enrichedClaims = {
@@ -3028,7 +3110,7 @@ app.post('/api/credentials/issue-realperson', async (req, res) => {
     saveUserMappings(global.userConnectionMappings);
     console.log(`🔗 Stored connection mapping: ${credentialData.uniqueId} → ${connectionId}`);
 
-    res.json({
+    return {
       success: true,
       recordId: offerData.recordId,
       thid: offerData.thid,
@@ -3037,7 +3119,13 @@ app.post('/api/credentials/issue-realperson', async (req, res) => {
       expiryDate,
       photoDID: photoDIDRef || null,
       message: 'RealPerson credential issued successfully'
-    });
+    };
+}
+
+app.post('/api/credentials/issue-realperson', async (req, res) => {
+  try {
+    const result = await issueRealPersonCredential(req.body);
+    res.json(result);
   } catch (error) {
     console.error('❌ Error issuing credential:', error);
     res.status(500).json({
@@ -4263,7 +4351,7 @@ app.post('/api/didcomm-clearance-verify', async (req, res) => {
     if (presentation.verifiableCredential && Array.isArray(presentation.verifiableCredential)) {
       for (const vc of presentation.verifiableCredential) {
         let credentialSubject = null;
-        let vcMetadata = { issuanceDate: null, expirationDate: null, issuer: null, id: null };
+        let vcMetadata = { issuanceDate: null, expirationDate: null, issuer: null, id: null, credentialStatus: null };
 
         // Handle JWT format (most common for DIDComm)
         if (typeof vc === 'string' && vc.includes('.')) {
@@ -4285,6 +4373,7 @@ app.post('/api/didcomm-clearance-verify', async (req, res) => {
                 vcMetadata.expirationDate = payload.vc.expirationDate || payload.exp;
                 vcMetadata.issuer = payload.iss || payload.vc.issuer;
                 vcMetadata.id = payload.jti || payload.vc.id;
+                vcMetadata.credentialStatus = payload.vc.credentialStatus || null;
                 console.log(`✅ [CLEARANCE-VERIFY] JWT decoded successfully`);
               }
             } catch (jwtError) {
@@ -4298,6 +4387,7 @@ app.post('/api/didcomm-clearance-verify', async (req, res) => {
           vcMetadata.expirationDate = vc.expirationDate || vc.validUntil;
           vcMetadata.issuer = vc.issuer;
           vcMetadata.id = vc.id || vc.credentialId;
+          vcMetadata.credentialStatus = vc.credentialStatus || null;
         }
 
         if (!credentialSubject) continue;
@@ -4322,7 +4412,11 @@ app.post('/api/didcomm-clearance-verify', async (req, res) => {
             validUntil: vcMetadata.expirationDate || null,
             issuer: vcMetadata.issuer || 'Unknown',
             credentialId: vcMetadata.id || 'Unknown',
-            x25519PublicKey: x25519PublicKey // ✅ Store X25519 key
+            x25519PublicKey: x25519PublicKey, // ✅ Store X25519 key
+            // For a live re-check against current revocation status at read time — see
+            // isClearanceCredentialRevoked — instead of trusting `verified` forever.
+            statusListCredential: vcMetadata.credentialStatus?.statusListCredential || null,
+            statusListIndex: vcMetadata.credentialStatus?.statusListIndex ?? null
           };
 
           console.log(`✅ [CLEARANCE-VERIFY] Extracted clearance level: ${clearanceLevel}`);
@@ -4974,11 +5068,21 @@ app.get('/api/dashboard/content', async (req, res) => {
         // Check if session has X25519 public key (encryption capability)
         hasEncryptionCapability = !!session.x25519PublicKey;
 
-        // Check if clearance already verified
-        if (session.clearanceData?.verified) {
+        // Check if clearance already verified — re-checked live against the current status list
+        // (see isClearanceCredentialRevoked) rather than trusting the cached flag forever, so a
+        // revoked clearance doesn't keep showing as valid on the dashboard.
+        const liveRevocation = await isClearanceCredentialRevoked(
+          session.clearanceData?.statusListCredential,
+          session.clearanceData?.statusListIndex
+        );
+        if (session.clearanceData?.verified && liveRevocation.checked && !liveRevocation.revoked) {
           userClearanceLevel = session.clearanceData.level;
-          console.log(`[Dashboard API] Using cached clearance: ${userClearanceLevel}`);
+          console.log(`[Dashboard API] Using cached clearance (live-confirmed still valid): ${userClearanceLevel}`);
         } else {
+          if (session.clearanceData?.verified) {
+            console.log(`[Dashboard API] Cached clearance is stale or revoked — discarding and re-checking`);
+            session.clearanceData = null;
+          }
           // Check for pending clearance proof request and auto-update session
           console.log(`[Dashboard API] No cached clearance, checking for updates...`);
 
@@ -5036,6 +5140,7 @@ app.get('/api/dashboard/content', async (req, res) => {
 
                   // Extract credential and claims
                   let verifiedClaims = null;
+                  let verifiedCredentialStatus = null;
                   if (presentation?.verifiableCredential?.[0]) {
                     const credentialJWT = presentation.verifiableCredential[0];
                     if (typeof credentialJWT === 'string' && credentialJWT.includes('.')) {
@@ -5047,9 +5152,11 @@ app.get('/api/dashboard/content', async (req, res) => {
                         const payloadJson = Buffer.from(payloadBase64Standard + padding, 'base64').toString('utf-8');
                         const payload = JSON.parse(payloadJson);
                         verifiedClaims = payload.vc?.credentialSubject;
+                        verifiedCredentialStatus = payload.vc?.credentialStatus || null;
                       }
                     } else if (credentialJWT.credentialSubject) {
                       verifiedClaims = credentialJWT.credentialSubject;
+                      verifiedCredentialStatus = credentialJWT.credentialStatus || null;
                     }
                   }
 
@@ -5069,7 +5176,9 @@ app.get('/api/dashboard/content', async (req, res) => {
                         verified: true,
                         issuedAt: verifiedClaims.issuanceDate || new Date().toISOString(),
                         validUntil: verifiedClaims.expirationDate || null,
-                        x25519PublicKey: verifiedClaims.x25519PublicKey || null
+                        x25519PublicKey: verifiedClaims.x25519PublicKey || null,
+                        statusListCredential: verifiedCredentialStatus?.statusListCredential || null,
+                        statusListIndex: verifiedCredentialStatus?.statusListIndex ?? null
                       };
 
                       // Also update session.x25519PublicKey for compatibility with encrypted endpoint
@@ -5591,15 +5700,27 @@ app.post('/api/request-clearance', async (req, res) => {
 
     console.log(`📋 [REQUEST-CLEARANCE] Session found for: ${session.userData.firstName} ${session.userData.lastName}`);
 
-    // Check if clearance already verified
+    // Check if clearance already verified — re-checked live against the current status list
+    // (see isClearanceCredentialRevoked) rather than trusting the cached flag forever. This is
+    // the actual bug behind "user cannot request new clearance after revocation": the cache
+    // never got invalidated on revoke, so this endpoint kept reporting "already verified" and
+    // never proceeded to send a fresh proof request / issue anything.
     if (session.clearanceData?.verified) {
-      console.log(`✅ [REQUEST-CLEARANCE] Clearance already verified: ${session.clearanceData.level}`);
-      return res.json({
-        success: true,
-        message: 'Clearance already verified',
-        clearanceLevel: session.clearanceData.level,
-        alreadyVerified: true
-      });
+      const liveRevocation = await isClearanceCredentialRevoked(
+        session.clearanceData.statusListCredential,
+        session.clearanceData.statusListIndex
+      );
+      if (liveRevocation.checked && !liveRevocation.revoked) {
+        console.log(`✅ [REQUEST-CLEARANCE] Clearance already verified (live-confirmed still valid): ${session.clearanceData.level}`);
+        return res.json({
+          success: true,
+          message: 'Clearance already verified',
+          clearanceLevel: session.clearanceData.level,
+          alreadyVerified: true
+        });
+      }
+      console.log(`🔄 [REQUEST-CLEARANCE] Cached clearance is stale or revoked — discarding and proceeding with a fresh request`);
+      session.clearanceData = null;
     }
 
     // Check if there's already a pending request for this session
@@ -5805,18 +5926,28 @@ app.get('/api/session/clearance-level', async (req, res) => {
 
     console.log('✅ [CLEARANCE-CHECK] Session found for user:', sessionData.userData?.firstName, sessionData.userData?.lastName);
 
-    // If clearance already verified, return cached data
+    // If clearance already verified, return cached data — but only after live-confirming it
+    // hasn't since been revoked (see isClearanceCredentialRevoked); otherwise discard the cache
+    // and fall through to re-checking, same as /api/request-clearance.
     if (sessionData.clearanceData && sessionData.clearanceData.verified) {
-      console.log('✅ [CLEARANCE-CHECK] Returning cached clearance:', sessionData.clearanceData.level);
-      return res.json({
-        success: true,
-        userData: {
-          firstName: sessionData.userData?.firstName || 'Unknown',
-          lastName: sessionData.userData?.lastName || 'User'
-        },
-        clearanceLevel: sessionData.clearanceData.level,
-        clearanceValid: true
-      });
+      const liveRevocation = await isClearanceCredentialRevoked(
+        sessionData.clearanceData.statusListCredential,
+        sessionData.clearanceData.statusListIndex
+      );
+      if (liveRevocation.checked && !liveRevocation.revoked) {
+        console.log('✅ [CLEARANCE-CHECK] Returning cached clearance (live-confirmed still valid):', sessionData.clearanceData.level);
+        return res.json({
+          success: true,
+          userData: {
+            firstName: sessionData.userData?.firstName || 'Unknown',
+            lastName: sessionData.userData?.lastName || 'User'
+          },
+          clearanceLevel: sessionData.clearanceData.level,
+          clearanceValid: true
+        });
+      }
+      console.log('🔄 [CLEARANCE-CHECK] Cached clearance is stale or revoked — discarding and re-checking');
+      sessionData.clearanceData = null;
     }
 
     // Check if there's a pending clearance proof request for this session
@@ -5882,6 +6013,7 @@ app.get('/api/session/clearance-level', async (req, res) => {
       // Extract and decode presentation JWT (same pattern as RealPerson VC)
       let presentation = null;
       let verifiedClaims = null;
+      let verifiedCredentialStatus = null;
 
       // Cloud Agent returns presentation as JWT in data array
       if (presentationData.data && Array.isArray(presentationData.data) && presentationData.data.length > 0) {
@@ -5932,6 +6064,7 @@ app.get('/api/session/clearance-level', async (req, res) => {
               // Extract credential subject from VC
               if (payload.vc && payload.vc.credentialSubject) {
                 verifiedClaims = payload.vc.credentialSubject;
+                verifiedCredentialStatus = payload.vc.credentialStatus || null;
                 console.log('✅ [CLEARANCE-CHECK] Claims extracted from VC');
               }
             }
@@ -5941,6 +6074,7 @@ app.get('/api/session/clearance-level', async (req, res) => {
         } else if (credentialJWT.credentialSubject) {
           // Legacy format - credential is already an object
           verifiedClaims = credentialJWT.credentialSubject;
+          verifiedCredentialStatus = credentialJWT.credentialStatus || null;
         }
       }
 
@@ -5963,7 +6097,9 @@ app.get('/api/session/clearance-level', async (req, res) => {
             validUntil: verifiedClaims.expirationDate || verifiedClaims.validUntil || null,
             issuer: verifiedClaims.issuer || 'Unknown',
             credentialId: verifiedClaims.id || verifiedClaims.credentialId || 'Unknown',
-            allClaims: verifiedClaims // Store all claims for reference
+            allClaims: verifiedClaims, // Store all claims for reference
+            statusListCredential: verifiedCredentialStatus?.statusListCredential || null,
+            statusListIndex: verifiedCredentialStatus?.statusListIndex ?? null
           };
           sessionData.clearanceVerifiedAt = new Date().toISOString();
           global.userSessions.set(sessionId, sessionData);
@@ -7519,6 +7655,11 @@ app.post('/api/webhook-probe', express.json(), async (req, res) => {
     didCommCmdService.handleIncomingMessage(senderId, actualContent).catch(e =>
       console.error('[DIDCommCmd] handleIncomingMessage error:', e.message)
     );
+    // Independent fan-out to the credential-issuance/1.0 handler — both services no-op on
+    // message types outside their own protocol prefix, so this is safe to call unconditionally.
+    credentialIssuanceService.handleIncomingMessage(senderId, actualContent).catch(e =>
+      console.error('[CredentialIssuance] handleIncomingMessage error:', e.message)
+    );
   }
 
   res.status(200).json({ received: true });
@@ -7728,6 +7869,12 @@ app.post('/api/credentials/revoke/:recordId', async (req, res) => {
     console.log(`✅ [REVOCATION] Successfully revoked credential: ${recordId}`);
     console.log(`📋 [REVOCATION] Credential state: ${data.protocolState}`);
 
+    // No session cache to invalidate here — GET /api/session/clearance-level,
+    // POST /api/request-clearance, and GET /api/dashboard/content all now live-check the
+    // credential's actual current status list (isClearanceCredentialRevoked) before ever trusting
+    // a cached clearanceData.verified flag, so a revocation made here is picked up automatically
+    // on next check without this endpoint needing to know which session(s) it affects.
+
     res.json({
       success: true,
       message: 'Credential revoked successfully',
@@ -7756,7 +7903,12 @@ app.post('/api/credentials/update-realperson', async (req, res) => {
     if (!mapping) return res.status(404).json({ success: false, error: `No user mapping found for uniqueId: ${uniqueId}` });
 
     const existingPhotoDID = photoDIDs[uniqueId];
-    if (!existingPhotoDID) return res.status(400).json({ success: false, error: 'No photo DID exists for this user — photo was not included in the original credential' });
+    if (!existingPhotoDID) {
+      console.log(`📸 [UPDATE] No existing photo DID for ${uniqueId} — creating a new one`);
+      await createPhotoDID(uniqueId, newPhoto);
+      console.log(`✅ [UPDATE] Photo DID created for ${uniqueId}`);
+      return res.json({ success: true, action: 'photo-created', message: 'Photo added — no existing photo DID, created a new one' });
+    }
 
     console.log(`📸 [UPDATE] Updating photo for ${uniqueId} (in-place DID mutation)`);
     const base64 = newPhoto.replace(/^data:image\/\w+;base64,/, '');
@@ -8013,7 +8165,7 @@ const didCommCmdService = new ServiceAccessService({
       }
     },
     'security-clearance': {
-      label: 'Security Clearance', icon: '🔐', mode: 'redirect', redirectPath: '/ca/security-clearance',
+      label: 'Security Clearance', icon: '🔐', mode: 'redirect', redirectPath: '/ca/dashboard',
       trustedIssuerVcType: 'SecurityClearanceGrant',
       proofSpec: {
         // SecurityClearanceLevel v5.0.0 — the current preferred issuance version (see the
@@ -8032,6 +8184,274 @@ const didCommCmdService = new ServiceAccessService({
     }
   }
 });
+
+// ── credential-issuance/1.0: holder-driven RealPerson data submission ──────────────────────
+//
+// Additional entry point into the exact same issueRealPersonCredential() the staff-operated
+// /realperson console calls — see packages/credential-issuance-didcomm/PROTOCOL.md. A holder
+// requests the "realperson" capability, receives back the field list to fill in, and submits
+// their own firstName/lastName/gender/dateOfBirth over DIDComm instead of a staff member
+// retyping it after an informal chat. No photo support here (photos never travel over DIDComm
+// in this codebase — see issueRealPersonCredential's own comment); the credential issues with
+// the same placeholder-avatar fallback the staff console gets when no photo is supplied.
+const credentialIssuanceService = new CredentialIssuanceService({
+  cloudAgentUrl: CLOUD_AGENT_URL,
+  apiKey:        API_KEY,
+
+  async resolveConnection(fromDid) {
+    return resolveDIDToConnectionId(fromDid);
+  },
+
+  capabilities: {
+    realperson: {
+      schemaName:    'RealPerson',
+      schemaVersion: '4.0.0',
+      fields: [
+        { key: 'firstName',   label: 'First name',    type: 'string', required: true },
+        { key: 'lastName',    label: 'Last name',     type: 'string', required: true },
+        { key: 'gender',      label: 'Gender',        type: 'string', required: true },
+        { key: 'dateOfBirth', label: 'Date of birth', type: 'date',   required: true },
+      ],
+      issue: ({ connectionId, values }) => issueRealPersonCredential({
+        connectionId,
+        credentialData: {
+          firstName:   values.firstName,
+          lastName:    values.lastName,
+          gender:      values.gender,
+          dateOfBirth: values.dateOfBirth,
+        },
+        selectedDID: undefined, selectedSchemaGuid: undefined, photo: undefined,
+      }),
+    },
+  },
+});
+
+// ── Prover-side auto-responder: answer inbound present-proof requests for the CA's own
+// identity credential ──────────────────────────────────────────────────────────────────────
+//
+// This is the CA server's half of the wallet-side live challenge/response added alongside
+// liveIdentityVerification.ts's RealPerson/SecurityClearance flow: once a wallet has connected
+// to the CA (e.g. via the OOB invitation that embeds a one-time PREVIEW of
+// CertificationAuthorityIdentity, until now trusted only via TOFU DID-pinning), it can send a
+// fresh present-proof/3.0/request-presentation over the established connection and expect a
+// live-signed presentation back — cryptographic proof, not just a cached/pinned claim. The Cloud
+// Agent surfaces such an inbound request to us as a present-proof record with role="Prover",
+// status="RequestReceived" — the opposite role from didCommCmdService above, which only ever
+// acts as Verifier (requester). No generic inbound-present-proof poller existed for this role
+// before; this is it.
+//
+// Auto-accept, no human review: CertificationAuthorityIdentity is the CA's own public
+// organizational identity, meant to be shown to anyone who asks — unlike didCommCmdService's
+// Verifier flows above (which gate access to holder-specific data behind an explicit wallet
+// approval), there's nothing sensitive here for a human to gate. The one defense worth having is
+// against a confused-deputy-style request that explicitly constrains by a schema that is clearly
+// NOT our identity credential — see the schema check in _respondToInboundProofRequest below.
+
+const PROVER_RESPONDER_POLL_MS = 10 * 1000;
+// presentationId currently being handled — guards against a slow prior poll tick still running
+// when the next interval fires (same overlap concern setInterval-based pollers elsewhere in this
+// file / ServiceAccessService.js already have to account for).
+const _proverResponderInFlight = new Set();
+// { recordId, schemaId } once resolved live, so we don't re-resolve on every 10s tick.
+let _cachedCaIdentity = null;
+
+/**
+ * Resolve a live (still CredentialReceived/CredentialSent) issue-credentials recordId for the
+ * CA's own CertificationAuthorityIdentity credential, plus its schemaId (used by the
+ * confused-deputy check below). Prefers the recordId cached in data/ca-authority-credential.json
+ * — captured at original issuance time, possibly against a different Cloud Agent instance than
+ * CLOUD_AGENT_URL points at today (see that file's own `architecture.holderAgent` field) — but
+ * verifies it still resolves as a live record before trusting it. Falls back to a live search
+ * over this Cloud Agent's own /issue-credentials/records, mirroring company-admin-portal's live
+ * CompanyIdentity lookup (server.js ~1097-1128) adapted to the CA's single credential.
+ */
+async function resolveCaIdentityRecord() {
+  if (_cachedCaIdentity) {
+    try {
+      const resp = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records/${_cachedCaIdentity.recordId}`, {
+        headers: { apikey: API_KEY }
+      });
+      if (resp.ok) {
+        const rec = await resp.json();
+        if (rec.protocolState === 'CredentialReceived' || rec.protocolState === 'CredentialSent') {
+          return _cachedCaIdentity;
+        }
+      }
+    } catch (_) { /* fall through to re-resolve */ }
+    console.warn('[ProverResponder] Cached CA identity recordId is no longer live — re-resolving');
+    _cachedCaIdentity = null;
+  }
+
+  // 1. Try the recordId cached in ca-authority-credential.json first.
+  try {
+    const credentialPath = path.join(__dirname, 'data', 'ca-authority-credential.json');
+    if (fs.existsSync(credentialPath)) {
+      const cached = JSON.parse(fs.readFileSync(credentialPath, 'utf8'));
+      if (cached.recordId) {
+        const resp = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records/${cached.recordId}`, {
+          headers: { apikey: API_KEY }
+        });
+        if (resp.ok) {
+          const rec = await resp.json();
+          if (rec.protocolState === 'CredentialReceived' || rec.protocolState === 'CredentialSent') {
+            _cachedCaIdentity = { recordId: cached.recordId, schemaId: cached.schemaId || null };
+            console.log(`[ProverResponder] Using cached CA identity recordId ${cached.recordId} (verified live)`);
+            return _cachedCaIdentity;
+          }
+        }
+        console.warn(`[ProverResponder] Cached recordId ${cached.recordId} from ca-authority-credential.json is not live (404 or wrong state) — falling back to live search`);
+      }
+    }
+  } catch (e) {
+    console.warn('[ProverResponder] Cached recordId check failed:', e.message);
+  }
+
+  // 2. Fall back: live search over this Cloud Agent's own issue-credentials records.
+  try {
+    let offset = 0;
+    const pageSize = 100;
+    while (true) {
+      const resp = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records?limit=${pageSize}&offset=${offset}`, {
+        headers: { apikey: API_KEY }
+      });
+      if (!resp.ok) break;
+      const data = await resp.json();
+      const page = data.contents || [];
+      for (const r of page) {
+        const isIssued = r.protocolState === 'CredentialReceived' || r.protocolState === 'CredentialSent';
+        if (!isIssued || !r.credential) continue;
+        try {
+          const jwtString = Buffer.from(r.credential, 'base64').toString('utf-8');
+          const payload = JSON.parse(Buffer.from(jwtString.split('.')[1], 'base64').toString('utf-8'));
+          if (payload?.vc?.credentialSubject?.credentialType === 'CertificationAuthorityIdentity') {
+            _cachedCaIdentity = { recordId: r.recordId, schemaId: payload.vc.credentialSchema?.id || null };
+            console.log(`[ProverResponder] Live search found CertificationAuthorityIdentity record: ${r.recordId}`);
+            return _cachedCaIdentity;
+          }
+        } catch (_) { /* skip unparseable record */ }
+      }
+      if (page.length < pageSize) break;
+      offset += pageSize;
+    }
+  } catch (e) {
+    console.error('[ProverResponder] Live search for CertificationAuthorityIdentity record failed:', e.message);
+  }
+
+  return null;
+}
+
+/**
+ * Accept a single inbound present-proof request (role=Prover, status=RequestReceived) using the
+ * CA's own CertificationAuthorityIdentity credential. Never throws — all failures are logged and
+ * swallowed so one bad record can't crash the poll loop or block any other request-handling code
+ * path.
+ */
+async function _respondToInboundProofRequest(presentationId) {
+  if (_proverResponderInFlight.has(presentationId)) return;
+  _proverResponderInFlight.add(presentationId);
+  try {
+    // Re-fetch the record fresh — the list-poll summary could be stale by the time we get here,
+    // and we need the full `proofs` constraint for the confused-deputy check below.
+    const resp = await fetch(`${CLOUD_AGENT_URL}/present-proof/presentations/${presentationId}`, {
+      headers: { apikey: API_KEY }
+    });
+    if (!resp.ok) {
+      console.warn(`[ProverResponder] Could not fetch presentation ${presentationId} (${resp.status})`);
+      return;
+    }
+    const record = await resp.json();
+    if (record.role !== 'Prover' || record.status !== 'RequestReceived') {
+      return; // already handled (by an earlier tick) or moved on for some other reason
+    }
+
+    const caIdentity = await resolveCaIdentityRecord();
+    if (!caIdentity) {
+      console.error(`[ProverResponder] No live CertificationAuthorityIdentity credential found — cannot respond to ${presentationId}`);
+      return;
+    }
+
+    // Confused-deputy defense: if the request explicitly constrains by a schemaId that is NOT
+    // our own identity credential's schema, this responder has no business auto-satisfying it —
+    // skip rather than attach the wrong credential. An empty/absent proofs constraint (the
+    // common case for a "prove who you are" request, matching the schema-less present-proof
+    // idiom already used elsewhere in this codebase, e.g. company-admin-portal's employee login)
+    // is treated as "no constraint" and accepted. Deliberately fail CLOSED (skip) rather than
+    // accept when caIdentity.schemaId itself couldn't be resolved (e.g. a legacy credential
+    // record with no credentialSchema) — previously this check was accidentally short-circuited
+    // to "no constraint" in that case (`caIdentity.schemaId &&` guarded the whole comparison),
+    // so an explicitly-scoped request for an unrelated schema would still get answered with our
+    // identity credential whenever the schemaId lookup failed.
+    const requestedSchemaIds = (record.proofs || []).map(p => p.schemaId).filter(Boolean);
+    if (requestedSchemaIds.length > 0 &&
+        !requestedSchemaIds.includes(caIdentity.schemaId)) {
+      console.log(`[ProverResponder] Skipping ${presentationId} — requested schema(s) [${requestedSchemaIds.join(', ')}] don't match our CertificationAuthorityIdentity schema (${caIdentity.schemaId})`);
+      return;
+    }
+
+    const acceptResp = await fetch(`${CLOUD_AGENT_URL}/present-proof/presentations/${presentationId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', apikey: API_KEY },
+      body: JSON.stringify({ action: 'request-accept', proofId: [caIdentity.recordId] })
+    });
+    if (!acceptResp.ok) {
+      const errText = await acceptResp.text().catch(() => '');
+      console.error(`[ProverResponder] Accept failed for ${presentationId} (${acceptResp.status}): ${errText.slice(0, 200)}`);
+      return;
+    }
+    console.log(`[ProverResponder] ✅ Accepted inbound present-proof request ${presentationId} using CertificationAuthorityIdentity record ${caIdentity.recordId}`);
+  } catch (e) {
+    console.error(`[ProverResponder] Error handling ${presentationId}:`, e.message);
+  } finally {
+    _proverResponderInFlight.delete(presentationId);
+  }
+}
+
+/**
+ * Poll for inbound present-proof requests where we are being asked to prove (role=Prover) and
+ * haven't yet responded (status=RequestReceived). Paginates like GET /api/credentials/pending
+ * above. Never throws — errors are logged so this interval never dies silently.
+ */
+async function pollInboundProofRequests() {
+  try {
+    // No pagination loop: the Cloud Agent's /present-proof/presentations endpoint ignores both
+    // `limit` and `offset` and always returns the full collection in one response. The old
+    // `while(true) { ...; if (page.length < pageSize) break; }` loop could therefore never
+    // observe page.length < pageSize once the wallet held more than `pageSize` records, so it
+    // never terminated — spinning forever, re-fetching and re-decoding the entire presentation
+    // history on every iteration, for every tick of this 10s interval. That was the dominant
+    // source of this process's (and, by the same bug in company-admin-portal, the multitenancy
+    // agent's) CPU/GC load — not the polling interval, not the leaked connections fixed above.
+    const resp = await fetch(`${CLOUD_AGENT_URL}/present-proof/presentations`, {
+      headers: { apikey: API_KEY }
+    });
+    if (!resp.ok) {
+      console.warn(`[ProverResponder] Poll list request failed (${resp.status})`);
+      // Drain the body before abandoning this response — otherwise the underlying socket
+      // never returns to fetch's keep-alive pool. This poller runs every 10s forever, so a
+      // leaked connection per non-OK response compounds fast (this leaked 750+ connections
+      // to identus-cloud-agent-backend during a period when it was itself crash-looping and
+      // returning non-OK responses).
+      try { await resp.body?.cancel?.(); } catch (_) {}
+      return;
+    }
+    const data = await resp.json();
+    const page = data.contents || [];
+    for (const rec of page) {
+      if (rec.role === 'Prover' && rec.status === 'RequestReceived') {
+        const id = rec.presentationId || rec.id;
+        if (id) {
+          _respondToInboundProofRequest(id).catch(e =>
+            console.error('[ProverResponder] Unhandled error:', e.message));
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[ProverResponder] Poll error:', e.message);
+  }
+}
+
+pollInboundProofRequests();
+setInterval(pollInboundProofRequests, PROVER_RESPONDER_POLL_MS).unref();
 
 // One-time access token redemption endpoint.
 // dashboard.html reads the session from ?session=<id> URL param and fetches content
@@ -8057,7 +8477,12 @@ app.get('/api/access', (req, res) => {
   // Mark as used (single-use enforcement)
   entry.used = true;
 
-  // Register server-side session in the format /api/dashboard/content expects
+  // Register server-side session in the format /api/dashboard/content expects.
+  // entry.userClaims is the merged claims object from ClaimExtractor - a
+  // SecurityClearanceGrant VC's level lands under userClaims.clearance.level (see the
+  // 'clearanceGrant' transform in packages/service-access-didcomm/lib/ClaimExtractor.js),
+  // not a flat clearanceLevel field. /api/session/:sessionId reads session.clearanceLevel
+  // directly, so it must be flattened here for dashboard.html to display it.
   const sessionId = crypto.randomUUID();
   const now = new Date().toISOString();
   global.userSessions = global.userSessions || new Map();
@@ -8068,6 +8493,7 @@ app.get('/api/access', (req, res) => {
     connectionId:    entry.connectionId,
     userData:        entry.userClaims,
     personalInfo:    entry.userClaims,
+    clearanceLevel:  entry.userClaims?.clearance?.level || null,
     loginTime:       now,
     authenticatedAt: now,
     authMethod:      'DIDComm-AccessToken',

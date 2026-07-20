@@ -1,7 +1,7 @@
 # Task Test Report
 
-**Generated:** 2026-04-19T12:16:30.491Z  
-**Total:** 38 | **Passed:** 38 | **Failed:** 0
+**Generated:** 2026-07-18T14:56:14.458Z  
+**Total:** 38 | **Passed:** 35 | **Failed:** 3
 
 ---
 
@@ -28,14 +28,15 @@
 - ✅ DocumentRegistry.registerDocument does not require contentEncryptionKey param
 - ✅ Registry persistence migration strips legacy raw keys on load
 
-## ✅ Task 4: CMK Unwrap in Access Pipeline (7/7)
+## ❌ Task 4: CMK Unwrap in Access Pipeline (6/7)
 
 - ✅ IagonStorageClient.downloadKeyManifest method exists
 - ✅ ClassificationKeyManager.unwrapDEK method exists
 - ✅ Full round-trip: wrapDEK → AES-encrypt → unwrapDEK → AES-decrypt
 - ✅ Legacy path: decryptContent works with direct encryptionInfo.key
 - ✅ ReEncryptionService.processAccessRequest function exists
-- ✅ server.js /api/access-gate/present contains encryptionManifestId
+- ❌ server.js /api/access-gate/present contains encryptionManifestId
+  > `/api/access-gate/present must define the decryptFromIagon helper (Task 4)`
 - ✅ ReEncryptionService.js source contains CMK-unwrap code
 
 ## ✅ Task 5: VC Schema — encryptionManifestId (4/4)
@@ -45,16 +46,17 @@
 - ✅ VC claims include encryptionManifestId when provided
 - ✅ VC claims omit encryptionManifestId when not provided
 
-## ✅ Task 6: Content Hash in DID + Integrity Verification (6/6)
+## ❌ Task 6: Content Hash in DID + Integrity Verification (5/6)
 
 - ✅ EnterpriseDocumentManager accepts contentHash in iagonInfo
 - ✅ contentHash format is sha256:<hex> (identus-document-service pattern)
 - ✅ content integrity check: correct content passes
 - ✅ content integrity check: tampered content fails
 - ✅ documents without contentHash are not rejected (backward compat)
-- ✅ identus-document-service ReEncryptionService has content hash check
+- ❌ identus-document-service ReEncryptionService has content hash check
+  > `identus-document-service ReEncryptionService should contain CONTENT_INTEGRITY_FAILED check`
 
-## ✅ Task 7: Signature Fallback Hardening (7/7)
+## ❌ Task 7: Signature Fallback Hardening (6/7)
 
 - ✅ getLevelNumber returns correct hierarchy
 - ✅ INTERNAL (level 1) allows format-only fallback
@@ -62,5 +64,6 @@
 - ✅ RESTRICTED (level 3) is denied when DID resolution fails
 - ✅ TOP_SECRET (level 4) is denied when DID resolution fails
 - ✅ company-admin ReEncryptionService has classification-aware verifySignature
-- ✅ identus-document-service ReEncryptionService has classification-aware verifySignature
+- ❌ identus-document-service ReEncryptionService has classification-aware verifySignature
+  > `Should deny CONFIDENTIAL+ on DID resolution failure`
 

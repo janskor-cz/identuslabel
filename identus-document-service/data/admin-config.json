@@ -1,0 +1,54 @@
+{
+  "schemaPolicy": {
+    "INTERNAL": {
+      "rules": [
+        {
+          "schemaId": "EmployeeRole",
+          "trustedIssuers": [
+            "did:prism:6ee757c2913a76aa4eb2f09e9cd3cc40ead73cfaffc7d712c303ee5bc38f21bf",
+            "did:prism:474c91516a875ba9af9f39a3b9747cb70ad7684f0b3fb8ee2b7b145efac286b9"
+          ],
+          "comment": "Only TechCorp and ACME may issue EmployeeRole VCs that grant INTERNAL document access"
+        }
+      ]
+    },
+    "CONFIDENTIAL": {
+      "rules": [
+        {
+          "schemaId": "EmployeeRole",
+          "trustedIssuers": [
+            "did:prism:6ee757c2913a76aa4eb2f09e9cd3cc40ead73cfaffc7d712c303ee5bc38f21bf",
+            "did:prism:474c91516a875ba9af9f39a3b9747cb70ad7684f0b3fb8ee2b7b145efac286b9"
+          ],
+          "comment": "Only TechCorp and ACME may issue EmployeeRole VCs that grant CONFIDENTIAL document access"
+        }
+      ]
+    },
+    "RESTRICTED": {
+      "rules": [
+        {
+          "schemaId": "SecurityClearance",
+          "clearanceField": "clearanceLevel",
+          "trustedIssuers": [
+            "did:prism:6ee757c2913a76aa4eb2f09e9cd3cc40ead73cfaffc7d712c303ee5bc38f21bf",
+            "did:prism:474c91516a875ba9af9f39a3b9747cb70ad7684f0b3fb8ee2b7b145efac286b9"
+          ],
+          "comment": "RESTRICTED access requires a SecurityClearance VC from TechCorp or ACME"
+        }
+      ]
+    },
+    "SECRET": {
+      "rules": [
+        {
+          "schemaId": "SecurityClearance",
+          "clearanceField": "clearanceLevel",
+          "trustedIssuers": [
+            "did:prism:6ee757c2913a76aa4eb2f09e9cd3cc40ead73cfaffc7d712c303ee5bc38f21bf",
+            "did:prism:474c91516a875ba9af9f39a3b9747cb70ad7684f0b3fb8ee2b7b145efac286b9"
+          ],
+          "comment": "SECRET access requires a SecurityClearance VC from TechCorp or ACME"
+        }
+      ]
+    }
+  }
+}

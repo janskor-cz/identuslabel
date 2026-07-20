@@ -31,6 +31,8 @@ class ConsoleLogger {
   private flushTimer: NodeJS.Timeout | null = null;
   private isInitialized: boolean = false;
   private sessionKey: string = 'console-logger-buffer';
+  private sessionIdKey: string = 'console-logger-session-id';
+  private sessionId: string = '';
   private logFilePathDisplayed: boolean = false;
 
   // Store original console methods
@@ -52,6 +54,7 @@ class ConsoleLogger {
 
     this.walletId = walletId;
     this.isInitialized = true;
+    this.sessionId = this.getOrCreateSessionId();
 
     // Load any unsent logs from sessionStorage
     this.loadBufferFromStorage();
@@ -68,6 +71,31 @@ class ConsoleLogger {
     }
 
     this.originalConsole.log(`✅ [ConsoleLogger] Initialized for wallet: ${walletId}`);
+  }
+
+  /**
+   * Get this tab's session id, generating and persisting one in sessionStorage
+   * if none exists yet. sessionStorage (not localStorage) means a new tab or a
+   * closed-and-reopened session gets a fresh id, while reloads within the same
+   * tab keep writing to the same server-side log file.
+   */
+  private getOrCreateSessionId(): string {
+    if (typeof sessionStorage === 'undefined') {
+      return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    try {
+      const existing = sessionStorage.getItem(this.sessionIdKey);
+      if (existing) return existing;
+
+      const generated = typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      sessionStorage.setItem(this.sessionIdKey, generated);
+      return generated;
+    } catch (error) {
+      return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
   }
 
   /**
@@ -225,7 +253,7 @@ class ConsoleLogger {
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ logs: logsToSend })
+        body: JSON.stringify({ logs: logsToSend, sessionId: this.sessionId })
       });
 
       if (!response.ok) {

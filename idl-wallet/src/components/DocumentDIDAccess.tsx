@@ -22,6 +22,9 @@ import { getItem, setItem } from '@/utils/prefixedStorage';
 import { storeDocument, StoredDocument } from '@/utils/documentStorage';
 import { getCredentialType, getCredentialSubject } from '@/utils/credentialTypeDetector';
 import { requestVPGatedAccess, requestDocumentAccess, requestDocumentAccessDIDComm } from '@/utils/KeyAuthorityClient';
+import { signHolderChallenge } from '@/utils/holderProof';
+import { useMountedApp, useAppDispatch } from '@/reducers/store';
+import { requestDocumentAccessViaEnterprise } from '@/actions';
 import { SectionRenderer } from '@/components/SectionRenderer';
 
 const DOCUMENT_SERVICE_BASE = 'https://identuslabel.cz/document-service';
@@ -233,6 +236,29 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
   // Credentials the user manually selected for presentation
   const selectedCredsRef                      = useRef<any[] | null>(null);
 
+  // SDK agent — needed to sign the holder proof-of-possession with the credential subject's key
+  const app      = useMountedApp();
+  const agent    = app.agent?.instance;
+  const dispatch = useAppDispatch();
+
+  // Consent gate: before the wallet signs the access challenge (which discloses the
+  // selected credentials), the user must explicitly approve. askConsent shows the modal
+  // and resolves when the user chooses; the signer awaits it.
+  const [consentCreds, setConsentCreds]       = useState<{ type: string; detail: string }[] | null>(null);
+  const consentResolveRef                     = useRef<((ok: boolean) => void) | null>(null);
+  const askConsent = useCallback((creds: { type: string; detail: string }[]) => {
+    return new Promise<boolean>(resolve => {
+      consentResolveRef.current = resolve;
+      setConsentCreds(creds);
+    });
+  }, []);
+  const resolveConsent = useCallback((ok: boolean) => {
+    const r = consentResolveRef.current;
+    consentResolveRef.current = null;
+    setConsentCreds(null);
+    if (r) r(ok);
+  }, []);
+
   // Stored PRISM DID (from CA connection)
   const storedDIDRef = useRef<string | null>(null);
 
@@ -243,6 +269,16 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
   }, []);
 
   // Auto-detect best default identity when enterprise DIDs load
+  //
+  // Ordering fix: the EmployeeRole credential's email (step 2) must be checked BEFORE the
+  // generic stored personal CA-connection DID (step 3, was step 2). That personal DID is always
+  // set from an earlier, unrelated CA-portal-login flow and is truthy essentially all the time —
+  // it was silently short-circuiting past the EmployeeRole email every time, sending the
+  // wallet's PERSONAL identity to /api/document-access/initiate instead of the enterprise
+  // employee identity the server's employee_portal_accounts lookup actually expects. Confirmed
+  // live: server received employeeIdentifier = the personal wallet DID, which matched no
+  // employee row, producing "No DIDComm connection found... complete onboarding first" for a
+  // fully onboarded employee.
   useEffect(() => {
     // 1. Enterprise PRISM DID (most authoritative — directly in employee DB)
     if (enterpriseDIDs.length > 0) {
@@ -250,13 +286,25 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
       return;
     }
 
-    // 2. Stored personal PRISM DID (from CA connection flow)
+    // 2. EmployeeRole credential's email — specifically identifies "this company's employee X,"
+    // unlike the generic personal DID in step 3, which doesn't relate to any particular employer.
+    const employeeRoleCred = credentials.find(cred => getCredentialType(cred) === 'EmployeeRole');
+    if (employeeRoleCred) {
+      const identity = extractIdentityFromCredential(employeeRoleCred);
+      if (identity) {
+        setEmployeeId(identity.value);
+        return;
+      }
+    }
+
+    // 3. Stored personal PRISM DID (from CA connection flow) — last resort, only when there's no
+    // EmployeeRole credential to identify a specific employer relationship at all.
     if (storedDIDRef.current) {
       setEmployeeId(storedDIDRef.current);
       return;
     }
 
-    // 3. Extract from wallet credentials
+    // 4. Extract from any other identity-bearing credential
     for (const cred of credentials) {
       const type = getCredentialType(cred);
       if (!IDENTITY_TYPES.has(type)) continue;
@@ -434,8 +482,23 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
         throw new Error(metaErr.error || `DID resolution failed (${metaRes.status})`);
       }
       const docMeta = await metaRes.json();
-      // challengeEndpoint is present when the DID has a "document-access-gate" service
-      // (company-admin portal, applies DocxRedactionService)
+      // The document's DID document is the single source of truth for how to fetch it. It may
+      // advertise two access services (both type DocumentAccessGate, distinguished by id):
+      //   • id "access"               → document-service /access — self-contained VP-gated flow.
+      //                                 The wallet presents a VP built from its OWN held VCs;
+      //                                 needs no enterprise connection, so it is immune to the
+      //                                 enterprise-wallet/DB re-onboarding drift that strands the
+      //                                 broker flow (a proof request sent to a wallet the browser
+      //                                 doesn't hold the keys for → no VP modal ever appears).
+      //   • id "document-access-gate" → company-admin challenge — broker flow that collects the
+      //                                 VP over an enterprise DIDComm connection and can apply
+      //                                 section-level DOCX redaction for under-cleared viewers.
+      // Prefer the self-contained document-service endpoint whenever the DID document declares it;
+      // fall back to the company-admin broker only when no VP endpoint is present.
+      // NOTE: document-service /access is currently whole-file grant/deny (no section redaction) —
+      // redaction is being ported into the document service so this path covers under-cleared
+      // viewers too.
+      const accessEndpoint: string | undefined    = docMeta.accessEndpoint;
       const challengeEndpoint: string | undefined = docMeta.challengeEndpoint;
 
       const kp = nacl.box.keyPair();
@@ -446,8 +509,105 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
       let mimeType: string;
       let userClearance: string;
 
-      if (challengeEndpoint) {
-        // ── Company-admin access gate: DIDComm present-proof (holder-binding enforced) ─
+      if (accessEndpoint && enterpriseDIDs.length > 0) {
+        // ── Enterprise-custodied credentials → enterprise-agent present-proof ───────
+        // The EmployeeRole/Grant subject key lives on the enterprise cloud agent, not this
+        // browser, so the browser cannot produce a holder proof. Correct SSI behaviour: the
+        // enterprise agent (the actual key custodian) signs a challenge-bound VP via present-
+        // proof. The document service independently verifies it and returns a DEK sealed to our
+        // ephemeral key. The user approves the incoming proof request in their wallet.
+        const consentList = overrideCreds.map(c => credentialPickerLabel(c));
+        const approved = await askConsent(consentList);
+        if (!approved) throw new Error('Access cancelled — you declined to present your credentials.');
+
+        setPhase('awaiting_wallet');
+        setStatus('Approve the credential request in your wallet to unlock the document…');
+
+        const ephB64 = Buffer.from(kp.publicKey).toString('base64');
+        const grant = await dispatch(
+          requestDocumentAccessViaEnterprise({ documentDID, ephemeralPublicKey: ephB64 })
+        ).unwrap();
+
+        setPhase('decrypting');
+        setStatus('Decrypting document…');
+
+        const section = grant.sections?.[0];
+        const edek = section?.encryptedDEK;
+        if (!edek?.ciphertext || !grant.iagonDownloadUrl) throw new Error('Malformed access grant');
+
+        // Unseal the DEK (nacl.box) with our ephemeral secret key
+        const rawDEK = nacl.box.open(
+          new Uint8Array(Buffer.from(edek.ciphertext,      'base64')),
+          new Uint8Array(Buffer.from(edek.nonce,           'base64')),
+          new Uint8Array(Buffer.from(edek.serverPublicKey, 'base64')),
+          kp.secretKey
+        );
+        kp.secretKey.fill(0);
+        ephemeralKpRef.current = null;
+        if (!rawDEK) throw new Error('Failed to unseal document key');
+
+        // Download the encrypted blob from Iagon and AES-256-GCM decrypt (ciphertext || authTag)
+        const blobRes = await fetch(grant.iagonDownloadUrl);
+        if (!blobRes.ok) throw new Error(`Document download failed (${blobRes.status})`);
+        const encBytes = new Uint8Array(await blobRes.arrayBuffer());
+        const authTag  = new Uint8Array(Buffer.from(section.fileAuthTag, 'base64'));
+        const combined = new Uint8Array(encBytes.length + authTag.length);
+        combined.set(encBytes);
+        combined.set(authTag, encBytes.length);
+
+        const dekKey = await crypto.subtle.importKey('raw', rawDEK, 'AES-GCM', false, ['decrypt']);
+        const plainBuf = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: new Uint8Array(Buffer.from(section.fileIv, 'base64')) },
+          dekKey,
+          combined
+        );
+
+        decrypted    = new Uint8Array(plainBuf);
+        filename     = docMeta.originalFilename || documentDID.split(':').pop() || 'document';
+        mimeType     = docMeta.mimeType || '';
+        userClearance = section.clearanceLevel || docMeta.clearanceLevel || 'CONFIDENTIAL';
+
+      } else if (accessEndpoint) {
+        // ── document-service VP-gated access (personal/wallet-held credentials) ─────
+        // The wallet presents a VP assembled from its own credentials directly to the endpoint
+        // named in the DID document, with a real holder signature when it controls the subject
+        // key. The service verifies signature, issuer trust and clearance, then returns the DEK
+        // re-encrypted for our ephemeral key.
+        setPhase('awaiting_wallet');
+        setStatus('Waiting for your approval to present credentials…');
+
+        // Consent gate: user must approve disclosing their credentials.
+        const onConsent = async (): Promise<boolean> => {
+          const consentList = overrideCreds.map(c => credentialPickerLabel(c));
+          const approved = await askConsent(consentList);
+          if (approved) {
+            setPhase('decrypting');
+            setStatus('Presenting credentials and decrypting document…');
+          }
+          return approved;
+        };
+
+        // Holder proof-of-possession — signs when this wallet controls the credential subject key.
+        const signHolder = (holderDID: string, message: string) =>
+          signHolderChallenge(agent, holderDID, message);
+
+        const result = await requestVPGatedAccess(
+          documentDID,
+          accessEndpoint,
+          overrideCreds,
+          kp,
+          { onConsent, signHolder }
+        );
+        kp.secretKey.fill(0);
+        ephemeralKpRef.current = null;
+
+        decrypted    = result.plaintext;
+        filename     = result.filename;
+        mimeType     = result.mimeType;
+        userClearance = result.clearanceLevel;
+
+      } else if (challengeEndpoint) {
+        // ── Fallback: company-admin access gate (DIDComm present-proof + redaction) ─
         // Server sends a DIDComm RequestPresentation to the wallet via the established
         // employee connection. The UnifiedProofRequestModal will pop up for the user to
         // approve. Once approved the server verifies the cryptographically-bound VP and
@@ -482,23 +642,7 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
         userClearance = response.clearanceLevel;
 
       } else {
-        // ── Fallback: document-service VP-gated access (unredacted) ──────────────
-        setPhase('decrypting');
-        setStatus('Decrypting document…');
-
-        const result = await requestVPGatedAccess(
-          documentDID,
-          docMeta.accessEndpoint || `${DOCUMENT_SERVICE_BASE}/access`,
-          overrideCreds,
-          kp
-        );
-        kp.secretKey.fill(0);
-        ephemeralKpRef.current = null;
-
-        decrypted    = result.plaintext;
-        filename     = result.filename;
-        mimeType     = result.mimeType;
-        userClearance = result.clearanceLevel;
+        throw new Error('Document DID document declares no access endpoint');
       }
 
       const isDocx = mimeType?.includes('wordprocessingml') || filename?.endsWith('.docx');
@@ -596,6 +740,50 @@ export function DocumentDIDAccess({ credentials, enterpriseDIDs = [], initialDID
           onConfirm={handleCredsSelected}
           onClose={() => setShowCredPicker(false)}
         />
+      )}
+
+      {consentCreds && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[10000] flex items-center justify-center"
+          onClick={() => resolveConsent(false)}
+        >
+          <div
+            className="bg-slate-900 border border-slate-700/50 rounded-2xl p-5 max-w-md w-full mx-4 shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <ShieldCheckIcon className="w-5 h-5 text-cyan-400" />
+              <h2 className="text-base font-semibold text-white">Approve credential disclosure</h2>
+            </div>
+            <p className="text-sm text-slate-300 mb-3">
+              The document service is requesting proof of your identity and clearance. Approving will
+              sign a one-time access request with your credential key and present:
+            </p>
+            <ul className="mb-4 space-y-1">
+              {consentCreds.map((c, i) => (
+                <li key={i} className="flex items-center gap-2 text-sm text-slate-200">
+                  <CheckIcon className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span className="font-medium">{c.type}</span>
+                  {c.detail && <span className="text-slate-400 truncate">· {c.detail}</span>}
+                </li>
+              ))}
+            </ul>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => resolveConsent(false)}
+                className="px-4 py-1.5 text-sm rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => resolveConsent(true)}
+                className="px-4 py-1.5 text-sm rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-medium"
+              >
+                Approve &amp; Present
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <div className="mb-6 p-4 bg-slate-800/30 rounded-2xl border border-cyan-500/30 backdrop-blur-sm">

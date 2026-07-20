@@ -1,7 +1,23 @@
 import { VCValidationResult } from '../types/invitations';
+import { getCredentialType } from './credentialTypeDetector';
 
-// Trusted issuer DID for RealPerson VCs — issued exclusively by the Certification Authority
-const TRUSTED_REALPERSON_ISSUER = 'did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c';
+// Trusted issuer DID for RealPerson VCs — issued exclusively by the Certification Authority.
+// Exported so utils/liveIdentityVerification.ts can pin the SAME trusted issuer when verifying a
+// live, post-connection presentation — single source of truth, no drift between the pre-connection
+// preview check here and the live check there.
+export const TRUSTED_REALPERSON_ISSUER = 'did:prism:7fb0da715eed1451ac442cb3f8fbf73a084f8f73af16521812edd22d27d8f91c';
+
+// Trusted schema id for RealPerson VCs — the CA's current live schema (v4.0.0, photo-carrying;
+// confirmed against certification-authority/server.js's ServiceAccessService capabilities and
+// DIDComm-auth proof requests, which all pin this same schemaId as of the 2026-07-05 protocol
+// migration commit). NOTE: this is intentionally NOT the same id as SCHEMA_GUID_MAP's 'RealPerson'
+// entry in credentialSchemaExtractor.ts (e3ed8a7b-...) — that map is a best-effort structural-type
+// *hint* built from an older/stale schema generation and is used for display purposes only; it is
+// not a security control and must not be reused for pinning here. Exported so
+// utils/liveIdentityVerification.ts can pin the SAME schema id when verifying a live, post-connection
+// presentation — single source of truth, no drift between the pre-connection preview check here and
+// the live check there (mirrors TRUSTED_REALPERSON_ISSUER above).
+export const TRUSTED_REALPERSON_SCHEMA_ID = 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/4755a426-b80b-3f6a-b9ea-ca202bd7ce16';
 
 // Enhanced base64 decoding with automatic padding for RFC 0434 compliance
 export function safeBase64Decode(base64String: string): { isValid: boolean; data?: string; error?: string } {
@@ -239,6 +255,33 @@ export function detectInvitationFormat(invitationString: string): { format: 'url
  *
  * Philosophy: Users must see what the inviter is sharing, regardless of
  * whether the credential validates against our expected schema.
+ *
+ * NOTE ON HOLDER BINDING: this function intentionally does NOT attempt to prove that the party
+ * sending an invitation actually possesses the RealPerson VC's subject key — that turned out to
+ * be unprovable at invitation time (see below) and has been moved to a POST-CONNECTION step.
+ * What this function still verifies (issuer pinning + cryptographic signature, both still
+ * blocking for RealPerson VCs — see the ISSUER PINNING and REALPERSON SIGNATURE ENFORCEMENT
+ * blocks below) establishes only that the attached VC-JWT is a genuine, unexpired, CA-issued
+ * credential for *someone* — a "claims to be X — unverified preview", not proof that today's
+ * sender is X.
+ *
+ * History: an earlier version of this function required the invitation's `from` DID (a
+ * freshly-minted did:peer:2, pairwise/relationship-scoped by design) to string-equal the VC's
+ * own did:prism subject DID — CONFIRMED BROKEN in production, since different DID methods can
+ * never be equal, so it rejected every legitimate RealPerson-VC-attached invitation. A follow-up
+ * replaced that with a self-signed proof-of-possession JWT (utils/holderProofOfPossession.ts,
+ * now removed) bound to the invitation id/connection DID/VC hash. An SSI compliance review found
+ * that insufficient too: a self-signed proof with no live verifier-issued challenge cannot
+ * actually prove *current* possession in a way that resists a captured/replayed invitation — an
+ * OOB invitation is a one-shot, pre-connection artifact, so no live challenge/response is
+ * possible before a connection exists.
+ *
+ * CURRENT DESIGN: let the connection establish on this lightweight preview alone. Once connected,
+ * the accepting wallet sends a fresh, nonce-bound present-proof request back to the inviter over
+ * the live DIDComm connection and verifies the (live-signed) response — including checking that
+ * the live identity matches THIS preview's subject DID/uniqueId — before upgrading the
+ * connection's trust state to "verified". See utils/liveIdentityVerification.ts and
+ * components/OOB.tsx's post-connection handling for the live half of this design.
  */
 export async function validateVerifiableCredential(
   vcProof: any,
@@ -294,6 +337,10 @@ export async function validateVerifiableCredential(
             expirationDate: payload.exp
               ? new Date(payload.exp * 1000).toISOString()
               : payload.vc?.expirationDate,
+            // Holder-binding subject DID: prefer the JWT's own `sub` claim (the identifier
+            // the issuer actually bound the credential to), falling back to
+            // credentialSubject.id per the W3C VC-JWT convention.
+            subjectDID: payload.sub || payload.vc?.credentialSubject?.id || null,
             _embeddedJwt: jws,
             disclosedFields: vcProof.disclosedFields,
           };
@@ -371,6 +418,21 @@ export async function validateVerifiableCredential(
     }
 
     // ============================================================
+    // SUBJECT DID EXTRACTION (RealPerson only): no holder-binding check is performed here — see
+    // the file-level "NOTE ON HOLDER BINDING" doc comment above for why that moved to a
+    // post-connection live-verification step (utils/liveIdentityVerification.ts). This function
+    // still resolves and exposes the subject DID via `result.subjectDID` so that later step has
+    // a trusted anchor (from THIS preview) to compare a live presentation's identity against,
+    // without re-implementing the same JWT-field extraction a second time.
+    // ============================================================
+    if (knownSchemas.includes('RealPerson')) {
+      const subjectDID = vcProof.subjectDID || vcProof.credentialSubject?.id || null;
+      if (subjectDID) {
+        result.subjectDID = subjectDID;
+      }
+    }
+
+    // ============================================================
     // PHASE 3: METADATA EXTRACTION (always succeeds)
     // ============================================================
 
@@ -404,6 +466,14 @@ export async function validateVerifiableCredential(
     // PHASE 4: CRYPTOGRAPHIC VERIFICATION
     // ============================================================
 
+    // Tracks whether a signature was actually, successfully cryptographically verified in this
+    // phase (as opposed to merely "not checked" — every degraded/fallback branch below only
+    // pushes a WARNING when it can't check a signature, by design, so this function stays
+    // lenient/informational for the many non-RealPerson credential types the wallet previews.
+    // RealPerson is the one schema this file exists to gate for real — see the hard check right
+    // after this block, which turns "no signature could be checked" into a blocking error for it.
+    let cryptoSignatureVerified = false;
+
     if (agent && agent.pollux && result.issuer) {
       console.log('🔍 [NON-BLOCKING-VALIDATION] Attempting cryptographic verification...');
       try {
@@ -421,6 +491,7 @@ export async function validateVerifiableCredential(
             result.isValid = false;
           } else {
             console.log('✅ [NON-BLOCKING-VALIDATION] ES256K signature verified');
+            cryptoSignatureVerified = true;
             if (result.errors.length === 0) result.isValid = true;
           }
         } else if (vcProof._unverifiable) {
@@ -445,6 +516,7 @@ export async function validateVerifiableCredential(
               result.isValid = false;
             } else {
               console.log('✅ [NON-BLOCKING-VALIDATION] Signature verified');
+              cryptoSignatureVerified = true;
               if (result.errors.length === 0) result.isValid = true;
             }
           } else {
@@ -461,6 +533,22 @@ export async function validateVerifiableCredential(
     } else {
       console.log('ℹ️ [NON-BLOCKING-VALIDATION] Skipping crypto verification — agent or issuer not available');
       result.warnings.push('Cryptographic verification not performed');
+    }
+
+    // ============================================================
+    // REALPERSON SIGNATURE ENFORCEMENT: unlike every other schema this function previews,
+    // RealPerson identity claims MUST be backed by an actually-verified signature. Without
+    // this, an attacker can hand-craft a plain JSON vc-proof-0 attachment (no JWT at all, or
+    // marked `_unverifiable`), copy the well-known trusted CA DID string into `issuer`, and set
+    // `credentialSubject.id` to whatever DID they like — sailing through issuer-pinning and the
+    // holder-binding check above with zero cryptographic backing. Every "couldn't check a
+    // signature" branch above is intentionally non-fatal for other credential types; for
+    // RealPerson it must not be.
+    // ============================================================
+    if (knownSchemas.includes('RealPerson') && !cryptoSignatureVerified) {
+      console.log('❌ [NON-BLOCKING-VALIDATION] RealPerson VC has no verified cryptographic signature — rejecting');
+      result.errors.push('RealPerson credential has no verified cryptographic signature — cannot trust claims');
+      result.isValid = false;
     }
 
     // ============================================================
@@ -552,7 +640,11 @@ function hasPersonFields(obj: any): boolean {
 }
 
 // Helper function to check if an object contains security clearance fields
-function hasSecurityClearanceFields(obj: any): boolean {
+// Exported so utils/liveIdentityVerification.ts can reuse the SAME field list for its live,
+// post-connection shape check (mirrors how looksLikeRealPerson there mirrors isRealPersonTypedIdentity
+// below) — single source of truth, no drift between the pre-connection preview check here and the
+// live check there.
+export function hasSecurityClearanceFields(obj: any): boolean {
   if (!obj || typeof obj !== 'object') return false;
   const clearanceFields = ['clearanceLevel', 'clearanceId', 'publicKeyFingerprint', 'securityLevel'];
   return clearanceFields.some(field => field in obj);
@@ -657,4 +749,82 @@ export function parseInviterIdentity(vcProof: any, validationResult: VCValidatio
   });
 
   return identity;
+}
+
+/**
+ * Detect whether an inviter identity (as produced by parseInviterIdentity) carries a
+ * RealPerson-typed credential — i.e. this invitation declares/carries a RealPersonIdentity VC,
+ * as opposed to an ordinary invitation that was never meant to carry one.
+ *
+ * Single source of truth for this detection, shared by:
+ *  - InvitationPreviewModal.tsx (UI: drives header styling / "unverified preview" messaging)
+ *  - OOB.tsx's onConnectionHandleClick (the actual connection-establishment chokepoint — used
+ *    there to decide whether to run POST-connection live identity verification, and to gate the
+ *    vc-proof-sharing/1.0/proof auto-disclosure on its result; see
+ *    performLiveIdentityVerificationAndMaybeRespond)
+ * NOTE: this no longer gates connection establishment itself (see vcValidation.ts's "NOTE ON
+ * HOLDER BINDING" doc comment above validateVerifiableCredential) — a RealPerson-typed invitation
+ * is always allowed to connect on its preview; this detector now only decides whether the live
+ * post-connection verification step runs.
+ */
+export function isRealPersonTypedIdentity(inviterIdentity: any): boolean {
+  if (!inviterIdentity?.vcProof || !inviterIdentity?.revealedData) return false;
+
+  const revealedData = inviterIdentity.revealedData;
+
+  // Method 1: Check credentialType field
+  if (revealedData.credentialType === 'RealPersonIdentity') return true;
+
+  // Method 2: Check for characteristic RealPerson fields (firstName, lastName, uniqueId)
+  const hasRealPersonFields = revealedData.firstName && revealedData.lastName && revealedData.uniqueId;
+  if (hasRealPersonFields) return true;
+
+  // Method 3: Use getCredentialType helper with mock credential structure
+  const mockCredential = { credentialSubject: revealedData };
+  return getCredentialType(mockCredential) === 'RealPersonIdentity';
+}
+
+/**
+ * The set of credential types this wallet knows how to run POST-CONNECTION live
+ * challenge/response verification for (see utils/liveIdentityVerification.ts's
+ * `verifyLiveIdentity`) — each has its own trust-anchoring rules there: single hardcoded
+ * issuer+schema pin for RealPersonIdentity; multi-issuer trust-registry pin (no schema pin) for
+ * SecurityClearance, CertificationAuthorityIdentity, and CompanyIdentity. The latter two are used
+ * by OOB.tsx's `walletType === 'cloud'` CA/Company connection-establishment path (not by
+ * `detectLiveVerifiableIdentityType` below, which is only wired up for the RFC 0434
+ * personal-wallet-to-personal-wallet path — CA/Company invitations are detected via their own
+ * `isCAInvitation`/`isCompanyInvitation` flags instead, see OOB.tsx).
+ */
+export type LiveVerifiableCredentialType = 'RealPersonIdentity' | 'SecurityClearance' | 'CertificationAuthorityIdentity' | 'CompanyIdentity';
+
+/**
+ * Detect which live-verifiable type (if any) a preview identity (as produced by
+ * parseInviterIdentity) claims to carry — i.e. whether it's worth running the live
+ * post-connection verification round trip at all, and if so, which trust-anchoring branch that
+ * round trip should use. Sibling to isRealPersonTypedIdentity above; RealPerson detection is
+ * delegated to it unchanged (kept standalone since it's still used on its own in a couple of
+ * places) rather than re-implemented here.
+ *
+ * Checked in priority order — RealPerson first (its detection is the more specific/established
+ * one), then SecurityClearance via the same vcProof+revealedData shape, using the same
+ * hasSecurityClearanceFields() field-signature check vcValidation's own detectKnownSchemas() uses
+ * for the pre-connection preview, so the preview-time and live-time "does this look like a
+ * SecurityClearance" checks never drift apart.
+ *
+ * Returns null for any invitation that isn't claiming to carry either type — the live
+ * verification step should not run at all for those (see OOB.tsx/ConnectionRequest.tsx call sites).
+ */
+export function detectLiveVerifiableIdentityType(inviterIdentity: any): LiveVerifiableCredentialType | null {
+  if (isRealPersonTypedIdentity(inviterIdentity)) return 'RealPersonIdentity';
+
+  if (
+    inviterIdentity?.vcProof &&
+    inviterIdentity?.revealedData &&
+    (inviterIdentity.revealedData.credentialType === 'SecurityClearance' ||
+      hasSecurityClearanceFields(inviterIdentity.revealedData))
+  ) {
+    return 'SecurityClearance';
+  }
+
+  return null;
 }

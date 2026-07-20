@@ -49,6 +49,12 @@ export interface VCValidationResult {
   issuedAt?: string;
   expiresAt?: string;
   revoked?: boolean;
+  // Subject DID of a RealPerson-typed credential, when one was present — the `sub` JWT claim or
+  // `credentialSubject.id`. Exposed so callers (e.g. OOB.tsx's post-connection live identity
+  // verification, utils/liveIdentityVerification.ts) can anchor a LIVE, later-verified
+  // presentation back to the identity shown in this pre-connection preview, without re-deriving
+  // the same JWT-decoding logic a second time. Set for RealPerson credentials only.
+  subjectDID?: string;
 }
 
 /**

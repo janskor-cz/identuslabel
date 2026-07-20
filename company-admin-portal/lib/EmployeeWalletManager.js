@@ -17,6 +17,7 @@
  */
 
 const fetch = require('node-fetch');
+const { COMPANIES } = require('./companies');
 
 // Throws at require-time if a required secret is missing — no silent fallback to committed values.
 function requireEnv(name) {
@@ -69,12 +70,18 @@ function getDbPool() {
  * @param {string} employeeData.email - Employee email (unique identifier)
  * @param {string} employeeData.name - Employee full name
  * @param {string} employeeData.department - Department (for metadata)
+ * @param {Object} [company] - The employee's employer (from lib/companies.js COMPANIES registry:
+ *   .apiKey, .did, .id, .displayName, .logo). Defaults to TechCorp for callers that don't yet
+ *   pass one (e.g. the legacy admin test endpoint) — but every real onboarding flow MUST pass
+ *   the employee's actual employer here, since this is what the issued EmployeeRole VC is
+ *   cryptographically signed with, and document releasability is enforced against that signer.
  * @returns {Promise<Object>} Created wallet details
  */
-async function createEmployeeWallet(employeeData, companyDID = null, preloadedRealPersonClaims = null) {
+async function createEmployeeWallet(employeeData, company = null, preloadedRealPersonClaims = null) {
   const { email, name, department } = employeeData;
+  const employerCompany = company || COMPANIES.techcorp;
 
-  console.log(`🏗️  [EmployeeWalletMgr] Creating wallet for: ${name} (${email})`);
+  console.log(`🏗️  [EmployeeWalletMgr] Creating wallet for: ${name} (${email}) — employer: ${employerCompany.displayName || employerCompany.name}`);
 
   // Track partial employee data for rollback
   const partialData = { email, name, department };
@@ -198,22 +205,22 @@ async function createEmployeeWallet(employeeData, companyDID = null, preloadedRe
     }).catch(e => console.warn(`  ⚠️ Enterprise webhook registration skipped: ${e.message}`));
     console.log(`  ✅ Enterprise webhook registered for new wallet`);
 
-    // STEP 7: Create TechCorp invitation
-    console.log('  → Step 7/12: Creating TechCorp invitation...');
-    const { invitationUrl, connectionId: techCorpConnectionId } = await createTechCorpInvitation(name, email);
+    // STEP 7: Create employer-side invitation (from the employee's actual employer's wallet)
+    console.log(`  → Step 7/12: Creating ${employerCompany.name} invitation...`);
+    const { invitationUrl, connectionId: techCorpConnectionId } = await createTechCorpInvitation(name, email, employerCompany);
     partialData.techCorpConnectionId = techCorpConnectionId;
 
     // STEP 8: Accept invitation as employee
-    console.log('  → Step 8/12: Employee accepting TechCorp invitation...');
+    console.log('  → Step 8/12: Employee accepting employer invitation...');
     partialData.employeeConnectionId = await acceptInvitationAsEmployee(invitationUrl, partialData.apiKey);
 
     // STEP 9: Wait for connection to establish (employee side)
     console.log('  → Step 9/12: Waiting for employee connection...');
     await waitForConnectionComplete(partialData.employeeConnectionId, partialData.apiKey);
 
-    // STEP 10: Wait for connection to establish (TechCorp side)
-    console.log('  → Step 10/12: Waiting for TechCorp connection...');
-    await waitForConnectionComplete(partialData.techCorpConnectionId, TECHCORP_API_KEY, TECHCORP_CLOUD_AGENT_URL);
+    // STEP 10: Wait for connection to establish (employer side)
+    console.log('  → Step 10/12: Waiting for employer-side connection...');
+    await waitForConnectionComplete(partialData.techCorpConnectionId, employerCompany.apiKey, TECHCORP_CLOUD_AGENT_URL);
 
     // STEP 11: Use pre-loaded RealPerson claims (provided externally) or skip
     let realPersonClaims = preloadedRealPersonClaims || null;
@@ -232,15 +239,15 @@ async function createEmployeeWallet(employeeData, companyDID = null, preloadedRe
       prismDid: partialData.prismDid,
       employeeId: employeeId,
       email: email, // Administrator-provided email for portal authentication
-      issuerDID: companyDID || TECHCORP_PRISM_DID, // DID of the credential issuer (company-specific) - enables document releasability filtering
+      issuerDID: employerCompany.did, // DID of the credential issuer (company-specific) - enables document releasability filtering
       role: employeeData.role || "Engineer",
       department: employeeData.department || department || "Engineering",
       serviceUrl: `https://identuslabel.cz/company-admin/employee-portal-login.html?user=${encodeURIComponent(employeeId)}`,
       serviceName: 'Employee Portal',
       serviceIcon: '🏢',
-      accessTarget: 'techcorp-employee-portal',
-      accessTargetLabel: 'TechCorp Employee Portal',
-      accessTargetIcon: '🏢',
+      accessTarget: `${employerCompany.id}-employee-portal`,
+      accessTargetLabel: `${employerCompany.displayName || employerCompany.name} Employee Portal`,
+      accessTargetIcon: employerCompany.logo || '🏢',
       hireDate: new Date().toISOString(),
       effectiveDate: new Date().toISOString(),
       expiryDate: new Date(Date.now() + 365*24*60*60*1000).toISOString() // 1 year from now
@@ -256,15 +263,16 @@ async function createEmployeeWallet(employeeData, companyDID = null, preloadedRe
       }
     }
 
-    // Issue EmployeeRole VC using TechCorp Cloud Agent
+    // Issue EmployeeRole VC signed by the employee's actual employer, not always TechCorp
     partialData.employeeRoleCredentialId = await issueEmployeeRoleVC(
       partialData.techCorpConnectionId,
       partialData.employeeConnectionId,
       credentialSubject,
-      TECHCORP_API_KEY,
+      employerCompany.apiKey,
       TECHCORP_CLOUD_AGENT_URL,
       partialData.apiKey,
-      EMPLOYEE_CLOUD_AGENT_URL
+      EMPLOYEE_CLOUD_AGENT_URL,
+      employerCompany.did
     );
 
     console.log(`  ✅ EmployeeRole VC issued: ${partialData.employeeRoleCredentialId}`);
@@ -284,6 +292,7 @@ async function createEmployeeWallet(employeeData, companyDID = null, preloadedRe
       entityId: partialData.entityId,
       apiKey: partialData.apiKey, // Will be hashed by database
       prismDid: partialData.canonicalDid,
+      companyId: employerCompany.id,
       createdBy: 'EmployeeWalletManager'
     });
 
@@ -683,23 +692,25 @@ async function waitForPublicationComplete(
 }
 
 /**
- * Helper: Create OOB invitation from TechCorp company wallet
+ * Helper: Create OOB invitation from the employee's actual employer's wallet
  * @param {string} employeeName - Employee name for connection label
  * @param {string} employeeEmail - Employee email for label search
+ * @param {Object} company - Employer company config (.apiKey, .name/.displayName) from lib/companies.js
  * @returns {Promise<{invitationUrl: string, connectionId: string}>}
  */
-async function createTechCorpInvitation(employeeName, employeeEmail) {
-  console.log(`[EmployeeWalletMgr] Creating TechCorp invitation for ${employeeName}...`);
+async function createTechCorpInvitation(employeeName, employeeEmail, company) {
+  const companyLabel = company.displayName || company.name;
+  console.log(`[EmployeeWalletMgr] Creating ${companyLabel} invitation for ${employeeName}...`);
 
   const response = await fetch(`${TECHCORP_CLOUD_AGENT_URL}/connections`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'apikey': TECHCORP_API_KEY
+      'apikey': company.apiKey
     },
     body: JSON.stringify({
-      label: `TechCorp ↔ ${employeeName} (${employeeEmail})`,
-      goal: `Establish connection between TechCorp company and employee ${employeeName}`
+      label: `${companyLabel} ↔ ${employeeName} (${employeeEmail})`,
+      goal: `Establish connection between ${companyLabel} and employee ${employeeName}`
     })
   });
 
@@ -823,17 +834,20 @@ async function waitForConnectionComplete(
 /**
  * Helper: Issue EmployeeRole VC to employee
  *
- * Issues an EmployeeRole Verifiable Credential to the employee using the TechCorp
- * Cloud Agent. This credential contains the employee's role, department, and other
- * employment details.
+ * Issues an EmployeeRole Verifiable Credential to the employee, signed by the
+ * employee's actual employer's own PRISM DID. Document releasability checks trust
+ * this credential's cryptographically-verified issuer as "which company this
+ * person works for" — issuing it under the wrong company's DID silently defeats
+ * that check for every employee of every OTHER company.
  *
- * @param {string} techCorpConnectionId - TechCorp's connection ID with the employee
- * @param {string} employeeConnectionId - Employee's connection ID with TechCorp
+ * @param {string} techCorpConnectionId - Employer's connection ID with the employee
+ * @param {string} employeeConnectionId - Employee's connection ID with the employer
  * @param {object} credentialSubject - Credential subject data
- * @param {string} techCorpApiKey - TechCorp's API key
- * @param {string} techCorpCloudAgentUrl - TechCorp's Cloud Agent URL
+ * @param {string} techCorpApiKey - Employer's API key (selects their wallet on the shared agent)
+ * @param {string} techCorpCloudAgentUrl - Shared multitenancy Cloud Agent URL
  * @param {string} employeeApiKey - Employee's API key
  * @param {string} employeeCloudAgentUrl - Employee's Cloud Agent URL
+ * @param {string} issuingDID - The employer's own PRISM DID to sign the credential with
  * @returns {Promise<string>} Credential record ID
  */
 async function issueEmployeeRoleVC(
@@ -843,7 +857,8 @@ async function issueEmployeeRoleVC(
   techCorpApiKey,
   techCorpCloudAgentUrl,
   employeeApiKey,
-  employeeCloudAgentUrl
+  employeeCloudAgentUrl,
+  issuingDID
 ) {
   console.log(`[EmployeeWalletMgr] Issuing EmployeeRole VC to employee...`);
   console.log(`[EmployeeWalletMgr] Credential Subject:`, JSON.stringify(credentialSubject, null, 2));
@@ -855,7 +870,7 @@ async function issueEmployeeRoleVC(
   // NOTE: v1.3.0 adds uniqueId, lastName, photo, serviceUrl, serviceName, serviceIcon fields
   const EMPLOYEE_ROLE_SCHEMA_GUID = '028358d2-1f3b-37cc-ad1c-b8ca48d1e6c3'; // v1.4.0 — adds accessTarget, accessTargetLabel, accessTargetIcon
 
-  // Step 1: Create credential offer from TechCorp side
+  // Step 1: Create credential offer from the employer's side
   const offerResponse = await fetch(`${techCorpCloudAgentUrl}/issue-credentials/credential-offers`, {
     method: 'POST',
     headers: {
@@ -867,7 +882,7 @@ async function issueEmployeeRoleVC(
       schemaId: `${techCorpCloudAgentUrl}/schema-registry/schemas/${EMPLOYEE_ROLE_SCHEMA_GUID}`, // Full schema URL
       claims: credentialSubject,
       automaticIssuance: true, // Auto-approve after employee accepts
-      issuingDID: TECHCORP_PRISM_DID, // TechCorp's published PRISM DID (issuer identifier)
+      issuingDID, // The employer's own PRISM DID — NOT always TechCorp's
       credentialFormat: 'JWT'
     })
   });

@@ -1,16 +1,12 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { useMountedApp } from '@/reducers/store';
 import { ChatMessage, MessageStatus } from '@/reducers/app';
-import { sendProtocolAccessRequest } from '@/actions';
 import { useCAPortal } from '@/utils/CAPortalContext';
-import { getItem, setItem } from '@/utils/prefixedStorage';
-import { getConnectionMetadata } from '@/utils/connectionMetadata';
 import { parseServiceAccessGrant, isTrustedGrantSender } from '@/utils/serviceAccessGrant';
+import { getTargetsForConnection, requestConnectionAccess } from '@/utils/connectionAccessTargets';
 
-const DIDCOMM_SERVICES_KEY = 'didcomm-access-services';
-
-export interface DIDCommService {
+interface TrustedGrant {
   id: string;
   accessUrl: string;
   label: string;
@@ -20,23 +16,17 @@ export interface DIDCommService {
   receivedAt: number;
   expiresAt: number;
 }
-
-export function loadDIDCommServices(): DIDCommService[] {
-  try { return JSON.parse(getItem(DIDCOMM_SERVICES_KEY) || '[]'); } catch { return []; }
-}
-
-function saveDIDCommService(svc: DIDCommService) {
-  const list = loadDIDCommServices().filter(s => s.target !== svc.target); // replace same target
-  list.unshift(svc);
-  setItem(DIDCOMM_SERVICES_KEY, JSON.stringify(list.slice(0, 20))); // keep last 20
-}
 import { SecurityLevel, SECURITY_LEVEL_NAMES, parseSecurityLevel } from '../utils/securityLevels';
 import { getVCClearanceLevel, validateSecurityClearanceVC, getSecurityKeyByFingerprint, getSecurityKeyByFingerprintAsync } from '../utils/keyVCBinding';
+import { getSecurityKeyPrivateMaterial } from '../utils/securityKeyStorage';
+import { SecurityKeyDual } from '../types/securityKeys';
 import { SecurityLevelSelector } from './SecurityLevelSelector';
 import { EncryptedMessageBadge } from './EncryptedMessageBadge';
 import { decryptMessage } from '../utils/messageEncryption';
 import { base64url } from 'jose';
 import { verifyCredentialStatus, CredentialStatus } from '@/utils/credentialStatus';
+
+const apollo = new SDK.Apollo();
 
 interface ChatProps {
   messages: SDK.Domain.Message[];
@@ -48,7 +38,6 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
   const app = useMountedApp();
   const { openCAPortal, setPendingAccessRequest } = useCAPortal();
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const storedGrantIds = useRef<Set<string>>(new Set());
   const [messageText, setMessageText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -70,8 +59,10 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
   // Previous conditional logic was incorrect and caused sending messages to self.
   const otherDID = connection.receiver.toString();
 
-  // Get user's maximum security clearance level
-  const userSecurityClearanceVC = app.credentials.find(
+  // A wallet can hold MULTIPLE security clearance VCs at once - e.g. an old one that was
+  // revoked plus a newly-issued replacement. Consider all of them, not just the first match,
+  // so a revoked older VC can't shadow a valid newer one (or vice versa).
+  const securityClearanceCredentials = useMemo(() => app.credentials.filter(
     (cred: any) => {
       try {
         // Check type array (for legacy VCs)
@@ -101,30 +92,61 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
         return false;
       }
     }
-  );
-  const userMaxLevel = userSecurityClearanceVC
-    ? getVCClearanceLevel(userSecurityClearanceVC)
-    : SecurityLevel.INTERNAL;
+  ), [app.credentials]);
 
-  // ✅ NEW: Check user's security clearance revocation status
+  const [userSecurityClearanceVC, setUserSecurityClearanceVC] = useState<any>(null);
+  const [userMaxLevel, setUserMaxLevel] = useState<SecurityLevel>(SecurityLevel.INTERNAL);
+
+  // ✅ NEW: Resolve the user's active clearance across ALL held clearance VCs, and check
+  // revocation status. The active VC is the highest-level one that is NOT revoked/suspended -
+  // this way a stale, revoked VC left in the wallet after re-issuance can't block messaging
+  // or under-report the user's current clearance.
   useEffect(() => {
-    const checkUserClearance = async () => {
-      if (userSecurityClearanceVC) {
-        const validity = await checkSecurityClearanceValidity(userSecurityClearanceVC);
-        setClearanceRevoked(!validity.valid);
-        if (!validity.valid) {
-          setClearanceRevocationReason(validity.reason);
-          console.warn('⚠️ [SECURITY] User clearance invalid:', validity.reason);
-        }
-      } else {
-        // No clearance VC - reset state
+    let cancelled = false;
+
+    const resolveUserClearance = async () => {
+      if (securityClearanceCredentials.length === 0) {
+        if (cancelled) return;
+        setUserSecurityClearanceVC(null);
+        setUserMaxLevel(SecurityLevel.INTERNAL);
         setClearanceRevoked(false);
         setClearanceRevocationReason('');
+        return;
+      }
+
+      const evaluated = await Promise.all(
+        securityClearanceCredentials.map(async (cred: any) => ({
+          cred,
+          level: getVCClearanceLevel(cred),
+          validity: await checkSecurityClearanceValidity(cred)
+        }))
+      );
+
+      if (cancelled) return;
+
+      const validEntries = evaluated.filter(e => e.validity.valid);
+
+      if (validEntries.length > 0) {
+        // Use the highest-level VALID clearance VC
+        const best = validEntries.reduce((a, b) => (b.level > a.level ? b : a));
+        setUserSecurityClearanceVC(best.cred);
+        setUserMaxLevel(best.level);
+        setClearanceRevoked(false);
+        setClearanceRevocationReason('');
+      } else {
+        // No valid clearance VC - surface the highest-level one's revocation reason
+        const worst = evaluated.reduce((a, b) => (b.level > a.level ? b : a));
+        setUserSecurityClearanceVC(worst.cred);
+        setUserMaxLevel(SecurityLevel.INTERNAL);
+        setClearanceRevoked(true);
+        setClearanceRevocationReason(worst.validity.reason || 'Security clearance is not valid');
+        console.warn('⚠️ [SECURITY] User clearance invalid:', worst.validity.reason);
       }
     };
 
-    checkUserClearance();
-  }, [userSecurityClearanceVC]);
+    resolveUserClearance();
+    return () => { cancelled = true; };
+  }, [securityClearanceCredentials]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -264,8 +286,17 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
             continue;
           }
 
-          // Decode X25519 private and public keys directly (no SDK transformation)
-          const userX25519PrivateKey = base64url.decode((userKey as any).x25519.privateKeyBytes);
+          // Resolve the X25519 private key on demand (re-derived from the wallet seed
+          // when the entry has a keyIndex, or read from persisted bytes for legacy/
+          // Pluto-sourced entries) instead of reading persisted bytes directly.
+          const userKeyMaterial = getSecurityKeyPrivateMaterial(userKey as SecurityKeyDual, apollo, app.defaultSeed);
+          if (!userKeyMaterial) {
+            console.warn('⚠️ [Chat] Could not resolve private key material (wallet seed not ready?)');
+            newDecrypted.set(message.id, '🔒 [Encrypted — Security Clearance with encryption keys required. Visit the CA Portal to get an updated clearance.]');
+            hasNewDecryptions = true;
+            continue;
+          }
+          const userX25519PrivateKey = base64url.decode(userKeyMaterial.x25519PrivateKeyBytes);
           const userX25519PublicKey = base64url.decode((userKey as any).x25519.publicKeyBytes);
 
           console.log('🔑 [Chat] Using X25519 encryption keys for decryption');
@@ -448,7 +479,7 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
   // check at all (only isOwnMessage, which just filters self-echo, not authorization). Only
   // `mode: redirect` grants are rendered as a service card here; `mode: payload` capabilities
   // have no generic UI and are handled by GlobalGrantWatcher's capability-specific dispatch.
-  const getTrustedGrant = (message: SDK.Domain.Message): DIDCommService | null => {
+  const getTrustedGrant = (message: SDK.Domain.Message): TrustedGrant | null => {
     if (isOwnMessage(message)) return null;
     const parsed = parseServiceAccessGrant(message);
     if (!parsed || parsed.mode !== 'redirect' || !parsed.accessUrl) return null;
@@ -470,18 +501,6 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
       expiresAt: parsed.expiresAt
     };
   };
-
-  // Store incoming grant messages to localStorage so the Browser tab can show them.
-  useEffect(() => {
-    for (const msg of messages) {
-      if (storedGrantIds.current.has(msg.id)) continue;
-      const grant = getTrustedGrant(msg);
-      if (grant) {
-        storedGrantIds.current.add(msg.id);
-        saveDIDCommService(grant);
-      }
-    }
-  }, [messages]);
 
   // Parse message body content (handles both plaintext and encrypted)
   const getMessageContent = (message: SDK.Domain.Message): string => {
@@ -663,45 +682,18 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
     return messageFromDID === myDID;
   };
 
-  // Known display info for CA's capability keys — used both for capabilities-based connections
-  // and as a fallback for connections that still only carry the deprecated isCAConnection flag.
-  const CA_CAPABILITY_INFO: Record<string, { label: string; icon: string }> = {
-    portal:              { label: 'CA Portal',               icon: '🏛️' },
-    'security-clearance': { label: 'Security Clearance Page', icon: '🔐' },
-    login:               { label: 'CA Login',                icon: '🔑' },
-  };
-
-  const getTargetsForConnection = (conn: SDK.Domain.DIDPair) => {
-    const meta = getConnectionMetadata(conn.host.toString());
-    const capabilities = meta?.capabilities?.length
-      ? meta.capabilities
-      : (meta?.isCAConnection ? Object.keys(CA_CAPABILITY_INFO) : []);
-
-    if (capabilities.length) {
-      return capabilities.map(key => ({
-        key,
-        label: CA_CAPABILITY_INFO[key]?.label ?? meta?.supportedTargets?.find(t => t.key === key)?.label ?? key,
-        icon:  CA_CAPABILITY_INFO[key]?.icon  ?? meta?.supportedTargets?.find(t => t.key === key)?.icon  ?? '🔗',
-      }));
-    }
-    return meta?.supportedTargets ?? [];
-  };
-
   const handleRequestAccess = async (target: string) => {
     if (!app.agent.instance || accessRequestPending) return;
     setShowAccessMenu(false);
     setAccessRequestPending(true);
-    const targetInfo = getTargetsForConnection(connection).find(t => t.key === target);
-    if (targetInfo) setPendingAccessRequest({ target, label: targetInfo.label, icon: targetInfo.icon });
     try {
-      await app.dispatch(sendProtocolAccessRequest({
+      await requestConnectionAccess({
         agent: app.agent.instance,
+        dispatch: app.dispatch,
         connection,
-        target
-      }));
-    } catch (e: any) {
-      console.error('[Chat] Access request failed:', e.message);
-      setPendingAccessRequest(null);
+        target,
+        setPendingAccessRequest,
+      });
     } finally {
       setAccessRequestPending(false);
     }
@@ -802,7 +794,6 @@ export const Chat: React.FC<ChatProps> = ({ messages, connection, onSendMessage 
                           🔓 Launch in Wallet
                         </button>
                       )}
-                      <p className="text-slate-600 text-xs text-center">Also visible in Browser tab</p>
                     </div>
                     <div className="px-4 pb-2 text-xs text-slate-600">{time}</div>
                   </div>

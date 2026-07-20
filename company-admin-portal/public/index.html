@@ -202,6 +202,43 @@
                 </div>
             </section>
 
+            <!-- Releasable-To Partners Section -->
+            <section class="section">
+                <div class="section-header">
+                    <h2>🤝 Releasable-To Partners</h2>
+                    <button class="btn btn-secondary btn-sm" onclick="app.loadReleasablePartners()">
+                        Refresh
+                    </button>
+                </div>
+                <div class="section-body">
+                    <p style="margin: 0 0 12px; color: #94a3b8; font-size: 13px;">
+                        Companies in this list appear as optional "Releasable To" checkboxes when your employees
+                        upload classified documents. Your own company is always included automatically.
+                    </p>
+                    <div class="table-container">
+                        <table class="employee-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>DID</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="releasable-partners-table-body">
+                                <tr>
+                                    <td colspan="3" class="loading-row">Loading partners...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
+                        <input type="text" id="new-partner-name" placeholder="Partner name" style="flex: 1; min-width: 160px; padding: 8px 12px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0;">
+                        <input type="text" id="new-partner-did" placeholder="did:prism:..." style="flex: 2; min-width: 240px; padding: 8px 12px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0;">
+                        <button class="btn btn-primary btn-sm" onclick="app.addReleasablePartner()">➕ Add</button>
+                    </div>
+                </div>
+            </section>
+
             <!-- Admin Chat Section -->
             <section id="admin-chat-section" class="section">
                 <div class="section-header">

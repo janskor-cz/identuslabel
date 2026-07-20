@@ -38,9 +38,9 @@ const { DocumentDIDCommService } = require('./lib/DocumentDIDCommService');
 
 const config                       = require('./config');
 const { resolveDocumentDID }       = require('./lib/DIDDocumentResolver');
-const { emitAuditEvent }           = require('./lib/AuditEmitter');
-const SlackNotifier                = require('./lib/SlackNotifier');
+const { fireAudit } = require('./lib/AuditEmitter');
 const { verifyVPAndExtractClaims } = require('./lib/VPVerificationService');
+const HolderBinding                = require('./lib/HolderBindingService');
 const { processAccessRequest, getLevelNumber, getLevelLabel } = require('./lib/ReEncryptionService');
 const { IagonStorageClient }       = require('./lib/IagonStorageClient');
 const { DocumentService }          = require('./lib/DocumentService');
@@ -249,7 +249,8 @@ app.post('/documents', requireAdminKey, upload.single('file'), async (req, res) 
       clearanceLevel:   req.body.clearanceLevel,
       releasableTo,
       department:       req.body.department,
-      auditWebhookUrl:  req.body.auditWebhookUrl
+      auditWebhookUrl:  req.body.auditWebhookUrl,
+      ownerCompanyDID:  req.body.ownerCompanyDID || null
     });
 
     return res.status(201).json({ success: true, ...result });
@@ -296,6 +297,30 @@ app.get('/documents/:did', async (req, res) => {
       return res.status(404).json({ error: 'DID not found', documentDID });
     }
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /access-challenge — issue a one-time, holder-bound access challenge
+// ---------------------------------------------------------------------------
+// Step 1 of the holder-bound VP flow. The wallet asks for a challenge tied to
+// the document it wants and the ephemeral X25519 key it will decrypt with, then
+// signs `${challenge}.${documentDID}.${ephemeralPublicKey}` with its credential
+// subject key and submits it to /access. See HolderBindingService.js.
+app.post('/access-challenge', express.json(), (req, res) => {
+  const { documentDID, ephemeralPublicKey } = req.body || {};
+  if (!documentDID || !ephemeralPublicKey) {
+    return res.status(400).json({ success: false, error: 'MISSING_FIELDS', message: 'documentDID and ephemeralPublicKey are required' });
+  }
+  if (!String(documentDID).startsWith('did:')) {
+    return res.status(400).json({ success: false, error: 'INVALID_DID', message: 'documentDID must be a valid DID' });
+  }
+  try {
+    const { challenge, domain, expiresAt } = HolderBinding.issueChallenge({ documentDID, ephemeralPublicKey });
+    return res.json({ success: true, challenge, domain, expiresAt });
+  } catch (err) {
+    console.error('[/access-challenge] error:', err.message);
+    return res.status(500).json({ success: false, error: 'INTERNAL_ERROR', message: 'Could not issue challenge' });
   }
 });
 
@@ -569,7 +594,11 @@ async function _handleAccess(req, res) {
     signature,
     ephemeralDID,
     timestamp,
-    nonce: reqNonce
+    nonce: reqNonce,
+    // Holder proof-of-possession (mandatory) — see HolderBindingService.js
+    holderDID,
+    challenge,
+    holderSignature
   } = req.body;
 
   if (!documentDID || !ephemeralPublicKey || !vp) {
@@ -603,6 +632,58 @@ async function _handleAccess(req, res) {
       return res.status(403).json({ error: vpResult.error, message: vpResult.message });
     }
 
+    // ── Holder proof-of-possession (best-effort, defense-in-depth) ──────────────
+    // The access decision itself is the VP verification above (issuer signature,
+    // releasability, clearance level). When the presenter ALSO supplies a holder
+    // proof — possible only when it controls the credential subject key, i.e. for
+    // wallet-held (personal) credentials — we cryptographically bind the request to
+    // that holder + this one-time, ephemeral-key-bound challenge, and reject a bad
+    // proof. Enterprise credentials are custodied by the enterprise agent, so their
+    // subject key isn't at the browser; those requests present a bearer VP and rely
+    // on the verification above.
+    const hasHolderProof = holderDID && challenge && holderSignature;
+    if (hasHolderProof) {
+      const bindingCheck = HolderBinding.checkChallengeBinding({ challenge, documentDID, ephemeralPublicKey });
+      if (!bindingCheck.ok) {
+        console.warn('[/access] Challenge binding failed:', bindingCheck.error);
+        _fireAudit(docMeta.auditEndpoint, {
+          event: 'ACCESS_DENIED', documentDID, denialReason: bindingCheck.error, clientIp,
+          processingMs: Date.now() - startTime
+        });
+        return res.status(403).json({ error: bindingCheck.error, message: bindingCheck.message });
+      }
+
+      const holderMessage  = HolderBinding.canonicalMessage({ challenge, documentDID, ephemeralPublicKey });
+      const holderSigValid = await HolderBinding.verifyHolderSignature(holderDID, holderMessage, holderSignature);
+      if (!holderSigValid) {
+        console.warn(`[/access] Holder signature verification failed for ${holderDID}`);
+        _fireAudit(docMeta.auditEndpoint, {
+          event: 'ACCESS_DENIED', documentDID, denialReason: 'INVALID_HOLDER_SIGNATURE', clientIp,
+          processingMs: Date.now() - startTime
+        });
+        return res.status(403).json({ error: 'INVALID_HOLDER_SIGNATURE', message: 'Holder proof-of-possession signature is invalid' });
+      }
+
+      // The signer must be the subject of the presented credentials — otherwise a
+      // holder could prove possession of DID A's key while presenting DID B's VCs.
+      // Compare on the PRISM hash segment (long-form vs short-form safe; the hash
+      // commits to the keys per the DID:PRISM spec).
+      const hashOf = d => (typeof d === 'string' && d.startsWith('did:prism:')) ? d.split(':')[2] : d;
+      if (!vpResult.credentialSubjectDID || hashOf(holderDID) !== hashOf(vpResult.credentialSubjectDID)) {
+        console.warn(`[/access] Holder/subject mismatch: signer=${holderDID} subject=${vpResult.credentialSubjectDID}`);
+        _fireAudit(docMeta.auditEndpoint, {
+          event: 'ACCESS_DENIED', documentDID, denialReason: 'HOLDER_SUBJECT_MISMATCH', clientIp,
+          processingMs: Date.now() - startTime
+        });
+        return res.status(403).json({ error: 'HOLDER_SUBJECT_MISMATCH', message: 'Signing holder is not the subject of the presented credentials' });
+      }
+
+      HolderBinding.consumeChallenge(challenge);
+      console.log(`[/access] ✅ Holder proof-of-possession verified for ${holderDID.slice(0, 32)}…`);
+    } else {
+      console.log('[/access] No holder proof supplied — bearer VP (enterprise-custodied credential); access gated by VP verification.');
+    }
+
     const { issuerDID, clearanceLevel: clearanceLevelStr, viewerName } = vpResult;
     const clearanceLevelNum = getLevelNumber(clearanceLevelStr || 'UNCLASSIFIED');
 
@@ -611,6 +692,7 @@ async function _handleAccess(req, res) {
       requestorDID:       vpResult.companyDID || issuerDID,
       issuerDID,
       companyDID:         vpResult.companyDID,
+      verifiedIssuerDIDs: vpResult.verifiedIssuerDIDs,
       clearanceLevelNum,
       clearanceLevelStr:  clearanceLevelStr || getLevelLabel(clearanceLevelNum),
       ephemeralPublicKey,
@@ -621,9 +703,11 @@ async function _handleAccess(req, res) {
       credentialStatuses: vpResult.credentialStatuses || [],
       docMeta,
       clientIp,
-      // VP-gated direct access: the VP (with issuer-signed VCs) is the cryptographic proof.
-      // The additional Ed25519 challenge-response signature is only needed when no VP is sent.
-      trustedDelegation:  !signature
+      // Holder proof-of-possession was already verified above (holderSignature over a
+      // one-time, ephemeral-key-bound challenge, with holderDID == credential subject),
+      // so the ReEncryptionService's own Ed25519 challenge-response is not additionally
+      // required here.
+      trustedDelegation:  true
     });
 
     _fireAudit(docMeta.auditEndpoint, {
@@ -862,21 +946,10 @@ app.post('/documents/:did/access-complete', async (req, res) => {
 // Helpers
 // ---------------------------------------------------------------------------
 function _fireAudit(url, event) {
-  emitAuditEvent(url, event);
-  SlackNotifier.notifyAccess(event);
-  LocalAuditLog.append({
-    timestamp:     new Date().toISOString(),
-    event:         event.event,
-    documentDID:   event.documentDID   || null,
-    issuerDID:     event.issuerDID     || null,
-    clearanceLevel:event.clearanceLevel|| null,
-    accessGranted: event.event === 'ACCESS_GRANTED',
-    denialReason:  event.denialReason  || null,
-    copyId:        event.copyId        || null,
-    viewerName:    event.viewerName    || null,
-    clientIp:      event.clientIp      || null,
-    processingMs:  event.processingMs  || null
-  });
+  // Delegates to the shared lib/AuditEmitter.js#fireAudit so DocumentService.js's
+  // CRUD paths (createDocument/updateDocument/deleteDocument) can fan out to the
+  // same three sinks (webhook + Slack + local JSONL) without duplicating this logic.
+  fireAudit(url, event);
 }
 
 /** Produces a 64-byte zero signature used when the client doesn't provide one.
@@ -908,6 +981,92 @@ app.get('/connect', async (req, res) => {
   } catch (err) {
     console.error('[GET /connect]', err.message);
     return res.status(500).json({ error: 'INVITATION_FAILED', message: err.message });
+  }
+});
+
+// GET /access-grant-status?requestId=... — HTTP-pollable transport for the enterprise-agent
+// channel. When the holder is an enterprise-custodied wallet, the service-access/1.0 present-proof
+// and grant travel over the enterprise wallet's DIDComm connection, which the browser's own
+// SDK-managed inbox cannot observe. The browser therefore polls this endpoint for the grant
+// (DEK + Iagon link) that ServiceAccessService produced after independently verifying the
+// holder-signed, challenge-bound VP. One-shot: consumeGrant deletes the result after read.
+app.get('/access-grant-status', (req, res) => {
+  const requestId = req.query.requestId;
+  if (!requestId) {
+    return res.status(400).json({ success: false, error: 'MISSING_REQUEST_ID', message: 'requestId query parameter is required' });
+  }
+  if (!_didcommSvc || !_didcommSvc.serviceAccessSvc) {
+    return res.status(503).json({ success: false, error: 'NOT_INITIALIZED', message: 'DIDComm service not ready' });
+  }
+  const token = req.query.token != null ? String(req.query.token) : undefined;
+  const result = _didcommSvc.serviceAccessSvc.consumeGrant(String(requestId), token);
+  if (!result) {
+    return res.json({ success: true, status: 'pending' });
+  }
+  if (result.tokenMismatch) {
+    return res.status(403).json({ success: false, status: 'error', error: 'TOKEN_MISMATCH', message: 'Invalid access token for this request' });
+  }
+  if (result.error) {
+    return res.json({ success: true, status: 'error', error: result.error, message: result.message });
+  }
+  return res.json({ success: true, status: 'granted', grant: result.grant });
+});
+
+// GET /document-blob?documentDID=... — same-origin proxy for the encrypted Iagon blob.
+// The browser CANNOT fetch gw.iagon.com directly: Iagon's download is a POST that requires an
+// x-api-key header, and it is cross-origin (→ CORS-blocked "Failed to fetch"). This endpoint runs
+// the authenticated download server-side and streams the STILL-ENCRYPTED bytes back over the
+// document-service origin (Caddy: /document-service → 3020, same origin as /wallet). The blob stays
+// AES-GCM-encrypted under the per-document DEK — which is delivered separately, sealed to the
+// requester's ephemeral key — so serving the ciphertext by documentDID discloses nothing usable.
+// Keyed by documentDID (looked up in our own manifest store) rather than a raw fileId, so this is
+// never a generic Iagon passthrough.
+app.get('/document-blob', async (req, res) => {
+  // Gated by a per-delivery token issued in the grant (see DocumentDIDCommService.registerBlobGrant).
+  // Knowing a documentDID is no longer sufficient — the caller must hold the token from a grant it
+  // legitimately received. The served bytes are still AES-GCM-encrypted under the DEK regardless.
+  const deliveryId = String(req.query.deliveryId || '');
+  const token      = String(req.query.token || '');
+  if (!deliveryId || !token) {
+    return res.status(400).json({ success: false, error: 'MISSING_TOKEN', message: 'deliveryId and token query parameters are required' });
+  }
+  if (!_didcommSvc || typeof _didcommSvc.checkBlobToken !== 'function') {
+    return res.status(503).json({ success: false, error: 'NOT_INITIALIZED', message: 'DIDComm service not ready' });
+  }
+  const grant = _didcommSvc.checkBlobToken(deliveryId, token);
+  if (!grant) {
+    return res.status(403).json({ success: false, error: 'INVALID_TOKEN', message: 'Invalid or expired blob token' });
+  }
+  const documentDID = grant.documentDID;
+  const rec = vcStore.get(documentDID);
+  if (!rec || !rec.vcJwt) {
+    return res.status(404).json({ success: false, error: 'NOT_FOUND', message: 'Unknown documentDID' });
+  }
+  let fileId;
+  try {
+    const payload = JSON.parse(Buffer.from(rec.vcJwt.split('.')[1], 'base64').toString('utf8'));
+    fileId = payload.vc?.credentialSubject?.iagonFileId;
+  } catch (e) {
+    return res.status(500).json({ success: false, error: 'MANIFEST_DECODE', message: 'Could not read document manifest' });
+  }
+  if (!fileId) {
+    return res.status(404).json({ success: false, error: 'NO_FILE', message: 'Document manifest has no stored file' });
+  }
+  try {
+    const iagon = new IagonStorageClient({
+      accessToken:     config.IAGON_ACCESS_TOKEN,
+      nodeId:          config.IAGON_NODE_ID,
+      downloadBaseUrl: config.IAGON_DOWNLOAD_BASE_URL
+    });
+    // algorithm 'none' → return the raw encrypted bytes (the browser AES-GCM-decrypts with the DEK).
+    const bytes = await iagon.downloadFile(fileId, { algorithm: 'none' });
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', bytes.length);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.end(bytes);
+  } catch (e) {
+    console.error(`[GET /document-blob] Iagon download failed for ${documentDID.slice(0, 40)}: ${e.message}`);
+    return res.status(502).json({ success: false, error: 'IAGON_DOWNLOAD_FAILED', message: e.message });
   }
 });
 

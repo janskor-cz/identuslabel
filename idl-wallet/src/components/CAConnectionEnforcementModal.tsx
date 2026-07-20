@@ -142,6 +142,9 @@ export const CAConnectionEnforcementModal: React.FC<CAConnectionEnforcementModal
       if (!agent) {
         throw new Error('Wallet agent not initialized. Please start the agent first.');
       }
+      if (!defaultSeed) {
+        throw new Error('Wallet seed not ready yet. Please wait for wallet to finish initializing.');
+      }
 
       // Check mediator configuration
       const mediatorDID = agent.currentMediatorDID;

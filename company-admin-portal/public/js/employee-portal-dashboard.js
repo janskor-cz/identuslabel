@@ -388,6 +388,11 @@ async function pollClearanceStatus() {
             stopClearancePolling();
             showClearanceError('Verification Expired',
                 'The verification request has expired. Please try again.');
+        } else if (data.error === 'NoClearanceCredentialPresented') {
+            // Wallet presented a credential other than Security Clearance
+            stopClearancePolling();
+            showClearanceError('Wrong Credential',
+                data.message || 'The presented credential was not a Security Clearance credential.');
         }
         // else: still pending, continue polling
 
@@ -715,7 +720,9 @@ async function loadDocuments(profile) {
             fetch(`/company-admin/api/documents/discover?issuerDID=${encodeURIComponent(issuerDID)}`, {
                 headers: { 'x-session-id': sessionToken || '' }
             }),
-            fetch(`/company-admin/api/folders?ownerCompanyDID=${encodeURIComponent(issuerDID)}`)
+            fetch(`/company-admin/api/folders`, {
+                headers: { 'x-session-id': sessionToken || '' }
+            })
         ]);
 
         if (!docsRes.ok) throw new Error(`HTTP ${docsRes.status}: ${docsRes.statusText}`);
@@ -879,8 +886,8 @@ async function promptCreateFolder() {
     try {
         const res = await fetch('/company-admin/api/folders', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: name.trim(), ownerCompanyDID: _currentIssuerDID, parentFolderId })
+            headers: { 'Content-Type': 'application/json', 'x-session-id': getSessionToken() || '' },
+            body: JSON.stringify({ name: name.trim(), parentFolderId })
         });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'Failed to create folder');
@@ -959,8 +966,8 @@ async function ctxRenameFolder(folderId, currentName) {
     try {
         const res = await fetch(`/company-admin/api/folders/${encodeURIComponent(folderId)}`, {
             method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: name.trim(), ownerCompanyDID: _currentIssuerDID })
+            headers: { 'Content-Type': 'application/json', 'x-session-id': getSessionToken() || '' },
+            body: JSON.stringify({ name: name.trim() })
         });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'Rename failed');
@@ -980,8 +987,9 @@ async function ctxDeleteFolder(folderId, folderName) {
     if (!_currentIssuerDID) return;
     if (!confirm(`Delete folder "${folderName}"? Documents inside will be moved to root.`)) return;
     try {
-        const res = await fetch(`/company-admin/api/folders/${encodeURIComponent(folderId)}?ownerCompanyDID=${encodeURIComponent(_currentIssuerDID)}`, {
-            method: 'DELETE'
+        const res = await fetch(`/company-admin/api/folders/${encodeURIComponent(folderId)}`, {
+            method: 'DELETE',
+            headers: { 'x-session-id': getSessionToken() || '' }
         });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'Delete failed');
@@ -1026,16 +1034,14 @@ async function ctxMoveToFolder(documentDID) {
             // Remove from folder
             const res = await fetch(`/company-admin/api/folders/root/documents/${encodeURIComponent(documentDID)}`, {
                 method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ownerCompanyDID: _currentIssuerDID })
+                headers: { 'Content-Type': 'application/json', 'x-session-id': getSessionToken() || '' }
             });
             // If endpoint doesn't exist, just clear locally
             delete _folderMembership[documentDID];
         } else {
             const res = await fetch(`/company-admin/api/folders/${encodeURIComponent(choice)}/documents/${encodeURIComponent(documentDID)}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ownerCompanyDID: _currentIssuerDID })
+                headers: { 'Content-Type': 'application/json', 'x-session-id': getSessionToken() || '' }
             });
             const data = await res.json();
             if (!data.success) throw new Error(data.error || 'Move failed');
@@ -1131,7 +1137,7 @@ async function folderDrop(event, el) {
     try {
         const res = await fetch(
             `/company-admin/api/folders/${encodeURIComponent(folderId)}/documents/${encodeURIComponent(did)}`,
-            { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ownerCompanyDID: _currentIssuerDID }) }
+            { method: 'PUT', headers: { 'Content-Type': 'application/json', 'x-session-id': getSessionToken() || '' } }
         );
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'Move failed');
@@ -1897,6 +1903,20 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+/**
+ * Attribute-safe variant of escapeHtml(). escapeHtml() only escapes &, <, > —
+ * correct for filling a text node, but NOT sufficient for filling a
+ * double-quoted HTML attribute value (e.g. value="${...}"), since `"` is
+ * left untouched. An unescaped `"` there lets attacker-controlled text break
+ * out of the attribute and inject new live attributes (e.g. onfocus=...) —
+ * confirmed exploitable via admin-supplied partner DIDs in the
+ * "Releasable To" checkbox rendering (loadReleasableToOptions below).
+ * Use this instead of escapeHtml() for any `attr="${...}"` interpolation.
+ */
+function escapeAttr(text) {
+    return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function copyDID(did, btn) {
@@ -3180,6 +3200,67 @@ function openUploadModal() {
         const e = document.getElementById('classifiedDocErrorModal');
         if (s) s.classList.add('hidden');
         if (e) e.classList.add('hidden');
+        loadReleasableToOptions();
+    }
+}
+
+/**
+ * Fetch the caller's own company plus admin-managed partner list, and render
+ * the "Releasable To" checkboxes into #releasableToOptions.
+ *
+ * Own company is rendered as a single checked checkbox that is NOT `disabled`
+ * and cannot be unchecked (`onclick="return false;"` cancels the click's
+ * default action, which is what actually toggles a checkbox's checked state —
+ * this blocks both mouse and keyboard/Space activation).
+ *
+ * NOTE: an earlier version of this used a `disabled checked` checkbox plus a
+ * separate `<input type="hidden">` carrying the same DID, on the theory that
+ * `form.querySelectorAll('input[name="classifiedReleasableTo"]:checked')`
+ * (in handleCreateClassifiedDocument, unchanged) would pick up the hidden
+ * input since disabled checkboxes are excluded from `:checked`. That is
+ * wrong: the CSS `:checked` pseudo-class only ever matches checkbox/radio
+ * inputs (and selected `<option>`s) — a `type="hidden"` input can never
+ * match `:checked` regardless of any `checked` attribute, so the own-company
+ * DID was silently dropped from every upload. Verified empirically via
+ * jsdom before landing this fix. The single-non-disabled-checkbox approach
+ * below actually IS collected by `:checked`.
+ */
+async function loadReleasableToOptions() {
+    const container = document.getElementById('releasableToOptions');
+    if (!container) return;
+
+    const ownCompanyCheckboxHtml = (name, did) => `
+        <label style="display: flex; align-items: center; cursor: not-allowed;" title="Your own company is always included and cannot be removed">
+            <input type="checkbox" name="classifiedReleasableTo" value="${escapeAttr(did)}" checked onclick="return false;" style="width: 18px; height: 18px; margin-right: 10px; cursor: not-allowed; opacity: 0.6;" />
+            <span style="font-size: 14px; color: #2d3748;">${escapeHtml(name)} (your company)</span>
+        </label>`;
+
+    try {
+        const sessionToken = getSessionToken();
+        const response = await fetch(`${API_BASE}/releasable-options`, {
+            headers: { 'X-Session-ID': sessionToken }
+        });
+        const data = await response.json();
+
+        if (!data.success) throw new Error(data.message || 'Failed to load releasable-to options');
+
+        let html = ownCompanyCheckboxHtml(data.ownCompany.name, data.ownCompany.did);
+
+        for (const partner of data.partners) {
+            html += `
+        <label style="display: flex; align-items: center; cursor: pointer;">
+            <input type="checkbox" name="classifiedReleasableTo" value="${escapeAttr(partner.did)}" style="width: 18px; height: 18px; margin-right: 10px; cursor: pointer;" />
+            <span style="font-size: 14px; color: #2d3748;">${escapeHtml(partner.name)}</span>
+        </label>`;
+        }
+
+        container.innerHTML = html;
+    } catch (error) {
+        console.error('[ReleasableToOptions] Failed to load, falling back to own-company-only:', error);
+        // Fail gracefully — still let the employee upload with just their own company locked in.
+        const profile = JSON.parse(localStorage.getItem('employee_profile') || 'null');
+        const ownDid = profile?.employeeRoleVC?.credentialSubject?.issuerDID || '';
+        container.innerHTML = ownCompanyCheckboxHtml('Your company', ownDid);
     }
 }
 

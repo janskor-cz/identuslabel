@@ -1,0 +1,13 @@
+{
+  "name": "credential-issuance-didcomm",
+  "version": "1.0.0",
+  "description": "Shared DIDComm credential-issuance/1.0 library — a service declares which VC schema/fields it needs from a holder, the holder submits values over DIDComm, and the service issues via the standard Issue-Credential-protocol credential offer.",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/credentialIssuanceService.test.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  }
+}

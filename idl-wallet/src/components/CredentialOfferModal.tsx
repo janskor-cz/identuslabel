@@ -66,7 +66,13 @@ export const CredentialOfferModal: React.FC = () => {
                 return null;
             }
         })
-        .filter((offer): offer is CredentialOfferData => offer !== null && offer.credentialPreview !== undefined);
+        .filter((offer): offer is CredentialOfferData => offer !== null && offer.credentialPreview !== undefined)
+        // Newest first: this modal only ever surfaces pendingOffers[0] (one at a time, no way to
+        // skip to a specific one), so an old offer nobody got around to accepting/rejecting would
+        // otherwise permanently block every offer issued after it — including, concretely, a
+        // freshly re-requested credential after a revocation, which is exactly why "issuing a new
+        // VC" could go through server-side yet the user would never see it appear.
+        .sort((a, b) => b.timestamp - a.timestamp);
 
     // Get existing PRISM DIDs from Redux store
     const prismDIDs = useAppSelector(state => state.app.prismDIDs) || [];

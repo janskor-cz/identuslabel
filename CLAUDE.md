@@ -10,8 +10,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Start all infrastructure (run from /root — docker-compose files live there)
 DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose -f cloud-agent-with-reverse-proxy.yml up -d
 DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose -f enterprise-cloud-agent.yml up -d
-DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose -f test-multitenancy-cloud-agent.yml up -d
 DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose -f local-prism-node-addon.yml up -d
+
+# test-multitenancy-cloud-agent.yml — despite the "test" name, this is NOT optional/disposable:
+# it's the live Cloud Agent (port 8200 / 91.99.4.54:8200) that company-admin-portal uses for ALL
+# companies (TechCorp, ACME — see MULTITENANCY_CLOUD_AGENT_URL in server.js). Stopping it breaks
+# Company Admin Portal's credential/employee endpoints with ECONNREFUSED (confirmed 2026-07-15).
+# It IS one of the heaviest CPU/RAM consumers on this 4-CPU/7.75GB host, so cap it rather than
+# skip it — e.g. after `up -d`:
+#   docker update --cpus 1.5 --memory 2g --memory-swap 2g multitenancy-test-cloud-agent
+DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose -f test-multitenancy-cloud-agent.yml up -d
 
 # Mediator — compose file lives in /opt/project_identuslabel/identus-mediator/ (NOT /root)
 DOCKER_API_VERSION=1.44 /usr/local/bin/docker-compose --project-directory /opt/project_identuslabel/identus-mediator -f /opt/project_identuslabel/identus-mediator/docker-compose.yml up -d
@@ -115,7 +123,7 @@ PRISM Node (50053)    Multitenancy Agent (8200)
   └── src/
       ├── actions/                                 # Redux async thunks
       ├── components/                              # React components
-      ├── pages/                                   # Next.js pages (browser.tsx, credentials.tsx, …)
+      ├── pages/                                   # Next.js pages (credentials.tsx, connections.tsx, …)
       └── utils/                                   # Utilities (crypto, storage, credentialTypeDetector)
 
 /opt/project_identuslabel/company-admin-portal/    # Multi-company management (Express.js)
@@ -214,20 +222,16 @@ const serviceConfig = getServiceConfigurationFromCredentials(credentials);
 ```
 
 ### Service-Linked VC Convention
-Any VC whose purpose is to grant access to a service should include these fields in `credentialSubject`:
-```json
-{
-  "serviceUrl": "https://identuslabel.cz/company-admin/employee-portal-login.html?email=...",
-  "serviceName": "Employee Portal",
-  "serviceIcon": "🏢"
-}
-```
-The IDL Wallet **Browser tab** (`/browser`) scans all credentials for `serviceUrl` and auto-displays the service — no wallet code changes needed per new service type. `serviceName` and `serviceIcon` are optional but recommended.
+`EmployeeRole` (Company Admin) VCs still carry a `serviceUrl` field in `credentialSubject`
+(`https://identuslabel.cz/company-admin/employee-portal-login.html?email=...`), but the wallet no
+longer uses it to auto-launch anything — the **Browser tab** (`/browser`) that used to scan
+credentials for `serviceUrl` and display a launch card was removed as obsolete once all
+interactive service access moved to the DIDComm Access Request Protocol below.
+`serviceUrl` is only read now in `connections.tsx`'s `handleEnterprisePortalLogin` to derive the
+company-admin base URL for HTTP grant polling — it is not a UI entry point.
 
-Current issuers baking this in:
-- `EmployeeRole` (Company Admin) — URL includes `email` param for portal login
-
-**CA access is NOT via serviceUrl** — use the DIDComm Access Request protocol instead (see below).
+**All interactive service access (CA pages, the employee portal, document-service access) goes
+through the DIDComm Access Request protocol, not URL links in VCs** — see below.
 
 ### DIDComm Access Request Protocol (`service-access/1.0`)
 CA-protected pages (and the company-admin employee portal, and document-service document access)

@@ -173,10 +173,28 @@ function isSecurityClearanceCred(claims) {
  * @param {object}   vp                — { verifiableCredential: string[] }
  * @param {string[]} acceptedIssuerDIDs — from the document's releasableTo field
  * @returns {Promise<
- *   { success: true, companyDID: string|null, clearanceLevel: string|null, issuerDID: string, ... }
+ *   { success: true, companyDID: string|null, clearanceLevel: string|null, issuerDID: string,
+ *     verifiedIssuerDIDs: string[], ... }
  *   | { success: false, error: string, message: string }
  * >}
+ *
+ * `verifiedIssuerDIDs` holds the cryptographically-verified `iss` of EVERY credential in the
+ * VP (not just EmployeeRole's). Callers must check a document's releasableTo allowlist against
+ * this whole set, not just `companyDID` — `companyDID` is null on the personal-wallet path, but
+ * that must NOT be read as "no company restriction applies"; it only means no EmployeeRole VC
+ * was presented. A company-restricted document is still off-limits unless one of these verified
+ * issuers is on its allowlist.
  */
+// PRISM DIDs compare by hash segment: releasableTo stores short-form DIDs, but a JWT `iss`
+// may carry long form. Same convention as ReEncryptionService.releasableToIncludes.
+function prismHash(did) {
+  return (typeof did === 'string' && did.startsWith('did:prism:')) ? did.split(':')[2] : did;
+}
+function issuerListIncludes(list, did) {
+  const h = prismHash(did);
+  return list.some(d => prismHash(d) === h);
+}
+
 async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
   if (!vp) {
     return { success: false, error: 'NoVP', message: 'No verifiable presentation provided' };
@@ -191,6 +209,11 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
   // Track credential subject DID for holder binding consistency check
   let sharedSubjectDID      = null;
   let credentialStatuses    = [];
+  // Every credential's cryptographically-verified issuer (payload.iss), regardless of VC type.
+  // Releasability is checked against this whole set — a document restricted to a company must
+  // reject ANY presenter whose credentials were all issued by someone else, no matter which
+  // credential type they chose to present (see verifiedIssuerDIDs in the return value).
+  const verifiedIssuerDIDs  = [];
 
   for (let i = 0; i < vp.verifiableCredential.length; i++) {
     const decoded = decodeJWT(vp.verifiableCredential[i]);
@@ -252,6 +275,10 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
       return { success: false, error: 'POLICY_ISSUER_NOT_TRUSTED', message: `Issuer not trusted for ${policyResult.level} by admin policy` };
     }
 
+    if (issuerDID && !verifiedIssuerDIDs.includes(issuerDID)) {
+      verifiedIssuerDIDs.push(issuerDID);
+    }
+
     // ── Classify ───────────────────────────────────────────────────────────
     if (isEmployeeRoleCred(claims)) {
       console.log(`[VPVerificationService] ✅ EmployeeRole verified at index ${i}`);
@@ -278,10 +305,16 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
 
   // ── Enterprise path: EmployeeRole present ─────────────────────────────────
   if (employeeRoleCred) {
-    const issuerDID  = employeeRoleCred.claims?.issuerDID || employeeRoleCred.issuer;
+    // SECURITY: authorize against the cryptographically-verified issuer (payload.iss, signature
+    // already checked), NOT the credential's self-asserted, unsigned `claims.issuerDID`. The
+    // embedded value can disagree with the real signer (observed: signer TechCorp 6ee757c2 vs.
+    // embedded ACME 474c9151), which both breaks legitimate access and would let a holder assert
+    // any company DID. Document releasableTo / acceptedIssuerDIDs lists are keyed on the verified
+    // issuer. Mirrors the DIDComm document-access path in DocumentDIDCommService.js.
+    const issuerDID  = employeeRoleCred.issuer;
     const companyDID = issuerDID;
 
-    if (acceptedIssuerDIDs.length > 0 && !acceptedIssuerDIDs.includes(issuerDID)) {
+    if (acceptedIssuerDIDs.length > 0 && !issuerListIncludes(acceptedIssuerDIDs, issuerDID)) {
       console.error(`[VPVerificationService] Untrusted issuer: ${issuerDID}`);
       return { success: false, error: 'UntrustedIssuer', message: 'Credential issuer is not in the trusted list' };
     }
@@ -294,6 +327,7 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
       companyDID,
       clearanceLevel,
       issuerDID,
+      verifiedIssuerDIDs,
       viewerName:           employeeRoleCred.claims.email || employeeRoleCred.claims.employeeId || null,
       employeeRoleClaims:   employeeRoleCred.claims,
       credentialSubjectDID: sharedSubjectDID,
@@ -305,7 +339,7 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
   // SECURITY: still enforce issuer trust — a self-issued clearance VC must not be accepted.
   // If the document has a non-empty acceptedIssuerDIDs list, the clearance issuer must be in it.
   const scIssuerDID = securityClearanceCred.issuer;
-  if (acceptedIssuerDIDs.length > 0 && !acceptedIssuerDIDs.includes(scIssuerDID)) {
+  if (acceptedIssuerDIDs.length > 0 && !issuerListIncludes(acceptedIssuerDIDs, scIssuerDID)) {
     console.error(`[VPVerificationService] Personal path: untrusted clearance issuer ${scIssuerDID}`);
     return { success: false, error: 'UntrustedIssuer', message: 'Security Clearance issuer is not in the trusted list' };
   }
@@ -318,6 +352,7 @@ async function verifyVPAndExtractClaims(vp, acceptedIssuerDIDs) {
     companyDID:           null,
     clearanceLevel,
     issuerDID:            scIssuerDID,
+    verifiedIssuerDIDs,
     viewerName:           securityClearanceCred.claims.holderName || null,
     employeeRoleClaims:   null,
     credentialSubjectDID: sharedSubjectDID,

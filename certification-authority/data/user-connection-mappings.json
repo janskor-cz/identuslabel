@@ -1089,5 +1089,109 @@
       "photo": "did:prism:33681d960537ff47b521da48c98bab51560bad8fdea938e75a467fbd7db88bed:CtMBCtABEjoKBmF1dGgtMBAESi4KCXNlY3AyNTZrMRIhAhGerRu7UGRZNeIL9GXhBctOW4ZnUIrY26MWlgJ-Gb6MEjsKB21hc3RlcjAQAUouCglzZWNwMjU2azESIQIl5Rw8vIZ9SdZvgUZy5YYG-27mBt_q4nsvvxevQZm8YBpVCgVwaG90bxILTGlua2VkUGhvdG8aP2h0dHBzOi8vaWRlbnR1c2xhYmVsLmN6L2NhL3Bob3RvLXByb3h5LzZhNDgyY2NkZmYzODBkZTA2MWM2MjJhOQ"
     },
     "registeredAt": "2026-07-03T21:42:37.665Z"
+  },
+  "CA-1783537424643-467LEY": {
+    "connectionId": "4704d65f-7624-48ac-b80c-848c1d2d9f52",
+    "holderInfo": {
+      "firstName": "Vaclav",
+      "lastName": "Hardware",
+      "uniqueId": "CA-1783537424643-467LEY",
+      "dateOfBirth": "1999-10-15",
+      "gender": "Male",
+      "photo": "did:prism:93af4a5d6e5c11b46747ca93ef45b3ac63fc9a32b49128e307bf4bdf7e10a1d2:CtMBCtABEjoKBmF1dGgtMBAESi4KCXNlY3AyNTZrMRIhAr6Cu73XWObYjk4-VgTwurEoWswRcw10bDUAkuhXAEQhEjsKB21hc3RlcjAQAUouCglzZWNwMjU2azESIQKnOzY6EYDd5JK6ZcOSGy6vjiwdRJiTWg9OlTtVEZIBKBpVCgVwaG90bxILTGlua2VkUGhvdG8aP2h0dHBzOi8vaWRlbnR1c2xhYmVsLmN6L2NhL3Bob3RvLXByb3h5LzZhNGU5ZjJiMDhhMTAyOGJiN2IwOGNjNw"
+    },
+    "registeredAt": "2026-07-08T19:04:11.620Z"
+  },
+  "CA-1783542102711-B5VJD3": {
+    "connectionId": "289a4b15-1463-4423-b795-fef3e3ef4ecf",
+    "holderInfo": {
+      "firstName": "Vaclav",
+      "lastName": "HW",
+      "uniqueId": "CA-1783542102711-B5VJD3",
+      "dateOfBirth": "2000-12-14",
+      "gender": "Female",
+      "photo": "did:prism:1f5e40824a21c50d7b7a1e67bc6e6a03f6b478740e462d4dd0f62624e7a25a9b:CtMBCtABEjoKBmF1dGgtMBAESi4KCXNlY3AyNTZrMRIhA4xdnta_752H_raZFF86Gx9_mMvXR1oWwZwoemiThyV3EjsKB21hc3RlcjAQAUouCglzZWNwMjU2azESIQJLkQIPC1kWfwU23r6nOuBpaEiKxWGC6hdV49SI98zEDhpVCgVwaG90bxILTGlua2VkUGhvdG8aP2h0dHBzOi8vaWRlbnR1c2xhYmVsLmN6L2NhL3Bob3RvLXByb3h5LzZhNGViMTcyMDhhMTAyOGJiN2IwYTE4Mw"
+    },
+    "registeredAt": "2026-07-08T20:22:10.951Z"
+  },
+  "CA-1783544399039-7Z9XJT": {
+    "connectionId": "31325a65-849c-45ea-9bf6-21027d0ac1f2",
+    "holderInfo": {
+      "firstName": "Vaclav",
+      "lastName": "Hardware",
+      "uniqueId": "CA-1783544399039-7Z9XJT",
+      "dateOfBirth": "1980-01-01",
+      "gender": "Male",
+      "photo": "did:prism:1d834aff57c02b3b5f598d953cd626586c3994975a6ecb3ca78fb6ec9191ead6:CtMBCtABEjoKBmF1dGgtMBAESi4KCXNlY3AyNTZrMRIhAqYB5GoZ9rcyGN13BeF9hABcRITI7arwcxOsHlik-zaZEjsKB21hc3RlcjAQAUouCglzZWNwMjU2azESIQMXnc8mMVFgp2itl6z8rhkL9haiVx48vm764YLD8hlx7RpVCgVwaG90bxILTGlua2VkUGhvdG8aP2h0dHBzOi8vaWRlbnR1c2xhYmVsLmN6L2NhL3Bob3RvLXByb3h5LzZhNGViYTZiMDhhMTAyOGJiN2IwYjI5YQ"
+    },
+    "registeredAt": "2026-07-08T21:00:27.516Z"
+  },
+  "CA-1783545161690-E6XXZS": {
+    "connectionId": "36f6783f-135f-4559-91d0-da7cc20ceee2",
+    "holderInfo": {
+      "firstName": "Vaclav",
+      "lastName": "Hardware",
+      "uniqueId": "CA-1783545161690-E6XXZS",
+      "dateOfBirth": "1985-11-11",
+      "gender": "Male",
+      "photo": "did:prism:ca615f36b78cd893f60539f779c2f2816685e8e2bc264e33d4ae87072c5b3b67:CtMBCtABEjoKBmF1dGgtMBAESi4KCXNlY3AyNTZrMRIhAjym4hv0qSkrZdJEAh0qwueJ39g48vmlTrLCbAxcWLkuEjsKB21hc3RlcjAQAUouCglzZWNwMjU2azESIQPviqoPWyP5A8KYD-LIm1xOwDBWIVoiJb2Sfvq_BWXixRpVCgVwaG90bxILTGlua2VkUGhvdG8aP2h0dHBzOi8vaWRlbnR1c2xhYmVsLmN6L2NhL3Bob3RvLXByb3h5LzZhNGViZDY1MDhhMTAyOGJiN2IwYzQxNw"
+    },
+    "registeredAt": "2026-07-08T21:13:09.873Z"
+  },
+  "CA-1783591261584-FDFXI6": {
+    "connectionId": "5b291627-d8dc-4325-aed0-28504aa7a5b3",
+    "holderInfo": {
+      "firstName": "Vaclav",
+      "lastName": "Phone",
+      "uniqueId": "CA-1783591261584-FDFXI6",
+      "dateOfBirth": "1985-03-11",
+      "gender": "Male"
+    },
+    "registeredAt": "2026-07-09T10:01:01.638Z"
+  },
+  "CA-1784053261011-NSFTZF": {
+    "connectionId": "4824a648-f02c-4cf6-8509-0ac8e105352f",
+    "holderInfo": {
+      "firstName": "Puppeteer",
+      "lastName": "WalletA",
+      "uniqueId": "CA-1784053261011-NSFTZF",
+      "dateOfBirth": "1990-01-01",
+      "gender": "Unspecified"
+    },
+    "registeredAt": "2026-07-14T18:21:01.134Z"
+  },
+  "CA-1784053437744-FEJ8VG": {
+    "connectionId": "83015e80-6f92-4993-bf9f-b97a728d8f7b",
+    "holderInfo": {
+      "firstName": "Puppeteer",
+      "lastName": "WalletA",
+      "uniqueId": "CA-1784053437744-FEJ8VG",
+      "dateOfBirth": "1990-01-01",
+      "gender": "Unspecified"
+    },
+    "registeredAt": "2026-07-14T18:23:57.816Z"
+  },
+  "CA-1784230515260-W4R2LE": {
+    "connectionId": "a3a3d7c9-df6e-48a2-9268-ee22298bcf91",
+    "holderInfo": {
+      "firstName": "Vaclav",
+      "lastName": "Evil",
+      "uniqueId": "CA-1784230515260-W4R2LE",
+      "dateOfBirth": "1993-10-15",
+      "gender": "Male"
+    },
+    "registeredAt": "2026-07-16T19:35:15.472Z"
+  },
+  "CA-1784489815920-B1648B": {
+    "connectionId": "a4d55d60-29ae-4da1-a097-dfe532a0b0df",
+    "holderInfo": {
+      "firstName": "TestDIDComm",
+      "lastName": "Verification",
+      "uniqueId": "CA-1784489815920-B1648B",
+      "dateOfBirth": "1990-05-15",
+      "gender": "other",
+      "photo": "did:prism:4d24ac7c1bd50af6334db4053210510656f18f77554dbef4765ef1d8f0f5dc7d:CtMBCtABEjoKBmF1dGgtMBAESi4KCXNlY3AyNTZrMRIhA46HRWmNCy1LL6McNQOyHESm3RKXPZG-wLDcXrfXNO0yEjsKB21hc3RlcjAQAUouCglzZWNwMjU2azESIQO8oZ65B3N2kicWCdwyEn7PkuO6UfqKcQhhhlKP4xK4qRpVCgVwaG90bxILTGlua2VkUGhvdG8aP2h0dHBzOi8vaWRlbnR1c2xhYmVsLmN6L2NhL3Bob3RvLXByb3h5LzZhNWQyNzZmMTdjYjE5NzZjMGE5ZDViNA"
+    },
+    "registeredAt": "2026-07-19T19:37:20.807Z"
   }
 }

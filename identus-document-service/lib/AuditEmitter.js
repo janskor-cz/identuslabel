@@ -9,7 +9,9 @@
 
 'use strict';
 
-const fetch = require('node-fetch');
+const fetch         = require('node-fetch');
+const LocalAuditLog = require('./LocalAuditLog');
+const SlackNotifier = require('./SlackNotifier');
 
 /**
  * Emit an audit event to the given URL.
@@ -40,4 +42,33 @@ function emitAuditEvent(auditEndpointUrl, event) {
   });
 }
 
-module.exports = { emitAuditEvent };
+/**
+ * Fan out one audit event to all three sinks: the configurable webhook
+ * (emitAuditEvent), Slack, and the local JSONL (data/access.log).
+ * This is the same composite operation server.js's routes have always used
+ * for access-path events (previously a private `_fireAudit` closure there) —
+ * extracted here so DocumentService.js's CRUD paths can reuse it too, rather
+ * than duplicating the fan-out logic.
+ *
+ * @param {string|null} url    Audit webhook URL (per-document, or AUDIT_FALLBACK_URL)
+ * @param {object} event       Event payload — must include `event` (event type) and `documentDID`
+ */
+function fireAudit(url, event) {
+  emitAuditEvent(url, event);
+  SlackNotifier.notifyAccess(event);
+  LocalAuditLog.append({
+    timestamp:      new Date().toISOString(),
+    event:          event.event,
+    documentDID:    event.documentDID    || null,
+    issuerDID:      event.issuerDID      || null,
+    clearanceLevel: event.clearanceLevel || null,
+    accessGranted:  event.event === 'ACCESS_GRANTED',
+    denialReason:   event.denialReason   || null,
+    copyId:         event.copyId         || null,
+    viewerName:     event.viewerName     || null,
+    clientIp:       event.clientIp       || null,
+    processingMs:   event.processingMs   || null
+  });
+}
+
+module.exports = { emitAuditEvent, fireAudit };

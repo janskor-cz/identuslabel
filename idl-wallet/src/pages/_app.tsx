@@ -7,13 +7,14 @@ import { CAPortalModal } from '@/components/CAPortalModal';
 import { CAPortalProvider, useCAPortal } from '@/utils/CAPortalContext';
 import { AccessRequestStatusModal } from '@/components/AccessRequestStatusModal';
 import { useAppSelector } from '@/reducers/store';
-import { useMountedApp } from '@/reducers/store';
+import { useMountedApp, store } from '@/reducers/store';
 import { reduxActions } from '@/reducers/app';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { MainLayout } from '@/components/layouts/MainLayout';
 import { CAConnectionEnforcementModal } from '@/components/CAConnectionEnforcementModal';
 import { refreshConnections } from '@/actions';
 import { useRouter } from 'next/router';
+import Head from 'next/head';
 import dynamic from 'next/dynamic';
 import { useEffect, useRef, useState } from 'react';
 
@@ -115,6 +116,15 @@ function GlobalGrantWatcher() {
         if (!app.messages?.length) return;
         for (const message of app.messages) {
             const parsed = parseServiceAccessGrant(message);
+            // Diagnostic: parseServiceAccessGrant fails silently by design (any shape mismatch
+            // returns null), which made a real parsing bug indistinguishable from "not a grant
+            // message" - this makes that visible without weakening the parser itself.
+            console.log('[GlobalGrantWatcher] Scanning message', {
+                id: message.id,
+                piuri: (message as any).piuri,
+                bodyPreview: typeof message.body === 'string' ? message.body.slice(0, 200) : JSON.stringify(message.body).slice(0, 200),
+                parsed: parsed ? { capability: parsed.capability, mode: parsed.mode } : null
+            });
             if (!parsed) continue;
 
             const grantId = parsed.id;
@@ -243,9 +253,13 @@ function App({ Component, pageProps }) {
         if (typeof window !== 'undefined') {
             (window as any).testEncryptionRoundtrip = testEncryptionRoundtrip;
             (window as any).testEncryptionWithStoredKeys = testEncryptionWithStoredKeys;
+            // Read-only accessor for the live SDK agent instance - Redux state isn't a
+            // global, so there's otherwise no console access to agent.pluto/etc for debugging.
+            (window as any).getWalletAgent = () => store.getState().app.agent.instance;
             console.log('🧪 [DEBUG] Test functions exposed:');
             console.log('  - window.testEncryptionRoundtrip() - Manual key input');
             console.log('  - window.testEncryptionWithStoredKeys() - Auto localStorage retrieval');
+            console.log('  - window.getWalletAgent() - Live SDK agent instance (e.g. getWalletAgent().pluto.getDIDPrivateKeysByDID(did))');
         }
 
         // 🔧 FIX #7: Add global error handlers to prevent silent crashes
@@ -306,6 +320,10 @@ function App({ Component, pageProps }) {
     }, [router]);
 
     return (
+        <>
+        <Head>
+            <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        </Head>
         <CAPortalProvider>
         <ErrorBoundary
             componentName="App Root"
@@ -344,6 +362,7 @@ function App({ Component, pageProps }) {
             </MountSDK>
         </ErrorBoundary>
         </CAPortalProvider>
+        </>
     );
 }
 

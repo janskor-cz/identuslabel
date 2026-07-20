@@ -11,6 +11,7 @@ import { useMountedApp } from '../reducers/store';
 import { DBConnect } from '../components/DBConnect';
 import { Box } from '../app/Box';
 import ServiceConfigDisplay from '../components/ServiceConfigDisplay';
+import { DebugConsoleSection } from '../components/DebugConsoleSection';
 import {
   extractConfiguration,
   WalletConfiguration
@@ -303,6 +304,9 @@ const ConfigurationPage: React.FC = () => {
             </div>
           </div>
         </Box>
+
+        {/* Debug Console — collapsed by default */}
+        <DebugConsoleSection />
       </DBConnect>
     </div>
   );

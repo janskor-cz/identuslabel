@@ -1,9 +1,11 @@
 // Security Key Storage Utilities for Ed25519-based Security Clearance VCs
 
-import { SecurityKey, SecurityKeyStorage, SecurityKeyExport } from '../types/securityKeys';
+import SDK from '@hyperledger/identus-edge-agent-sdk';
+import { SecurityKey, SecurityKeyStorage, SecurityKeyExport, SecurityKeyDual } from '../types/securityKeys';
 import * as jose from 'jose';
 import { sha256 } from '@noble/hashes/sha256';
 import { getItem, setItem, removeItem } from './prefixedStorage';
+import { deriveSecurityClearanceKeyPair } from './KeyProvider';
 
 const STORAGE_KEY = 'security-clearance-keys';
 
@@ -101,36 +103,39 @@ export async function addSecurityKey(
 }
 
 /**
- * Add a new dual-key (Ed25519 + X25519) security key to storage
- * This is the NEW recommended method for security clearance credentials
+ * Add a new dual-key (Ed25519 + X25519) security key to storage.
+ * This is the NEW recommended method for security clearance credentials.
+ *
+ * Private key bytes are deliberately NOT accepted/persisted here - keys created via
+ * this path are always derived from the wallet seed + keyIndex (see KeyProvider.ts),
+ * so they're re-derivable on demand via getSecurityKeyPrivateMaterial() instead of
+ * being cached in localStorage.
  */
 export async function addSecurityKeyDual(
-  ed25519PrivateKey: string,
   ed25519PublicKey: string,
   ed25519Fingerprint: string,
-  x25519PrivateKey: string,
   x25519PublicKey: string,
   x25519Fingerprint: string,
-  label?: string
+  label?: string,
+  keyIndex: number = 0
 ): Promise<import('../types/securityKeys').SecurityKeyDual> {
   const storage = loadSecurityKeys();
 
   const newKey: import('../types/securityKeys').SecurityKeyDual = {
     keyId: generateKeyId(),
     ed25519: {
-      privateKeyBytes: ed25519PrivateKey,
       publicKeyBytes: ed25519PublicKey,
       fingerprint: ed25519Fingerprint,
       curve: 'Ed25519',
       purpose: 'signing'
     },
     x25519: {
-      privateKeyBytes: x25519PrivateKey,
       publicKeyBytes: x25519PublicKey,
       fingerprint: x25519Fingerprint,
       curve: 'X25519',
       purpose: 'encryption'
     },
+    keyIndex,
     label: label || `Security Key ${storage.keys.length + 1}`,
     createdAt: new Date().toISOString(),
     usageCount: 0
@@ -146,6 +151,55 @@ export async function addSecurityKeyDual(
 
   saveSecurityKeys(storage);
   return newKey;
+}
+
+/**
+ * Resolve the private key material for a stored Security Clearance dual-key entry.
+ *
+ * Prefers re-deriving from the wallet seed whenever `keyIndex` is present (even if
+ * `privateKeyBytes` also happens to still be populated from before this fix), so the
+ * derive-on-demand path gets exercised uniformly rather than silently continuing to
+ * trust old plaintext for anything that's actually already re-derivable. Falls back to
+ * whatever private bytes are already present for entries that predate `keyIndex`
+ * (legacy localStorage entries) or that were assembled transiently from a Pluto lookup
+ * (which carry real private bytes but no `keyIndex`).
+ *
+ * Returns null if neither a derivable index+seed nor persisted bytes are available
+ * (e.g. the wallet seed isn't loaded yet).
+ */
+export function getSecurityKeyPrivateMaterial(
+  entry: SecurityKeyDual,
+  apollo: SDK.Apollo,
+  seed: SDK.Domain.Seed | null
+): { ed25519PrivateKeyBytes: string; x25519PrivateKeyBytes: string } | null {
+  if (typeof entry.keyIndex === 'number' && seed) {
+    const { ed25519, x25519 } = deriveSecurityClearanceKeyPair(apollo, seed, entry.keyIndex);
+    return {
+      ed25519PrivateKeyBytes: jose.base64url.encode(ed25519.value),
+      x25519PrivateKeyBytes: jose.base64url.encode(x25519.value),
+    };
+  }
+  if (entry.ed25519?.privateKeyBytes && entry.x25519?.privateKeyBytes) {
+    return {
+      ed25519PrivateKeyBytes: entry.ed25519.privateKeyBytes,
+      x25519PrivateKeyBytes: entry.x25519.privateKeyBytes,
+    };
+  }
+  return null;
+}
+
+/**
+ * Next unused HD derivation index for a new Security Clearance dual-key.
+ * Each "Generate New Key" click should use a fresh index so distinct clicks yield
+ * genuinely distinct, but still seed-recoverable, key material (see KeyProvider.ts).
+ * Legacy single-key entries (no keyIndex field) are ignored.
+ */
+export function getNextSecurityClearanceKeyIndex(): number {
+  const storage = loadSecurityKeys();
+  const usedIndices = storage.keys
+    .map(key => (key as any).keyIndex)
+    .filter((index): index is number => typeof index === 'number');
+  return usedIndices.length > 0 ? Math.max(...usedIndices) + 1 : 0;
 }
 
 /**
@@ -275,10 +329,8 @@ export function clearAllKeys(): void {
  * @returns Object with flat key properties or null if no active key
  */
 export function getSecurityClearanceKeys(connectionDID?: string): {
-  x25519PrivateKey: string;
   x25519PublicKey: string;
   x25519Fingerprint: string;
-  ed25519PrivateKey?: string;
   ed25519PublicKey?: string;
   ed25519Fingerprint?: string;
 } | null {
@@ -288,13 +340,12 @@ export function getSecurityClearanceKeys(connectionDID?: string): {
     return null;
   }
 
-  // Handle dual-key structure (new format)
+  // Handle dual-key structure (new format). Public keys/fingerprints only - private
+  // key bytes are resolved on demand via getSecurityKeyPrivateMaterial(), not read here.
   if ('x25519' in activeKey && 'ed25519' in activeKey) {
     return {
-      x25519PrivateKey: activeKey.x25519.privateKeyBytes,
       x25519PublicKey: activeKey.x25519.publicKeyBytes,
       x25519Fingerprint: activeKey.x25519.fingerprint,
-      ed25519PrivateKey: activeKey.ed25519.privateKeyBytes,
       ed25519PublicKey: activeKey.ed25519.publicKeyBytes,
       ed25519Fingerprint: activeKey.ed25519.fingerprint
     };

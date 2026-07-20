@@ -6,11 +6,12 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --test tests/photo.test.js"
+    "test": "node --test tests/"
   },
   "dependencies": {
     "axios": "^1.16.1",
     "bs58": "^6.0.0",
+    "credential-issuance-didcomm": "file:../packages/credential-issuance-didcomm",
     "express": "^4.18.2",
     "form-data": "^4.0.5",
     "google-protobuf": "^4.0.1",

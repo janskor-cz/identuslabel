@@ -9,11 +9,50 @@ import { connectionRequestQueue } from '@/utils/connectionRequestQueue';
 import { invitationStateManager } from '@/utils/InvitationStateManager';
 import { verifyCredentialStatus, CredentialStatus } from '@/utils/credentialStatus';
 import { getItem, setItem, removeItem, getKeysByPattern } from '@/utils/prefixedStorage';
+import { verifyAndRecordLiveIdentity } from '@/utils/liveIdentityVerification';
+import { detectLiveVerifiableIdentityType, LiveVerifiableCredentialType } from '@/utils/vcValidation';
 
 interface ConnectionRequestProps {
   message: SDK.Domain.Message;
   attachedCredential?: any;  // ✅ NEW: Pre-extracted credential from persistent queue
   onRequestHandled?: () => void;
+}
+
+// Post-connection live identity verification of the INVITEE (the party that just accepted our
+// OOB invitation), fired from the INVITER's side once the resulting DIDPair connection is
+// established. ConnectionRequest.tsx/PendingRequestsModal is only ever shown to the wallet that
+// created the invitation (see PendingRequestsModal.tsx), so this is the missing counterpart to
+// OOB.tsx's performLiveIdentityVerificationAndMaybeRespond() (which runs the same round trip in
+// the opposite direction, on the invitee's side, for RFC 0434 OOB acceptance) — without it, the
+// inviter had no path to ever populate ConnectionMetadata.verifiedCredentialSubject, since the
+// vc-proof-sharing/1.0/proof message this component parses (verifyAttachedCredential above) is
+// only a structural/revocation check, never a live signature/possession proof, and per that
+// field's doc comment (connectionMetadata.ts) it must never be written from an unverified preview.
+//
+// Deliberately NOT awaited by its caller (handleAcceptRequest): it performs a live
+// challenge/response round trip that requires a human on the invitee's side to approve a
+// presentation request (see liveIdentityVerification.ts), which can take anywhere from seconds to
+// minutes. Blocking the Accept button on that would be poor UX for a step whose entire purpose is
+// a soft, best-effort upgrade of trust state — the connection is already fully established by the
+// time this runs.
+//
+// Unlike OOB.tsx's counterpart, this does NOT gate/send our own identity back — that's a separate,
+// out-of-scope feature (see CLAUDE.md task). Fail-closed and non-throwing throughout: never writes
+// verifiedCredentialSubject except on an explicit verified: true result.
+async function performLiveIdentityVerificationOfInvitee(
+  agent: SDK.Agent,
+  hostDID: SDK.Domain.DID,
+  toDID: SDK.Domain.DID,
+  subjectDID: string,
+  uniqueId: string | undefined,
+  liveVerifiableType: LiveVerifiableCredentialType
+): Promise<void> {
+  // Thin wrapper around the shared "record pending → verify → record result" sequence (see
+  // liveIdentityVerification.ts's verifyAndRecordLiveIdentity, also used by OOB.tsx's
+  // RealPerson/SecurityClearance and CA/Company call sites) — this side of the round trip has no
+  // follow-up step (unlike OOB.tsx's counterpart, which conditionally sends the invitee's own
+  // identity back), so there is nothing left to layer on top of it here.
+  await verifyAndRecordLiveIdentity(agent, hostDID.toString(), toDID, 'local', subjectDID, uniqueId, liveVerifiableType);
 }
 
 export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
@@ -812,6 +851,35 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
         console.log('💾 Storing connection using connectionManager...');
         await app.agent.instance.connectionManager.addConnection(didPair);
         console.log('✅ Connection stored successfully');
+      }
+
+      // Fire-and-forget live identity verification of the invitee (toDID) — see
+      // performLiveIdentityVerificationOfInvitee's doc comment above. Only runs when the accepted
+      // request actually carried a RealPerson- or SecurityClearance-typed verified-preview
+      // credential — detected via the SAME detectLiveVerifiableIdentityType() vcValidation.ts uses
+      // for OOB.tsx's counterpart, fed a lightweight { vcProof, revealedData } object built from
+      // this component's already-available `verificationResult` state (its `credentialSubject`
+      // plays the same role as OOB.tsx's `revealedData` preview shape; `vcProof` only needs to be
+      // truthy — it's never destructured by the detector, only used as an "is this even a VC
+      // preview at all" presence check). Does nothing for plain connection requests or
+      // non-identity credentials, avoiding an unsolicited presentation-request challenge for those.
+      const previewCredentialSubject = verificationResult?.credentialSubject;
+      const previewSubjectDID: string | undefined = previewCredentialSubject?.id;
+      const previewUniqueId: string | undefined = previewCredentialSubject?.uniqueId;
+      const liveVerifiableType = previewCredentialSubject
+        ? detectLiveVerifiableIdentityType({ vcProof: verificationResult, revealedData: previewCredentialSubject })
+        : null;
+      if (previewSubjectDID && liveVerifiableType !== null) {
+        performLiveIdentityVerificationOfInvitee(
+          app.agent.instance,
+          hostDID,
+          toDID,
+          previewSubjectDID,
+          previewUniqueId,
+          liveVerifiableType
+        ).catch((e) => {
+          console.error('❌ [LIVE-VERIFY] Unexpected error during invitee live verification:', e);
+        });
       }
 
       // ✅ PHASE 4: Update invitation state when Alice accepts Bob's connection request

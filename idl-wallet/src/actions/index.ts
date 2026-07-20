@@ -11,6 +11,7 @@ import { PresentationClaims } from "../../../../src/domain";
 import { SecurityLevel, parseSecurityLevel, SECURITY_LEVEL_NAMES } from '../utils/securityLevels';
 import { encryptMessage, decryptMessage } from '../utils/messageEncryption';
 import { verifyKeyVCBinding, getVCClearanceLevel, getSecurityKeyByFingerprint, getSecurityKeyByFingerprintAsync, validateSecurityClearanceVC } from '../utils/keyVCBinding';
+import { getSecurityKeyPrivateMaterial } from '../utils/securityKeyStorage';
 import { base64url } from 'jose';
 
 // Phase 3: Standard Message Format
@@ -18,6 +19,9 @@ import { createEncryptedMessageBody, createPlaintextMessageBody } from '../types
 
 // Connection metadata for PRISM DID lookup and storage
 import { getConnectionMetadata, saveConnectionMetadata, updateConnectionMetadata } from '../utils/connectionMetadata';
+
+// Purpose-separated key derivation (see idl-wallet Key Management Fix plan)
+import { LocalKeyProvider } from '../utils/KeyProvider';
 import { getCredentialType } from '../utils/credentialTypeDetector';
 
 // SecureDashboardBridge agent setter for Pluto fallback
@@ -98,30 +102,14 @@ export const createLongFormPrismDID = createAsyncThunk<
     try {
         const apollo = new SDK.Apollo();
         const castor = new SDK.Castor(apollo);
+        const keyProvider = new LocalKeyProvider(apollo, defaultSeed);
 
-        // Convert wallet seed to hex string (REQUIRED for key derivation)
-        const seedHex = Buffer.from(defaultSeed.value).toString("hex");
-
-        // Create SECP256K1 master key (required for PRISM DID)
-        const masterKey = apollo.createPrivateKey({
-            type: SDK.Domain.KeyTypes.EC,
-            curve: SDK.Domain.Curve.SECP256K1,
-            seed: seedHex,
-        });
-
-        // Create SECP256K1 key for authentication/signing (matches original SDK behavior for credential signing)
-        const authKey = apollo.createPrivateKey({
-            type: SDK.Domain.KeyTypes.EC,
-            curve: SDK.Domain.Curve.SECP256K1,
-            seed: seedHex,
-        });
-
-        // Create X25519 key for key agreement/encryption (used for Security Clearance encryption)
-        const x25519Key = apollo.createPrivateKey({
-            type: SDK.Domain.KeyTypes.Curve25519,
-            curve: SDK.Domain.Curve.X25519,
-            seed: seedHex,
-        });
+        // Purpose-separated keys, each derived at a distinct HD path (see keyDerivation.ts)
+        // so the DID controller key, auth/signing key, and key-agreement key are
+        // genuinely different key material instead of accidentally colliding.
+        const masterKey = keyProvider.derivePrivateKey("master");
+        const authKey = keyProvider.derivePrivateKey("auth");
+        const x25519Key = keyProvider.derivePrivateKey("keyAgreement");
 
         console.log('[PRISM DID] Created SECP256K1 key for authentication, curve:', authKey.curve);
         console.log('[PRISM DID] Created X25519 key for key agreement, curve:', x25519Key.curve);
@@ -1726,8 +1714,15 @@ export const sendMessage = createAsyncThunk<
                     throw new Error('Legacy single-key format detected. Please generate a v3.0.0 dual-key Security Clearance VC.');
                 }
 
-                // STEP 5: Extract X25519 encryption keys (direct base64url decode, no SDK transformation)
-                const senderX25519PrivateKey = base64url.decode((senderKey as any).x25519.privateKeyBytes);
+                // STEP 5: Resolve sender's X25519 private key on demand (re-derived from the
+                // wallet seed when the entry has a keyIndex, or read from persisted bytes for
+                // legacy/Pluto-sourced entries) instead of reading persisted bytes directly.
+                const senderApollo = new SDK.Apollo();
+                const senderKeyMaterial = getSecurityKeyPrivateMaterial(senderKey as import('../types/securityKeys').SecurityKeyDual, senderApollo, api.getState().app.defaultSeed);
+                if (!senderKeyMaterial) {
+                    throw new Error('X25519 encryption key not found in storage or Pluto. Generate a new v3.0.0 Security Clearance VC.');
+                }
+                const senderX25519PrivateKey = base64url.decode(senderKeyMaterial.x25519PrivateKeyBytes);
                 const senderX25519PublicKey = base64url.decode((senderKey as any).x25519.publicKeyBytes);
 
                 // Extract recipient's VC subject (contains their X25519 public key)
@@ -2025,6 +2020,74 @@ export const sendDocumentAccessRequest = createAsyncThunk<
         type: 'https://identuslabel.cz/protocols/service-access/1.0/request',
         id: requestId,
         body: { capability: 'document-access', documentDID }
+    });
+
+    const basicMsgBody = { content: protocolEnvelope };
+    const finalMessage = new BasicMessage(
+        basicMsgBody as any,
+        connection.host,
+        connection.receiver
+    ).makeMessage();
+
+    await agent.sendMessage(finalMessage);
+    try {
+        const existing = await agent.pluto.getMessage(finalMessage.id);
+        if (!existing) await agent.pluto.storeMessage(finalMessage);
+    } catch (_) { /* non-fatal */ }
+    api.dispatch(reduxActions.messageSuccess([finalMessage]));
+});
+
+/**
+ * Send a credential-issuance/1.0 request — asks a service which VC schema/fields it needs from
+ * the holder before it will send a credential offer. See
+ * packages/credential-issuance-didcomm/PROTOCOL.md. The service replies with a `fields-required`
+ * message (watched for separately, e.g. by CredentialIssuanceRequestor); this thunk only sends
+ * the initial `request`.
+ */
+export const sendCredentialIssuanceRequest = createAsyncThunk<
+    string,
+    { agent: SDK.Agent; connection: SDK.Domain.DIDPair; capability: string }
+>('sendCredentialIssuanceRequest', async ({ agent, connection, capability }, api) => {
+    const requestId = `ciq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const protocolEnvelope = JSON.stringify({
+        type: 'https://identuslabel.cz/protocols/credential-issuance/1.0/request',
+        id: requestId,
+        body: { capability }
+    });
+
+    const basicMsgBody = { content: protocolEnvelope };
+    const finalMessage = new BasicMessage(
+        basicMsgBody as any,
+        connection.host,
+        connection.receiver
+    ).makeMessage();
+
+    await agent.sendMessage(finalMessage);
+    try {
+        const existing = await agent.pluto.getMessage(finalMessage.id);
+        if (!existing) await agent.pluto.storeMessage(finalMessage);
+    } catch (_) { /* non-fatal */ }
+    api.dispatch(reduxActions.messageSuccess([finalMessage]));
+
+    return requestId;
+});
+
+/**
+ * Submit the holder-filled field values for a credential-issuance/1.0 request. `requestId` is
+ * the id returned by sendCredentialIssuanceRequest (becomes this message's `thid`). Success is
+ * signaled by the native Issue-Credential-protocol credential offer the service sends as a side
+ * effect — this thunk does not wait for a reply.
+ */
+export const sendCredentialIssuanceData = createAsyncThunk<
+    void,
+    { agent: SDK.Agent; connection: SDK.Domain.DIDPair; capability: string; requestId: string; values: Record<string, string> }
+>('sendCredentialIssuanceData', async ({ agent, connection, capability, requestId, values }, api) => {
+    const protocolEnvelope = JSON.stringify({
+        type: 'https://identuslabel.cz/protocols/credential-issuance/1.0/data-submit',
+        id: `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+        thid: requestId,
+        body: { capability, values }
     });
 
     const basicMsgBody = { content: protocolEnvelope };
@@ -2773,6 +2836,7 @@ export const backupToIagon = createAsyncThunk<
         const state = getState().app;
         const agent = state.agent.instance;
         if (!agent) throw new Error('Agent not started');
+        if (!state.defaultSeed) throw new Error('Wallet seed not ready');
 
         const credHash = await generateCredentialHash(username, password);
         const jwe: string = await (agent as any).backup.createJWE();
@@ -2929,6 +2993,7 @@ export const syncWalletBackup = createAsyncThunk<
         const state = getState().app;
         const agent = state.agent.instance;
         if (!agent) return { skipped: true };
+        if (!state.defaultSeed) return { skipped: true };
 
         const credHash = await generateCredentialHash(username, password);
         const jwe: string = await (agent as any).backup.createJWE();

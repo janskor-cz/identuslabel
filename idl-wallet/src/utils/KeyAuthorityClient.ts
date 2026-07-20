@@ -126,7 +126,7 @@ function extractJWTString(cred: any): string | null {
  * filters to only include VCs that share the same subject as the EmployeeRole VC.
  * Non-enterprise VCs whose subject matches the enterprise DID are still included.
  */
-export function buildVP(credentials: any[]): { vp: object; hasCredentials: boolean } {
+export function buildVP(credentials: any[]): { vp: object; hasCredentials: boolean; holderDID: string | null } {
   // Phase 1: collect all eligible JWT candidates with their decoded sub
   const candidates: { jwt: string; sub: string | null; type: string }[] = [];
 
@@ -161,7 +161,9 @@ export function buildVP(credentials: any[]): { vp: object; hasCredentials: boole
     verifiableCredential: jwtStrings
   };
 
-  return { vp, hasCredentials: jwtStrings.length > 0 };
+  // holderDID is the shared credential subject — the DID whose key the wallet must
+  // sign the access challenge with to prove holder possession (see requestVPGatedAccess).
+  return { vp, hasCredentials: jwtStrings.length > 0, holderDID: canonicalSub };
 }
 
 export interface DocxKAResponse {
@@ -386,6 +388,28 @@ function extractEmployeeIdentifier(credentials: any[]): string {
 }
 
 /**
+ * Extract the employee's email from the EmployeeRole VC, if present.
+ *
+ * Unlike the PRISM DID (which the auto-detector prefers as `employeeIdentifier` for holder
+ * binding), the email is *stable across re-onboarding*: it's the DB upsert key, so re-running
+ * onboarding for the same person overwrites their row's PRISM DID while the email stays fixed.
+ * A wallet still holding VCs from an earlier onboarding therefore presents a DID the server's
+ * DB no longer has — but its email still resolves. We send this alongside the DID so the server
+ * can fall back to it for connection routing (see /api/document-access/initiate). This is safe:
+ * the email only selects *which* DIDComm connection receives the proof request; the actual
+ * access decision is the cryptographic VP verification that follows.
+ */
+function extractEmployeeEmail(credentials: any[]): string | null {
+  for (const cred of credentials) {
+    if (getCredentialType(cred) === 'EmployeeRole') {
+      const subject = getCredentialSubject(cred);
+      if (subject?.email) return subject.email;
+    }
+  }
+  return null;
+}
+
+/**
  * Request document access via DIDComm present-proof (preferred over direct HTTP VP).
  *
  * Three-step flow:
@@ -412,12 +436,14 @@ export async function requestDocumentAccessDIDComm(
   // before falling back to credential-subject extraction, which fails for
   // SecurityClearance VCs that don't embed email/prismDid in their subject.
   const employeeIdentifier = opts?.employeeIdentifier ?? extractEmployeeIdentifier(credentials);
+  // Stable fallback identifier (survives re-onboarding) — see extractEmployeeEmail.
+  const employeeEmail = extractEmployeeEmail(credentials);
 
   // Step 1: Initiate — server creates DIDComm proof request; wallet will receive it shortly
   const initRes = await fetch(`${base}/api/document-access/initiate`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ documentDID, employeeIdentifier, ephemeralPublicKey })
+    body:    JSON.stringify({ documentDID, employeeIdentifier, employeeEmail, ephemeralPublicKey })
   });
   const initJson = await initRes.json() as any;
   if (!initRes.ok || !initJson.success) {
@@ -461,29 +487,48 @@ function b64ToBytes(b64: string): Uint8Array {
 }
 
 /**
+ * Best-effort holder proof-of-possession signer. Returns a base64 DER secp256k1
+ * signature when the wallet controls the credential subject's key, or null when it
+ * does not (enterprise-custodied credentials) — in which case a bearer VP is sent
+ * and the document service's own verification (issuer + releasability + clearance)
+ * is the access control.
+ */
+export type HolderSigner = (holderDID: string, message: string) => Promise<string | null>;
+
+/** User-consent gate, resolved true when the user approves disclosing their credentials. */
+export type ConsentGate = () => Promise<boolean>;
+
+/**
  * Request VP-gated document access from the identus-document-service.
  *
- * SSI-aligned flow:
- *   1. Wallet sends VP + ephemeral X25519 public key to POST /access
- *   2. Server verifies VP, unwraps DEK (CMK), nacl.box(DEK, clientPubKey)
- *   3. Server downloads raw encrypted blob from Iagon (no decryption)
- *   4. Wallet decrypts DEK via nacl.box.open → rawDEK
- *   5. Wallet decrypts file via WebCrypto AES-GCM → plaintext
+ * Consent-gated flow with best-effort holder proof-of-possession:
+ *   1. Prompt the user for consent to disclose their credentials (`onConsent`)
+ *   2. GET a one-time challenge bound to { documentDID, ephemeralPublicKey }
+ *   3. Attempt to sign `${challenge}.${documentDID}.${ephemeralPublicKey}` with the
+ *      holder's credential-subject key (`signHolder`). Returns null for enterprise-
+ *      custodied credentials whose key is not in this wallet.
+ *   4. POST VP + ephemeralPublicKey, plus holderDID/challenge/holderSignature when a
+ *      signature was produced. The document service verifies the holder proof when
+ *      present, and always verifies the VP (issuer signature, releasability, clearance).
+ *   5. Wallet decrypts DEK via nacl.box.open, then file via WebCrypto AES-GCM
  *   6. Wallet verifies content hash
  *
  * @param documentDID  - full PRISM DID of the document
- * @param accessUrl    - document service access endpoint (from DID's DocumentAccessGate service)
+ * @param accessUrl    - document service /access endpoint (from DID's DocumentAccessGate service)
  * @param credentials  - wallet credentials array (EmployeeRole + SecurityClearance VCs)
  * @param keyPair      - ephemeral nacl.box keypair (caller generates per request)
+ * @param opts.onConsent  - user consent gate (throws-equivalent: returns false to cancel)
+ * @param opts.signHolder - best-effort holder proof signer
  * @returns decrypted file as Uint8Array
  */
 export async function requestVPGatedAccess(
   documentDID: string,
   accessUrl: string,
   credentials: any[],
-  keyPair: nacl.BoxKeyPair
+  keyPair: nacl.BoxKeyPair,
+  opts: { onConsent: ConsentGate; signHolder: HolderSigner }
 ): Promise<{ plaintext: Uint8Array; filename: string; mimeType: string; copyId: string; clearanceLevel: string }> {
-  const { vp, hasCredentials } = buildVP(credentials);
+  const { vp, hasCredentials, holderDID } = buildVP(credentials);
 
   if (!hasCredentials) {
     throw new Error(
@@ -492,13 +537,47 @@ export async function requestVPGatedAccess(
     );
   }
 
+  // Step 1: explicit user consent before disclosing any credential
+  const approved = await opts.onConsent();
+  if (!approved) {
+    throw new Error('Access cancelled — you declined to present your credentials.');
+  }
+
   const ephemeralPublicKey = Buffer.from(keyPair.publicKey).toString('base64');
 
-  // Step 1: Send VP + ephemeral public key to document service
+  // Derive the access base from the /access endpoint declared in the DID document
+  // (strip a trailing /access to reach the sibling /access-challenge).
+  const accessBase   = accessUrl.replace(/\/access(\?.*)?$/, '');
+  const challengeUrl = `${accessBase}/access-challenge`;
+
+  // Step 2: obtain a one-time challenge bound to this document + ephemeral key
+  const challengeRes = await fetch(challengeUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ documentDID, ephemeralPublicKey })
+  });
+  const challengeJson = await challengeRes.json() as any;
+  if (!challengeRes.ok || !challengeJson.success || !challengeJson.challenge) {
+    throw new Error(challengeJson.message || challengeJson.error || 'Failed to obtain access challenge');
+  }
+  const challenge: string = challengeJson.challenge;
+
+  // Step 3: best-effort holder proof — signs when the wallet controls the subject
+  // key, otherwise null (enterprise-custodied credential → bearer VP).
+  const holderMessage   = `${challenge}.${documentDID}.${ephemeralPublicKey}`;
+  const holderSignature = holderDID ? await opts.signHolder(holderDID, holderMessage) : null;
+
+  // Step 4: present VP (+ holder proof when available) to the document service
+  const body: Record<string, any> = { documentDID, vp, ephemeralPublicKey };
+  if (holderSignature && holderDID) {
+    body.holderDID = holderDID;
+    body.challenge = challenge;
+    body.holderSignature = holderSignature;
+  }
   const res = await fetch(accessUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ documentDID, vp, ephemeralPublicKey })
+    body: JSON.stringify(body)
   });
 
   const json = await res.json();

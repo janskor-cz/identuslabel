@@ -29,8 +29,11 @@ export interface TrustedServiceEntry {
 
 export const TRUSTED_SERVICES: TrustedServiceEntry[] = [];
 
-/** The Certification Authority's three known capability keys — the CA is currently the one
+/** The Certification Authority's known capability keys — the CA is currently the one
  *  service in this deployment identified by connection name at establishment time rather than
  *  a fixed pinned DID (see connectionMetadata.ts's `capabilities` field and its write sites in
- *  OOB.tsx / CAConnectionEnforcementModal.tsx / _app.tsx's GlobalCAEnforcer backfill). */
-export const CA_CAPABILITIES = ['portal', 'login', 'security-clearance'];
+ *  OOB.tsx / CAConnectionEnforcementModal.tsx / _app.tsx's GlobalCAEnforcer backfill).
+ *  'login' deliberately dropped from new-connection defaults - it was a byte-for-byte
+ *  duplicate of 'portal' (same redirect, same proof spec). The server still registers it
+ *  so already-connected wallets with it in their stored capabilities don't break. */
+export const CA_CAPABILITIES = ['portal', 'security-clearance'];

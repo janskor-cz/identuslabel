@@ -325,6 +325,43 @@ function CertificationAuthorityLayout({ credential }: CredentialLayoutProps) {
   );
 }
 
+/**
+ * Company card layout for CompanyIdentity credentials (and live-verified CompanyIdentity
+ * connectionMetadata.verifiedCredentialSubject snapshots — see liveIdentityVerification.ts).
+ * Styled consistently with CertificationAuthorityLayout above (closest analog: an
+ * organization-identity credential), using the indigo accent already assigned to CompanyIdentity
+ * in credentialTypeDetector.ts's getCredentialTypeAccent(). Fields match
+ * companyValidation.ts's ValidatedCompanyConfig / CompanyCredentialData.claims.
+ */
+function CompanyIdentityLayout({ credential }: CredentialLayoutProps) {
+  const subject = getCredentialSubject(credential);
+  const companyName = subject?.companyName || '—';
+  const regNumber = subject?.registrationNumber || '—';
+  const jurisdiction = subject?.jurisdiction || '—';
+  const industry = subject?.industry || '—';
+  const website = subject?.website || '—';
+  const address = subject?.address || '—';
+
+  return (
+    <div className="bg-gradient-to-r from-indigo-500/20 to-blue-500/20 rounded-xl p-3 border border-indigo-500/30">
+      <div className="flex gap-3">
+        <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-500/30 flex items-center justify-center text-lg">🏢</div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs text-indigo-400 font-semibold uppercase tracking-wide">Company</div>
+          <div className="text-sm font-bold text-white truncate">{companyName}</div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs mt-2">
+            <div><div className="text-indigo-400 uppercase" style={{fontSize:'10px'}}>Reg. No.</div><div className="text-slate-300">{regNumber}</div></div>
+            <div><div className="text-indigo-400 uppercase" style={{fontSize:'10px'}}>Jurisdiction</div><div className="text-slate-300">{jurisdiction}</div></div>
+            <div><div className="text-indigo-400 uppercase" style={{fontSize:'10px'}}>Industry</div><div className="text-slate-300 truncate">{industry}</div></div>
+            <div><div className="text-indigo-400 uppercase" style={{fontSize:'10px'}}>Website</div><div className="text-slate-300 truncate">{website}</div></div>
+            <div className="col-span-2"><div className="text-indigo-400 uppercase" style={{fontSize:'10px'}}>Address</div><div className="text-slate-300 truncate">{address}</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DocumentMetadataLayout({ credential }: CredentialLayoutProps) {
   const subject = getCredentialSubject(credential);
   const clearanceLevel = subject?.classificationLevel || 'UNCLASSIFIED';
@@ -429,6 +466,8 @@ export function getCredentialLayout(credential: any) {
       return <ServiceConfigurationLayout credential={credential} />;
     case 'CertificationAuthorityIdentity':
       return <CertificationAuthorityLayout credential={credential} />;
+    case 'CompanyIdentity':
+      return <CompanyIdentityLayout credential={credential} />;
     case 'DocumentMetadata':
       return <DocumentMetadataLayout credential={credential} />;
     default:

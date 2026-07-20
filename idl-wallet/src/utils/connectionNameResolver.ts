@@ -8,6 +8,7 @@
 
 import SDK from "@hyperledger/identus-edge-agent-sdk";
 import { extractCredentialSubject } from './vcValidation';
+import { getCredentialsForConnection } from './connectionCredentialMatcher';
 
 /**
  * Check if a credential is a RealPerson VC
@@ -93,7 +94,8 @@ function extractNameFromCredential(credential: SDK.Domain.Credential): string | 
  */
 export function getConnectionName(
   connectionDID: string,
-  credentials: SDK.Domain.Credential[]
+  credentials: SDK.Domain.Credential[],
+  messages: SDK.Domain.Message[] = []
 ): string {
   try {
     // Early return for missing inputs
@@ -101,18 +103,10 @@ export function getConnectionName(
       return 'Unknown Connection';
     }
 
-    // Normalize connection DID for comparison
-    const normalizedConnectionDID = connectionDID.trim();
-
-    // Find credentials where subject matches the connection DID
-    const matchingCredentials = credentials.filter(cred => {
-      try {
-        const credSubject = cred.subject?.toString().trim();
-        return credSubject === normalizedConnectionDID;
-      } catch {
-        return false;
-      }
-    });
+    // Find credentials issued over this connection — shared with ConnectionAvatar/
+    // ConnectionCredentialsList via connectionCredentialMatcher.ts, so there is exactly one
+    // implementation of this match (issue-credential message from === connection.receiver).
+    const matchingCredentials = getCredentialsForConnection(connectionDID, credentials, messages);
 
     // No match found - return fallback
     if (matchingCredentials.length === 0) {
@@ -154,9 +148,10 @@ export function getConnectionName(
 export function getConnectionNameWithFallback(
   connectionDID: string,
   credentials: SDK.Domain.Credential[],
-  fallbackName?: string
+  fallbackName?: string,
+  messages: SDK.Domain.Message[] = []
 ): string {
-  const vcName = getConnectionName(connectionDID, credentials);
+  const vcName = getConnectionName(connectionDID, credentials, messages);
 
   if (vcName !== 'Unknown Connection') {
     return vcName;

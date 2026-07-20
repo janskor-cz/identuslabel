@@ -13,6 +13,45 @@ export type CredentialType = 'RealPersonIdentity' | 'SecurityClearance' | 'Secur
 export type ClearanceLevel = 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED' | 'SECRET';
 export type ClearanceColor = 'green' | 'blue' | 'orange' | 'red' | 'gray';
 
+export interface CredentialTypeAccent {
+  name: string;
+  icon: string;
+  /** Badge classes — bg/text/border, as used on the collapsed CredentialCard pill */
+  color: string;
+  /** Ring classes for a circular photo/avatar — same hue family as `color` */
+  ringClass: string;
+}
+
+/**
+ * Per-type display accent (name, icon, badge color, avatar ring color) — the single source of
+ * truth for "what does this credential type look like," shared by CredentialCard (the badge)
+ * and ConnectionAvatar (the ring around a resolved photo), so the two never drift apart.
+ * Extracted from CredentialCard.tsx's previously-private getTypeInfo(); behavior unchanged.
+ */
+export function getCredentialTypeAccent(credentialType: CredentialType): CredentialTypeAccent {
+  switch (credentialType) {
+    case 'RealPersonIdentity':
+      return { name: 'Identity', icon: '🪪', color: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30', ringClass: 'ring-cyan-500/50' };
+    case 'SecurityClearance':
+      return { name: 'Clearance', icon: '🛡️', color: 'bg-red-500/20 text-red-400 border-red-500/30', ringClass: 'ring-red-500/50' };
+    case 'ServiceConfiguration':
+      return { name: 'Enterprise Config', icon: '🏢', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30', ringClass: 'ring-purple-500/50' };
+    case 'EmployeeRole':
+      return { name: 'Enterprise ID', icon: '🏢', color: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30', ringClass: 'ring-indigo-500/50' };
+    case 'CISTrainingCertificate':
+      return { name: 'CIS Training', icon: '🎓', color: 'bg-green-500/20 text-green-400 border-green-500/30', ringClass: 'ring-green-500/50' };
+    case 'CertificationAuthorityIdentity':
+      // Matches CredentialCardTypeLayouts.tsx's CertificationAuthorityLayout (amber/🏛️) — this
+      // collapsed-pill accent previously fell through to the 'Unknown' default despite the
+      // expanded layout already treating this type distinctly.
+      return { name: 'Certification Authority', icon: '🏛️', color: 'bg-amber-500/20 text-amber-400 border-amber-500/30', ringClass: 'ring-amber-500/50' };
+    case 'CompanyIdentity':
+      return { name: 'Company', icon: '🏢', color: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30', ringClass: 'ring-indigo-500/50' };
+    default:
+      return { name: 'Unknown', icon: '❓', color: 'bg-slate-500/20 text-slate-400 border-slate-500/30', ringClass: 'ring-slate-500/50' };
+  }
+}
+
 /**
  * Extract credentialSubject from credential object
  *

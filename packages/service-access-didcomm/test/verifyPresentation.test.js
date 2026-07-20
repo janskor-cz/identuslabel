@@ -78,6 +78,85 @@ async function run() {
   assert.strictEqual(empty.success, false);
   assert.strictEqual(empty.error, 'NoCredentials');
 
+  // ── Holder binding (rawVpJwt supplied) ──────────────────────────────────────
+  const holderDID = 'did:prism:holder-abc';
+  const otherDID  = 'did:prism:someone-else';
+  const { publicKey: holderPub, privateKey: holderPriv } = crypto.generateKeyPairSync('ec', { namedCurve: 'secp256k1' });
+  const holderPublicKeyJwk = { ...holderPub.export({ format: 'jwk' }), crv: 'secp256k1' };
+
+  function makeSignedVpJwt({ issDID, vcJwts, signWith }) {
+    const header  = { alg: 'ES256K', typ: 'JWT' };
+    const payload = { iss: issDID, vp: { verifiableCredential: vcJwts } };
+    const signingInput = `${b64url(Buffer.from(JSON.stringify(header)))}.${b64url(Buffer.from(JSON.stringify(payload)))}`;
+    const derSig = crypto.sign('SHA256', Buffer.from(signingInput), { key: signWith, dsaEncoding: 'der' });
+    // reuse the same compact-signature conversion as makeSignedVcJwt via a tiny local copy
+    function derToCompact(der) {
+      let offset = 2;
+      function readInt() {
+        offset += 1;
+        const len = der[offset]; offset += 1;
+        let bytes = der.slice(offset, offset + len); offset += len;
+        if (bytes.length > 32) bytes = bytes.slice(bytes.length - 32);
+        if (bytes.length < 32) bytes = Buffer.concat([Buffer.alloc(32 - bytes.length), bytes]);
+        return bytes;
+      }
+      return Buffer.concat([readInt(), readInt()]);
+    }
+    return `${signingInput}.${b64url(derToCompact(derSig))}`;
+  }
+
+  // Success: VC subject === outer VP iss, outer signature verifies against holder's authentication key.
+  // NOTE: `makeSignedVcJwt` generates a fresh keypair on every call, so each call's own returned
+  // `verificationMethod` — not the top-of-file one bound to the very first `jwt` — is what a
+  // resolver must hand back for `issuerDID` to successfully verify THIS particular VC-JWT.
+  const { jwt: boundVcJwt, verificationMethod: boundVM } = makeSignedVcJwt({
+    issuerDID,
+    credentialSubject: { role: 'engineer', id: holderDID },
+    keyId: `${issuerDID}#key-1`
+  });
+  const resolveForBound = async (did) => {
+    if (did === issuerDID) return { verificationMethod: boundVM, assertionMethod: [boundVM[0].id] };
+    if (did === holderDID) return { verificationMethod: [{ id: `${holderDID}#key-1`, publicKeyJwk: holderPublicKeyJwk }], authentication: [`${holderDID}#key-1`] };
+    throw new Error(`unexpected DID resolution: ${did}`);
+  };
+  const goodVpJwt = makeSignedVpJwt({ issDID: holderDID, vcJwts: [boundVcJwt], signWith: holderPriv });
+  const boundResult = await verifyPresentationCredentials({ verifiableCredential: [boundVcJwt], rawVpJwt: goodVpJwt }, resolveForBound);
+  assert.strictEqual(boundResult.success, true, `expected holder-bound success, got: ${JSON.stringify(boundResult)}`);
+  assert.strictEqual(boundResult.holderBindingChecked, true);
+  assert.strictEqual(boundResult.holderDID, holderDID);
+
+  // Failure: VC subject belongs to someone else — outer VP is validly signed by holderDID, but
+  // the credential inside was issued to a different subject (the "stolen VC-JWT" scenario).
+  const { jwt: stolenVcJwt, verificationMethod: stolenVM } = makeSignedVcJwt({
+    issuerDID,
+    credentialSubject: { role: 'engineer', id: otherDID },
+    keyId: `${issuerDID}#key-1`
+  });
+  const resolveForStolen = async (did) => {
+    if (did === issuerDID) return { verificationMethod: stolenVM, assertionMethod: [stolenVM[0].id] };
+    if (did === holderDID) return { verificationMethod: [{ id: `${holderDID}#key-1`, publicKeyJwk: holderPublicKeyJwk }], authentication: [`${holderDID}#key-1`] };
+    throw new Error(`unexpected DID resolution: ${did}`);
+  };
+  const replayVpJwt = makeSignedVpJwt({ issDID: holderDID, vcJwts: [stolenVcJwt], signWith: holderPriv });
+  const replayResult = await verifyPresentationCredentials({ verifiableCredential: [stolenVcJwt], rawVpJwt: replayVpJwt }, resolveForStolen);
+  assert.strictEqual(replayResult.success, false, 'a VC whose subject differs from the VP holder must be rejected');
+  assert.strictEqual(replayResult.error, 'HOLDER_BINDING_FAILED');
+
+  // Failure: outer VP JWT signed by a DIFFERENT key than the one its iss DID resolves to
+  // (forged holder signature) — must not verify even though the inner VC signature is fine.
+  const { privateKey: attackerPriv } = crypto.generateKeyPairSync('ec', { namedCurve: 'secp256k1' });
+  const forgedVpJwt = makeSignedVpJwt({ issDID: holderDID, vcJwts: [boundVcJwt], signWith: attackerPriv });
+  const forgedResult = await verifyPresentationCredentials({ verifiableCredential: [boundVcJwt], rawVpJwt: forgedVpJwt }, resolveForBound);
+  assert.strictEqual(forgedResult.success, false, 'outer VP JWT signed by a key not belonging to iss DID must be rejected');
+  assert.strictEqual(forgedResult.error, 'HOLDER_BINDING_FAILED');
+
+  // Backward compatibility: omitting rawVpJwt entirely (as company-admin-portal's
+  // verifyAndExtractRealPersonClaims does — it performs holder binding itself beforehand) must
+  // still succeed on issuer-signature verification alone, unchanged from before this fix.
+  const noRawJwtResult = await verifyPresentationCredentials({ verifiableCredential: [boundVcJwt] }, resolveForBound);
+  assert.strictEqual(noRawJwtResult.success, true);
+  assert.strictEqual(noRawJwtResult.holderBindingChecked, false);
+
   console.log('verifyPresentation: all tests passed');
 }
 

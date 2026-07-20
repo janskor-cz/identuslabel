@@ -55,13 +55,23 @@ async function run() {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'secp256k1' });
   const trustedIssuerDID   = 'did:prism:trusted-issuer';
   const untrustedIssuerDID = 'did:prism:untrusted-issuer';
+  // Single test keypair reused for issuer AND holder signing — the fake DID-resolution server
+  // below hands out the same publicKeyJwk for whichever DID is looked up, exactly as before this
+  // fix, just now also exposing it under `authentication` (not just `assertionMethod`) so the
+  // outer VP-JWT's holder-binding signature (see verifyPresentation.js) resolves too.
   const publicKeyJwk = { ...publicKey.export({ format: 'jwk' }), crv: 'secp256k1' };
+  // The presenting holder's own DID — the outer VP-JWT's `iss` and every presented VC's subject
+  // must agree on this (holder binding). Deliberately different from the `did:peer:holder`
+  // connection identifier passed to `handleIncomingMessage` below: in this codebase a DIDComm
+  // connection's peer DID and the credential-holder's did:prism identity DID are different DIDs
+  // by design (see didCompare.js's header comment) — this test's `holderDID` mirrors that.
+  const holderDID = 'did:prism:holder-1';
 
-  const vcJwt = signCompact({ iss: trustedIssuerDID, vc: { credentialSubject: { role: 'engineer', department: 'R&D' } } }, privateKey);
-  const vpJwt = signCompact({ vp: { verifiableCredential: [vcJwt] } }, privateKey); // outer VP signature not checked by this library
+  const vcJwt = signCompact({ iss: trustedIssuerDID, vc: { credentialSubject: { role: 'engineer', department: 'R&D', id: holderDID } } }, privateKey);
+  const vpJwt = signCompact({ iss: holderDID, vp: { verifiableCredential: [vcJwt] } }, privateKey);
 
-  const untrustedVcJwt = signCompact({ iss: untrustedIssuerDID, vc: { credentialSubject: { role: 'engineer', department: 'R&D' } } }, privateKey);
-  const untrustedVpJwt = signCompact({ vp: { verifiableCredential: [untrustedVcJwt] } }, privateKey);
+  const untrustedVcJwt = signCompact({ iss: untrustedIssuerDID, vc: { credentialSubject: { role: 'engineer', department: 'R&D', id: holderDID } } }, privateKey);
+  const untrustedVpJwt = signCompact({ iss: holderDID, vp: { verifiableCredential: [untrustedVcJwt] } }, privateKey);
 
   const sentMessages = []; // { connectionId, content }
   let proofCounter = 0;
@@ -81,7 +91,11 @@ async function run() {
         res.end(JSON.stringify({
           didDocument: {
             verificationMethod: [{ id: `${did}#key-1`, publicKeyJwk }],
-            assertionMethod: isTrusted || did === untrustedIssuerDID ? [`${did}#key-1`] : []
+            assertionMethod: isTrusted || did === untrustedIssuerDID ? [`${did}#key-1`] : [],
+            // Holder-binding (see verifyPresentation.js) resolves the outer VP-JWT's `iss` DID's
+            // `authentication` key — any DID can authenticate as itself, unlike assertionMethod
+            // (issuance) which is gated by issuer trust above, so this is unconditional.
+            authentication: [`${did}#key-1`]
           }
         }));
         return;
@@ -240,6 +254,26 @@ async function run() {
   assert.strictEqual(JSON.parse(msg4.content).body.error, 'UNKNOWN_CAPABILITY');
   // Errors are consumable via the HTTP transport too, not just successful grants.
   assert.strictEqual(svc.consumeGrant('req-4').error, 'UNKNOWN_CAPABILITY');
+
+  // --- Test 5: stolen VC-JWT (issuer-trusted, correctly signed) replayed over a VP whose holder
+  // is NOT that VC's subject → HOLDER_BINDING_FAILED, no grant. This is the exact gap this fix
+  // closes: previously this library only checked the inner VC's issuer signature/trust and never
+  // verified the outer VP-JWT's own signature nor compared the VC subject to the presenter. ---
+  sentMessages.length = 0;
+  const someoneElseDID = 'did:prism:someone-else';
+  const stolenVcJwt = signCompact({ iss: trustedIssuerDID, vc: { credentialSubject: { role: 'engineer', department: 'R&D', id: someoneElseDID } } }, privateKey);
+  // Signed correctly by holderDID (whose key the fake server resolves under `authentication`),
+  // but the VC inside belongs to someoneElseDID, not holderDID.
+  nextVpJwt = signCompact({ iss: holderDID, vp: { verifiableCredential: [stolenVcJwt] } }, privateKey);
+  await svc.handleIncomingMessage('did:peer:holder', JSON.stringify({
+    type: 'https://identuslabel.cz/protocols/service-access/1.0/request',
+    id: 'req-5', body: { capability: 'portal' }
+  }));
+  const msg5 = await waitFor(() => sentMessages.find(m => JSON.parse(m.content).thid === 'req-5'));
+  const parsed5 = JSON.parse(msg5.content);
+  assert.ok(parsed5.type.endsWith('/error'), 'a VC whose subject is not the VP holder must not produce a grant');
+  assert.strictEqual(parsed5.body.error, 'HOLDER_BINDING_FAILED');
+  nextVpJwt = vpJwt;
 
   server.close();
   console.log('ServiceAccessService: all tests passed');
