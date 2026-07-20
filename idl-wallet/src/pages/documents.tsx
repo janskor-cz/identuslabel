@@ -350,7 +350,7 @@ const DocumentDetailsModal: React.FC<{
             {/* Creation info */}
             <div className="border-t border-slate-700/50 pt-4">
               <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Creation</div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <div className="text-xs text-slate-500 mb-0.5">Created by</div>
                   <div className="text-sm text-slate-200 font-mono break-all">{data.createdBy || '—'}</div>
@@ -367,7 +367,7 @@ const DocumentDetailsModal: React.FC<{
             {/* Latest version */}
             <div className="border-t border-slate-700/50 pt-4">
               <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Latest Version</div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <div className="text-xs text-slate-500 mb-0.5">Version</div>
                   <div className="text-sm text-slate-200">
@@ -1137,7 +1137,7 @@ export default function DocumentsPage() {
               <button
                 onClick={handleRefreshMyDocs}
                 disabled={classifiedDocuments.isLoading}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/50 disabled:opacity-50"
+                className="p-2.5 min-h-11 min-w-11 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/50 disabled:opacity-50"
                 title="Refresh"
               >
                 <RefreshIcon className={`w-4 h-4 ${classifiedDocuments.isLoading ? 'animate-spin' : ''}`} />

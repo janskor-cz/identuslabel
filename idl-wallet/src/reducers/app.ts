@@ -59,44 +59,6 @@ export enum DBStatus {
     "connected" = "connected"
 }
 
-// Create defaultSeed with fallback for memory issues
-let defaultSeed: SDK.Domain.Seed;
-try {
-    defaultSeed = new SDK.Apollo().createSeed([
-        "repeat",
-        "spider",
-        "frozen",
-        "drama",
-        "april",
-        "step",
-        "engage",
-        "pitch",
-        "purity",
-        "arrest",
-        "orchard",
-        "grocery",
-        "green",
-        "chapter",
-        "know",
-        "disease",
-        "attend",
-        "notable",
-        "usage",
-        "add",
-        "trash",
-        "dry",
-        "refuse",
-        "jewel"
-    ]);
-} catch (error) {
-    console.warn('⚠️ SDK not available at initialization, using placeholder seed');
-    // Create a placeholder seed that will be replaced when SDK loads
-    defaultSeed = {
-        value: new Uint8Array(64), // Placeholder 64-byte seed
-        size: 64
-    } as SDK.Domain.Seed;
-}
-
 const walletConfig = getWalletConfig();
 
 export const initialState: RootState = {
@@ -133,7 +95,9 @@ export const initialState: RootState = {
             } as SDK.Domain.DID;
         }
     })(),
-    defaultSeed: defaultSeed,
+    // No default: a per-user seed is generated on first login (see MainLayout.tsx)
+    // or restored from the user's Iagon backup. There is no shared/hardcoded seed.
+    defaultSeed: null,
     agent: {
         instance: null,
         hasStarted: false,
@@ -206,7 +170,7 @@ export type RootState = {
     prismDIDs: any[],  // Long-form PRISM DIDs for credential issuance (SDK.Domain.PrismDID[])
     isCreatingPrismDID: boolean,
     mediatorDID: SDK.Domain.DID,
-    defaultSeed: SDK.Domain.Seed,
+    defaultSeed: SDK.Domain.Seed | null,
     agent: {
         instance: SDK.Agent | null,
         selfDID: SDK.Domain.DID | null,
@@ -419,7 +383,7 @@ const appSlice = createSlice({
         },
         setDefaultSeed: (
             state,
-            action: PayloadAction<SDK.Domain.Seed>
+            action: PayloadAction<SDK.Domain.Seed | null>
         ) => {
             state.defaultSeed = action.payload;
         },

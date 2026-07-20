@@ -18,6 +18,8 @@
  */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import SDK from '@hyperledger/identus-edge-agent-sdk';
+import { base64url } from 'jose';
 import { StoredDocument } from '@/utils/documentStorage';
 import nacl from 'tweetnacl';
 import * as docxPreview from 'docx-preview';
@@ -33,13 +35,17 @@ import {
   RefreshIcon,
   CollectionIcon
 } from '@heroicons/react/solid';
-import { getSecurityClearanceKeys } from '@/utils/securityKeyStorage';
+import { loadSecurityKeys, getSecurityKeyPrivateMaterial } from '@/utils/securityKeyStorage';
+import { isDualKey } from '@/types/securityKeys';
+import { useMountedApp } from '@/reducers/store';
 import {
   fetchManifestHistory,
   verifyManifestChain,
   type ManifestHistoryResponse,
   type ChainVerificationResult
 } from '@/utils/KeyAuthorityClient';
+
+const apollo = new SDK.Apollo();
 
 /**
  * Classification badge configuration
@@ -105,6 +111,7 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
   onSubmitEdit,
   onCancelEdit,
 }) => {
+  const app = useMountedApp();
   const [decryptedContent, setDecryptedContent] = useState<string | null>(null);
   const [decryptedBytes, setDecryptedBytes] = useState<Uint8Array | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(true);
@@ -260,16 +267,13 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
           if (keys && keys.length > 0) {
             for (const keyPair of keys) {
               try {
-                if (!keyPair.x25519PrivateKey) continue;
-
                 // Decode the encryption parameters
                 const serverPublicKey = base64ToUint8Array(document.encryptionInfo.serverPublicKey);
                 const nonce = base64ToUint8Array(document.encryptionInfo.nonce);
                 const ciphertext = new Uint8Array(document.encryptedContent);
-                const privateKey = hexToUint8Array(keyPair.x25519PrivateKey);
 
                 // Decrypt using NaCl box.open
-                decrypted = nacl.box.open(ciphertext, nonce, serverPublicKey, privateKey);
+                decrypted = nacl.box.open(ciphertext, nonce, serverPublicKey, keyPair.x25519PrivateKeyBytes);
 
                 if (decrypted) {
                   console.log('[ClassifiedDocumentViewer] Security-clearance key decryption successful');
@@ -308,7 +312,7 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
     };
 
     decryptDocument();
-  }, [document]);
+  }, [document, app.defaultSeed]);
 
   // Render DOCX using docx-preview when bytes are available
   useEffect(() => {
@@ -404,26 +408,26 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
     return null;
   };
 
-  // Get all security keys from storage (fallback for security-clearance keys)
-  const getAllSecurityKeys = (): Array<{x25519PrivateKey?: string}> => {
-    const keys: Array<{x25519PrivateKey?: string}> = [];
+  // Get all Security Clearance dual keys, resolving each one's X25519 private key on
+  // demand (re-derived from the wallet seed when the entry has a keyIndex, or read
+  // from persisted bytes for legacy entries) instead of reading raw localStorage.
+  // Previous implementation manually scanned localStorage for a flat
+  // `x25519PrivateKey` field that never matched the actual stored shape and, even if
+  // it had, would have wrongly hex-decoded a base64url string - this fallback path
+  // never actually worked before this fix.
+  const getAllSecurityKeys = (): Array<{ x25519PrivateKeyBytes: Uint8Array }> => {
+    const storage = loadSecurityKeys();
+    const results: Array<{ x25519PrivateKeyBytes: Uint8Array }> = [];
 
-    // Get all keys matching security-clearance pattern
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.includes('security-clearance-keys')) {
-        try {
-          const data = JSON.parse(localStorage.getItem(key) || '{}');
-          if (data.x25519PrivateKey) {
-            keys.push(data);
-          }
-        } catch (e) {
-          // Skip invalid entries
-        }
+    for (const key of storage.keys) {
+      if (!isDualKey(key)) continue;
+      const material = getSecurityKeyPrivateMaterial(key, apollo, app.defaultSeed);
+      if (material) {
+        results.push({ x25519PrivateKeyBytes: base64url.decode(material.x25519PrivateKeyBytes) });
       }
     }
 
-    return keys;
+    return results;
   };
 
   // Helper: base64 to Uint8Array
@@ -432,15 +436,6 @@ export const ClassifiedDocumentViewer: React.FC<ClassifiedDocumentViewerProps> =
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-  };
-
-  // Helper: hex to Uint8Array
-  const hexToUint8Array = (hex: string): Uint8Array => {
-    const bytes = new Uint8Array(hex.length / 2);
-    for (let i = 0; i < hex.length; i += 2) {
-      bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
     }
     return bytes;
   };

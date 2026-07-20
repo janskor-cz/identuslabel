@@ -106,3 +106,4 @@ company-admin-portal/data/
 certification-authority/public/test-*.html
 certification-authority/test-*.js
 test-enterprise-wallet-manual.md
+docker-build/

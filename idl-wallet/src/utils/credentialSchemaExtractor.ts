@@ -15,7 +15,7 @@
  * Updated: December 14, 2025 - Added multi-method VC and subject extraction for SDK JWTCredential support
  */
 
-import { getCredentialSubject } from './credentialTypeDetector';
+import { getCredentialType } from './credentialTypeDetector';
 
 /**
  * Extract VC object from credential using multiple methods
@@ -64,18 +64,6 @@ function getVC(credential: any): any {
   console.log('[getVC] All methods failed - returning null');
   return null;
 }
-
-/**
- * Known schema GUIDs mapped to credential types
- */
-const SCHEMA_GUID_MAP: Record<string, string> = {
-  'e3ed8a7b-5866-3032-a06c-4c3ce7b7c73f': 'RealPerson',
-  'ba309a53-9661-33df-92a3-2023b4a56fd5': 'SecurityClearance',
-  'f600cf0b-326c-345d-a17a-4c033c02c241': 'ServiceConfiguration',  // TechCorp Multitenancy Cloud Agent (older)
-  'c8d20a5e-3060-3655-bf0b-35e8542c927f': 'ServiceConfiguration',  // Multitenancy Cloud Agent (v2.0.0)
-  '8fb9b1d4-a47a-3f60-8bf1-1145d3eaab72': 'ServiceConfiguration',  // Multitenancy Cloud Agent (v3.0.0 with walletId)
-  '49dbc36d-c1ac-348f-8cd4-3b914fcbc406': 'ServiceConfiguration'   // TechCorp tenant on Multitenancy Cloud Agent (91.99.4.54:8200)
-};
 
 /**
  * Schema information extracted from credential
@@ -154,200 +142,34 @@ export function extractCredentialSchema(credential: any): CredentialSchemaInfo |
 }
 
 /**
- * Get credential type from schema ID/URL
+ * Identify credential type.
  *
- * Extracts GUID from schema URL and maps to known credential types
+ * Delegates to credentialTypeDetector.ts's getCredentialType(), which identifies credentials by
+ * their explicit `credentialType` claim, W3C `type` array, and per-type field signatures — none
+ * of it keyed on a schema GUID. This module previously kept its own parallel, hardcoded
+ * schema-GUID → type table; new companies/schema versions never got added to it (confirmed live:
+ * EvilCorp's ServiceConfiguration schema GUID was absent, so this function reported 0 matches for
+ * an EvilCorp employee's wallet even though the credential — and the enterprise wallet it powers —
+ * was genuinely present and valid). credentialTypeDetector.ts's ServiceConfiguration field
+ * signature (`enterpriseAgentUrl` + `enterpriseAgentApiKey`) already covers every company without
+ * per-company maintenance, so there is no schema-based table to keep in sync anymore.
  *
- * @param schemaId - Schema URL or ID
- * @returns Credential type or 'Unknown'
- */
-export function getCredentialTypeFromSchema(schemaId: string): 'RealPerson' | 'SecurityClearance' | 'ServiceConfiguration' | 'Unknown' {
-  try {
-    // Extract GUID from schema URL
-    // Format: http://91.99.4.54:8000/cloud-agent/schema-registry/schemas/{guid}
-    const guidMatch = schemaId.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
-
-    if (guidMatch) {
-      const guid = guidMatch[1].toLowerCase();
-      const type = SCHEMA_GUID_MAP[guid];
-
-      if (type) {
-        console.log(`[credentialSchemaExtractor] Schema GUID ${guid} mapped to type: ${type}`);
-        return type as 'RealPerson' | 'SecurityClearance' | 'ServiceConfiguration';
-      }
-    }
-
-    console.log('[credentialSchemaExtractor] Schema ID not recognized:', schemaId);
-    return 'Unknown';
-  } catch (error) {
-    console.warn('[credentialSchemaExtractor] Error parsing schema ID:', error);
-    return 'Unknown';
-  }
-}
-
-/**
- * Get credential type from claims or credentialSubject
- *
- * Fallback method when schema is not available
- *
- * @param credential - The credential to extract type from
- * @returns Credential type string or null
- */
-export function getCredentialTypeFromClaims(credential: any): string | null {
-  try {
-    // Use multi-method subject extraction for SDK JWTCredential support
-    const subject = getCredentialSubject(credential);
-
-    // Check credentialSubject (using multi-method extraction)
-    if (subject?.credentialType) {
-      console.log('[credentialSchemaExtractor] Found credentialType in subject:', subject.credentialType);
-
-      // Map known credentialType values
-      if (subject.credentialType === 'RealPersonIdentity') return 'RealPerson';
-      if (subject.credentialType === 'SecurityClearance') return 'SecurityClearance';
-
-      return subject.credentialType;
-    }
-
-    // Check claims array (legacy JWT credentials)
-    if (credential.claims && Array.isArray(credential.claims) && credential.claims.length > 0) {
-      const firstClaim = credential.claims[0];
-
-      // Check credentialType in first claim
-      if (firstClaim.credentialType) {
-        console.log('[credentialSchemaExtractor] Found credentialType in claims[0]:', firstClaim.credentialType);
-
-        // Map known credentialType values
-        if (firstClaim.credentialType === 'RealPersonIdentity') return 'RealPerson';
-        if (firstClaim.credentialType === 'SecurityClearance') return 'SecurityClearance';
-
-        return firstClaim.credentialType;
-      }
-    }
-
-    // Check type array (W3C VC standard)
-    if (credential.type && Array.isArray(credential.type)) {
-      for (const type of credential.type) {
-        if (type !== 'VerifiableCredential') {
-          console.log('[credentialSchemaExtractor] Found credential type in type array:', type);
-          return type;
-        }
-      }
-    }
-
-    console.log('[credentialSchemaExtractor] No credentialType found in claims or credentialSubject');
-    return null;
-  } catch (error) {
-    console.warn('[credentialSchemaExtractor] Error extracting type from claims:', error);
-    return null;
-  }
-}
-
-/**
- * Identify credential type using all available methods
- *
- * Attempts multiple extraction strategies in order of reliability:
- * 1. Schema-based identification (most reliable)
- * 2. Claims-based identification
- * 3. Field-based heuristics (least reliable)
+ * `schemaInfo` is retained purely as optional display/debug metadata (the schema id, if present)
+ * — it plays no role in the type decision.
  *
  * @param credential - The credential to identify
- * @returns Credential type information with source
+ * @returns Credential type information
  */
 export function identifyCredentialType(credential: any): CredentialTypeInfo {
-  // Strategy 1: Extract from schema (most reliable)
   const schemaInfo = extractCredentialSchema(credential);
-  if (schemaInfo) {
-    const type = getCredentialTypeFromSchema(schemaInfo.id);
-    if (type !== 'Unknown') {
-      console.log(`[credentialSchemaExtractor] ✅ Identified as ${type} from schema`);
-      return { type, source: 'schema', schemaInfo };
-    }
-  }
+  const detected = getCredentialType(credential);
 
-  // Strategy 2: Extract from claims/credentialSubject
-  const claimsType = getCredentialTypeFromClaims(credential);
-  if (claimsType) {
-    // Normalize to known types
-    if (claimsType === 'RealPersonIdentity' || claimsType === 'RealPerson') {
-      console.log('[credentialSchemaExtractor] ✅ Identified as RealPerson from claims');
-      return { type: 'RealPerson', source: 'claims', schemaInfo };
-    }
-    if (claimsType === 'SecurityClearance') {
-      console.log('[credentialSchemaExtractor] ✅ Identified as SecurityClearance from claims');
-      return { type: 'SecurityClearance', source: 'claims', schemaInfo };
-    }
-    if (claimsType === 'ServiceConfiguration') {
-      console.log('[credentialSchemaExtractor] ✅ Identified as ServiceConfiguration from claims');
-      return { type: 'ServiceConfiguration', source: 'claims', schemaInfo };
-    }
-  }
+  const type: CredentialTypeInfo['type'] =
+    detected === 'RealPersonIdentity' ? 'RealPerson' :
+    detected === 'SecurityClearance'  ? 'SecurityClearance' :
+    detected === 'ServiceConfiguration' ? 'ServiceConfiguration' :
+    'Unknown';
 
-  // Strategy 3: Heuristic field detection (least reliable)
-  const hasPersonFields = checkForPersonFields(credential);
-  if (hasPersonFields) {
-    console.log('[credentialSchemaExtractor] ⚠️ Identified as RealPerson from heuristics');
-    return { type: 'RealPerson', source: 'heuristic', schemaInfo };
-  }
-
-  console.log('[credentialSchemaExtractor] ❌ Could not identify credential type');
-  return { type: 'Unknown', source: 'heuristic', schemaInfo };
-}
-
-/**
- * Check if credential contains typical person identity fields
- *
- * Heuristic detection based on field presence
- *
- * @param credential - The credential to check
- * @returns True if person fields detected
- */
-function checkForPersonFields(credential: any): boolean {
-  const personFields = ['firstName', 'lastName', 'uniqueId', 'dateOfBirth', 'gender'];
-
-  // Use multi-method subject extraction for SDK JWTCredential support
-  const subject = getCredentialSubject(credential);
-  if (subject) {
-    const hasFields = personFields.some(field => field in subject);
-    console.log('[checkForPersonFields] Subject fields check:', hasFields, 'Fields found:', personFields.filter(f => f in subject));
-    if (hasFields) return true;
-  }
-
-  // Fallback: Check in claims array (legacy)
-  if (credential.claims && Array.isArray(credential.claims)) {
-    for (const claim of credential.claims) {
-      if (claim.credentialSubject) {
-        const hasFields = personFields.some(field => field in claim.credentialSubject);
-        if (hasFields) return true;
-      }
-      // Check directly in claim
-      const hasFields = personFields.some(field => field in claim);
-      if (hasFields) return true;
-    }
-  }
-
-  console.log('[checkForPersonFields] No person fields found');
-  return false;
-}
-
-/**
- * Register a new schema GUID mapping
- *
- * Allows dynamic registration of new credential types
- *
- * @param guid - Schema GUID
- * @param type - Credential type name
- */
-export function registerSchemaMapping(guid: string, type: string): void {
-  SCHEMA_GUID_MAP[guid.toLowerCase()] = type;
-  console.log(`[credentialSchemaExtractor] Registered schema mapping: ${guid} → ${type}`);
-}
-
-/**
- * Get all registered schema mappings
- *
- * @returns Copy of schema GUID map
- */
-export function getSchemaMappings(): Record<string, string> {
-  return { ...SCHEMA_GUID_MAP };
+  console.log(`[credentialSchemaExtractor] Identified as ${type} (detector: ${detected})`);
+  return { type, source: 'claims', schemaInfo: schemaInfo ?? undefined };
 }

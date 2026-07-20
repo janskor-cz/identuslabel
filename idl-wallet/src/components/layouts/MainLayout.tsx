@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/router';
+import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { IDLLogo } from '../IDLLogo';
 import { NavItem } from '../NavItem';
 import { useMountedApp, useAppSelector, store } from '@/reducers/store';
@@ -29,6 +30,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const [loginError, setLoginError] = useState('');
   const [showPasswordInput, setShowPasswordInput] = useState(false);
   const [logFilePath, setLogFilePath] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
   const usernameRef = useRef('');
   const passwordRef = useRef('');
   const iagonStatus = app.iagonBackup?.status ?? 'idle';
@@ -125,6 +127,16 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         } catch (seedErr: any) {
           console.warn('⚠️ [MainLayout] Could not pre-load seed from backup:', seedErr.message);
         }
+      } else {
+        // New username with no Iagon backup — generate a fresh per-user mnemonic.
+        // No passphrase: the mnemonic itself is the only secret that needs protecting.
+        // This becomes durable the same way the restore-branch's seed already is:
+        // via backupToIagon, which bundles defaultSeed.value into the encrypted backup.
+        const apollo = new SDK.Apollo();
+        const mnemonics = apollo.createRandomMnemonics();
+        const freshSeed = apollo.createSeed(mnemonics);
+        app.dispatch(reduxActions.setDefaultSeed(freshSeed));
+        console.log('🌱 [MainLayout] No backup found — generated a fresh per-user seed');
       }
 
       // Connect the DB (initAgent will fire once db.instance is available)
@@ -163,14 +175,12 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     { id: '/credentials',    icon: '🎫', label: 'Credentials' },
     ...(isEnterpriseConfigured ? [{ id: '/documents', icon: '📁', label: 'Documents' }] : []),
     { id: '/connections',    icon: '🔗', label: 'Connections' },
-    { id: '/did-management', icon: '🔑', label: 'DID Management' },
     { id: '/messages',       icon: '💬', label: 'Messages' },
   ];
 
   const bottomNavItems = [
     { id: '/key-management', icon: '🔐', label: 'Key Management' },
     { id: '/configuration',  icon: '⚙️',  label: 'Configuration' },
-    { id: '/debug',          icon: '🐛', label: 'Debug Console' },
   ];
 
   const currentPath = router.pathname;
@@ -179,9 +189,24 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     ? `${selfDID.substring(0, 20)}...${selfDID.substring(selfDID.length - 10)}`
     : 'Not connected';
 
+  useEffect(() => { setMoreOpen(false); }, [currentPath]);
+
   const sidebarW   = sidebarOpen ? 'w-64' : 'w-16';
-  const mainML     = sidebarOpen ? 'ml-64' : 'ml-16';
+  const mainML     = sidebarOpen ? 'md:ml-64' : 'md:ml-16';
   const footerLeft = sidebarOpen ? 'left-64' : 'left-16';
+
+  const primaryTabs = [
+    { id: '/',            icon: '🏠', label: 'Home' },
+    { id: '/credentials', icon: '🎫', label: 'Credentials' },
+    { id: '/connections', icon: '🔗', label: 'Connections' },
+    { id: '/messages',    icon: '💬', label: 'Messages' },
+  ];
+
+  const moreItems = [
+    ...(isEnterpriseConfigured ? [{ id: '/documents', icon: '📁', label: 'Documents' }] : []),
+    { id: '/key-management', icon: '🔐', label: 'Key Management' },
+    { id: '/configuration',  icon: '⚙️',  label: 'Configuration' },
+  ];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
@@ -192,8 +217,8 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       </div>
 
       <div className="relative flex min-h-screen">
-        {/* ── Sidebar ── */}
-        <aside className={`${sidebarW} border-r border-slate-800/50 bg-slate-900/50 backdrop-blur-xl flex flex-col fixed h-full transition-all duration-200 overflow-hidden`}>
+        {/* ── Sidebar (desktop only) ── */}
+        <aside className={`${sidebarW} border-r border-slate-800/50 bg-slate-900/50 backdrop-blur-xl hidden md:flex flex-col fixed h-full transition-all duration-200 overflow-hidden`}>
 
           {/* Logo */}
           <div className={`flex items-center ${sidebarOpen ? 'gap-3 px-6' : 'justify-center px-0'} py-6 mb-2`}>
@@ -307,13 +332,13 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         </aside>
 
         {/* ── Main content ── */}
-        <main className={`flex-1 ${mainML} p-8 pb-20 overflow-auto transition-all duration-200`}>
+        <main className={`flex-1 ${mainML} pt-16 pb-24 px-4 md:p-8 md:pb-20 overflow-auto transition-all duration-200`}>
           {children}
         </main>
       </div>
 
-      {/* ── Status avatar + connect form — fixed top-right ── */}
-      <div className="fixed top-4 right-6 z-50 flex items-center gap-3">
+      {/* ── Status avatar + connect form — fixed top-right (desktop only) ── */}
+      <div className="fixed top-4 right-6 z-50 hidden md:flex items-center gap-3">
         {/* Inline connect form when disconnected */}
         {!isDbConnected && (
           <div className="flex flex-col gap-1 bg-slate-900/90 border border-slate-700/60 rounded-xl px-3 py-2 backdrop-blur-sm shadow-lg">
@@ -357,8 +382,8 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         </div>
       </div>
 
-      {/* ── Footer ── */}
-      <footer className={`fixed bottom-0 ${footerLeft} right-0 px-6 py-3 bg-slate-900/80 backdrop-blur-xl border-t border-slate-800/50 transition-all duration-200`}>
+      {/* ── Footer (desktop only) ── */}
+      <footer className={`fixed bottom-0 ${footerLeft} right-0 px-6 py-3 bg-slate-900/80 backdrop-blur-xl border-t border-slate-800/50 transition-all duration-200 hidden md:block`}>
         <div className="flex items-center justify-between text-xs text-slate-500">
           <div className="flex items-center gap-4">
             <span>Hyperledger Identus SDK v6.6.0</span>
@@ -388,6 +413,158 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           </div>
         </div>
       </footer>
+
+      {/* ══════════════════════════ Mobile-only chrome ══════════════════════════ */}
+
+      {/* ── Mobile top bar ── */}
+      <div
+        className="fixed top-0 inset-x-0 z-50 md:hidden bg-slate-900/90 backdrop-blur-xl border-b border-slate-800/50"
+        style={{ paddingTop: 'env(safe-area-inset-top)' }}
+      >
+        <div className="flex items-center justify-between px-4 h-14">
+          <div className="flex items-center gap-2">
+            <IDLLogo size={26} />
+            <span className="font-bold text-sm bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">
+              IDL Wallet
+            </span>
+          </div>
+          {isDbConnected ? (
+            <div
+              className={`w-9 h-9 rounded-full ${sc.bg} ring-2 ${sc.ring} flex items-center justify-center font-bold text-white text-xs shadow-lg`}
+              title={agentStatus}
+            >
+              {sc.letter}
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowPasswordInput(o => !o)}
+              className="flex items-center gap-1.5 px-3.5 min-h-11 rounded-full bg-gradient-to-r from-cyan-500 to-purple-500 text-white text-sm font-semibold shadow-lg"
+            >
+              <span className={`w-2 h-2 rounded-full ${sc.bg}`} />
+              🔒 Login
+            </button>
+          )}
+        </div>
+
+        {/* Mobile connect dropdown */}
+        {!isDbConnected && showPasswordInput && (
+          <div className="px-4 pb-4 space-y-2 border-t border-slate-800/50 pt-3">
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleConnect()}
+              placeholder="Username"
+              className="w-full px-3 py-2.5 text-sm rounded-xl bg-slate-800/50 border border-slate-700/50 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+              disabled={isConnecting}
+              autoFocus
+            />
+            <input
+              type="password"
+              value={dbPassword}
+              onChange={(e) => setDbPassword(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && !isConnecting && handleConnect()}
+              placeholder="Password"
+              className="w-full px-3 py-2.5 text-sm rounded-xl bg-slate-800/50 border border-slate-700/50 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+              disabled={isConnecting}
+            />
+            {loginError && <p className="text-xs text-red-400">{loginError}</p>}
+            <button
+              onClick={handleConnect}
+              disabled={isConnecting}
+              className={`w-full py-2.5 rounded-xl font-semibold text-sm min-h-11 transition-all ${
+                isConnecting ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
+                  : 'bg-gradient-to-r from-cyan-500 to-purple-500 text-white hover:opacity-90'}`}
+            >
+              {isConnecting ? '🔄 Connecting…' : '🔒 Connect Agent'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Mobile bottom tab bar ── */}
+      <nav
+        className="fixed bottom-0 inset-x-0 z-50 md:hidden flex border-t border-slate-800/50 bg-slate-900/90 backdrop-blur-xl"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      >
+        {primaryTabs.map(tab => {
+          const active = currentPath === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => router.push(tab.id)}
+              className="flex-1 flex flex-col items-center justify-center gap-0.5 min-h-11 py-2"
+            >
+              <span className={`text-lg ${active ? 'opacity-100' : 'opacity-55'}`}>{tab.icon}</span>
+              <span className={`text-[10px] font-medium ${active ? 'text-white font-semibold' : 'text-slate-400'}`}>
+                {tab.label}
+              </span>
+              {active && <span className="w-1 h-1 rounded-full bg-cyan-400 -mt-0.5" />}
+            </button>
+          );
+        })}
+        <button
+          onClick={() => setMoreOpen(true)}
+          className="flex-1 flex flex-col items-center justify-center gap-0.5 min-h-11 py-2"
+        >
+          <span className={`text-lg ${moreOpen || moreItems.some(m => m.id === currentPath) ? 'opacity-100' : 'opacity-55'}`}>⋯</span>
+          <span className={`text-[10px] font-medium ${moreItems.some(m => m.id === currentPath) ? 'text-white font-semibold' : 'text-slate-400'}`}>
+            More
+          </span>
+        </button>
+      </nav>
+
+      {/* ── Mobile "More" sheet ── */}
+      {moreOpen && (
+        <div className="fixed inset-0 z-[60] md:hidden">
+          <div className="absolute inset-0 bg-black/55" onClick={() => setMoreOpen(false)} />
+          <div
+            className="absolute left-0 right-0 bottom-0 bg-[#131c31] rounded-t-3xl shadow-2xl max-h-[80vh] overflow-y-auto"
+            style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+          >
+            <div className="w-9 h-1 rounded-full bg-white/20 mx-auto mt-2.5 mb-1" />
+            <nav className="px-2 py-2">
+              {moreItems.map(item => (
+                <button
+                  key={item.id}
+                  onClick={() => router.push(item.id)}
+                  className={`w-full flex items-center gap-3 px-4 py-3.5 min-h-11 rounded-xl ${
+                    currentPath === item.id ? 'bg-white/10' : ''}`}
+                >
+                  <span className="text-xl">{item.icon}</span>
+                  <span className={`text-sm ${currentPath === item.id ? 'text-white font-semibold' : 'text-slate-300'}`}>
+                    {item.label}
+                  </span>
+                </button>
+              ))}
+            </nav>
+            <div className="px-5 py-4 border-t border-white/10 text-xs text-slate-500 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${
+                  agentStatus === 'connected' ? 'bg-emerald-400' :
+                  agentStatus === 'syncing'   ? 'bg-amber-400 animate-pulse' :
+                  'bg-slate-400'}`}
+                ></span>
+                <span>{agentStatus === 'connected' ? 'PRISM Node Connected' : agentStatus === 'syncing' ? 'Connecting...' : 'Disconnected'}</span>
+              </div>
+              <div>Hyperledger Identus SDK v6.6.0</div>
+              <div className="font-mono break-all">DID: {shortDID}</div>
+              {logFilePath && (
+                <div className="flex items-center gap-2">
+                  <span className="font-mono break-all">Log: {logFilePath}</span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(logFilePath)}
+                    title="Copy log path"
+                    className="hover:text-cyan-400 transition-colors shrink-0"
+                  >
+                    📋
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,6 +1,7 @@
 import '../app/index.css'
 
 import React, { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/router";
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { FooterNavigation } from "@/components/FooterNavigation";
 
@@ -10,22 +11,29 @@ import { selectEnterpriseConnections, selectIsEnterpriseConfigured, selectActive
 import { refreshEnterpriseConnections } from "@/actions/enterpriseAgentActions";
 import { DBConnect } from "@/components/DBConnect";
 import { OOB } from "@/components/OOB";
-import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { copyToClipboardWithLog } from "@/utils/clipboard";
-import { refreshConnections, deleteConnection, sendMessage, sendProtocolAccessRequest } from "@/actions";
-import { filterConnectionMessages, filterChatAndCredentialMessages } from "@/utils/messageFilters";
+import { refreshConnections, deleteConnection } from "@/actions";
+import { filterConnectionMessages } from "@/utils/messageFilters";
 import { connectionRequestQueue, ConnectionRequestItem } from "@/utils/connectionRequestQueue";
 import { messageRejection } from "@/utils/rejectionManager";
 import { PendingRequestsModal } from "@/components/PendingRequestsModal";
 import { getConnectionNameWithFallback } from "@/utils/connectionNameResolver";
-import { getConnectionMetadata, saveConnectionMetadata, updateConnectionMetadata } from "@/utils/connectionMetadata";
+import { getCredentialsForConnection, getPhotoBearingCredentialsForConnection } from "@/utils/connectionCredentialMatcher";
+import { ConnectionCard } from "@/components/connections/ConnectionCard";
+import { CredentialIssuanceRequestor } from "@/components/CredentialIssuanceRequestor";
+import { ConnectionDetailsModal, ConnectionDetailsField } from "@/components/connections/ConnectionDetailsModal";
+import { ConnectionCredentialsModal } from "@/components/connections/ConnectionCredentialsModal";
+import { getConnectionMetadata } from "@/utils/connectionMetadata";
+import { getTargetsForConnection, requestConnectionAccess } from "@/utils/connectionAccessTargets";
 import { getCredentialType } from "@/utils/credentialTypeDetector";
 import { getPinnedCA } from "@/utils/prefixedStorage";
-import { Chat } from "@/components/Chat";
 import { useCAPortal } from "@/utils/CAPortalContext";
-import { EnterpriseAgentClient, ColleagueRecord, PendingColleagueInvitation, ColleagueMessage } from "@/utils/EnterpriseAgentClient";
+import { EnterpriseAgentClient, ColleagueRecord, PendingColleagueInvitation } from "@/utils/EnterpriseAgentClient";
 import { getItem, setItem, removeItem, getKeysByPattern } from "@/utils/prefixedStorage";
 
+// Staleness cutoff for connectionMetadata.verifiedCredentialSubject (see that field's doc comment
+// in connectionMetadata.ts) — SSI-Agent security review flagged this as a point-in-time snapshot
+// with no ongoing revocation check, so it's not trusted indefinitely.
+const PREVIEW_PHOTO_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
 export default function App() {
 
@@ -33,9 +41,25 @@ export default function App() {
     useEffect(() => { setIsMounted(true); }, []);
 
     const app = useMountedApp();
+    const router = useRouter();
     const { setPendingAccessRequest, pendingAccessRequest, openCAPortal } = useCAPortal();
     const [connections, setConnections] = React.useState<SDK.Domain.DIDPair[]>([]);
-    const [showDetails, setShowDetails] = React.useState<{[key: number]: boolean}>({});
+    const [connectionFilter, setConnectionFilter] = useState('');
+    const [detailsModal, setDetailsModal] = useState<{ displayName: string; fields: ConnectionDetailsField[] } | null>(null);
+    // Connection a credential-issuance/1.0 request is being made against — see ConnectionCard's
+    // 🪪 button (isCA-gated below) and CredentialIssuanceRequestor.tsx.
+    const [issuanceRequestFor, setIssuanceRequestFor] = useState<SDK.Domain.DIDPair | null>(null);
+    const [credentialsModal, setCredentialsModal] = useState<{
+        displayName: string;
+        receiverDID: string;
+        credentials: SDK.Domain.Credential[];
+        // Live-verified (never issued/stored) identity of the connected party, in the same
+        // { credentialSubject } shape a real held credential has — see
+        // ConnectionMetadata.verifiedCredentialSubject's doc comment. Same 90-day freshness gate as
+        // ConnectionAvatar's fallbackPhoto/fallbackUniqueId (previewPhotoFresh below); omitted
+        // entirely once stale.
+        verifiedCredential?: { credentialSubject: Record<string, any> };
+    } | null>(null);
 
     // Enterprise connections from Redux
     const enterpriseConnections = useAppSelector(selectEnterpriseConnections);
@@ -70,70 +94,23 @@ export default function App() {
     // Grant polling: set after sending access-request, cleared when grant arrives or times out
     const pendingGrantIdsRef = useRef<string[]>([]);
     const [pendingGrantBase, setPendingGrantBase] = useState<string | null>(null);
-    const [colleagueChatFor, setColleagueChatFor] = useState<string | null>(null); // connectionId
-    const [colleagueMessages, setColleagueMessages] = useState<Map<string, ColleagueMessage[]>>(new Map()); // connId → msgs
-    const [lastMessagePoll, setLastMessagePoll] = useState(0);
 
-    // Inline chat: stores the host DID of the connection whose chat panel is open
-    const [openChatFor, setOpenChatFor] = useState<string | null>(null);
-
-    // Request Access dropdown: stores host DID of the connection with the menu open
-    const [accessMenuFor, setAccessMenuFor] = useState<string | null>(null);
-    // Stores host DID of a connection with an in-flight access request
+    // Stores host DID of a connection with an in-flight access request (ConnectionCard owns its
+    // own popover open/close state; this only tracks the pending spinner across cards).
     const [accessPendingFor, setAccessPendingFor] = useState<string | null>(null);
-
-
-    const getTargetsForConnection = (conn: SDK.Domain.DIDPair) => {
-        const hostDID = conn.host.toString();
-        const meta = getConnectionMetadata(hostDID);
-
-        // Primary: capabilities recorded at connection-establishment time (service-access/1.0).
-        if (meta?.capabilities?.length) {
-            return meta.capabilities.map(key => {
-                const known = CA_TARGETS.find(t => t.key === key);
-                const supported = meta.supportedTargets?.find(t => t.key === key);
-                return { key, label: known?.label ?? supported?.label ?? key, icon: known?.icon ?? supported?.icon ?? '🔗' };
-            });
-        }
-
-        // @deprecated fallback: the old isCAConnection flag, for connections not yet backfilled.
-        if (meta?.isCAConnection) return CA_TARGETS;
-
-        // Fallback for connections created before entity-agnostic discovery was added:
-        // match any name that mentions the CA (case-insensitive substring match).
-        const connName = ((conn as any).name ?? (conn as any).alias ?? '').toLowerCase();
-        if (connName.includes('certification authority') || connName.startsWith('ca connection')) {
-            const CA_CAPABILITIES = CA_TARGETS.map(t => t.key);
-            // Persist so future renders skip the name check
-            if (meta) {
-                updateConnectionMetadata(hostDID, { isCAConnection: true, capabilities: CA_CAPABILITIES });
-            } else {
-                saveConnectionMetadata(hostDID, { walletType: 'local', isCAConnection: true, capabilities: CA_CAPABILITIES });
-            }
-            return CA_TARGETS;
-        }
-
-        return meta?.supportedTargets ?? [];
-    };
-
-    const CA_TARGETS = [
-        { key: 'portal',             label: 'CA Portal',          icon: '🏛️' },
-        { key: 'security-clearance', label: 'Security Clearance', icon: '🔐' },
-        { key: 'login',              label: 'CA Login',            icon: '🔑' },
-    ];
 
     const handleRequestAccess = async (connection: SDK.Domain.DIDPair, target: string) => {
         if (!app.agent.instance || accessPendingFor) return;
         const hostDID = connection.host.toString();
-        setAccessMenuFor(null);
         setAccessPendingFor(hostDID);
-        const targetInfo = getTargetsForConnection(connection).find(t => t.key === target);
-        setPendingAccessRequest({ target, label: targetInfo?.label ?? target, icon: targetInfo?.icon ?? '🔗' });
         try {
-            await app.dispatch(sendProtocolAccessRequest({ agent: app.agent.instance, connection, target }));
-        } catch (e: any) {
-            console.error('[Connections] Access request failed:', e.message);
-            setPendingAccessRequest(null);
+            await requestConnectionAccess({
+                agent: app.agent.instance,
+                dispatch: app.dispatch,
+                connection,
+                target,
+                setPendingAccessRequest,
+            });
         } finally {
             setAccessPendingFor(null);
         }
@@ -146,7 +123,7 @@ export default function App() {
         setShowColleagueDirectory(true);
         const client = new EnterpriseAgentClient(activeConfig);
         const result = await client.getColleagues();
-        if (result.success && result.data) setColleagues(result.data.colleagues ?? (result.data as any));
+        if (result.success && result.data) setColleagues(result.data);
         setColleagueDirectoryLoading(false);
     };
 
@@ -232,28 +209,6 @@ export default function App() {
             alert(`Failed to connect: ${e.message}`);
         } finally {
             setConnectingTo(null);
-        }
-    };
-
-    const handleSendColleagueMessage = async (connectionId: string, content: string) => {
-        if (!activeConfig) return;
-        const client = new EnterpriseAgentClient(activeConfig);
-        const result = await client.sendBasicMessage(connectionId, content);
-        if (result.success) {
-            // Optimistically add to local messages
-            setColleagueMessages(prev => {
-                const next = new Map(prev);
-                const existing = next.get(connectionId) || [];
-                next.set(connectionId, [...existing, {
-                    id: result.data?.id || Date.now().toString(),
-                    fromEmail: 'me',
-                    fromName: 'You',
-                    content,
-                    timestamp: Date.now(),
-                    connectionId
-                }]);
-                return next;
-            });
         }
     };
 
@@ -367,7 +322,8 @@ export default function App() {
         return () => clearInterval(interval);
     }, [walletTab, isEnterpriseConfigured, app.dispatch]);
 
-    // Colleague invitation polling + message polling (enterprise mode only)
+    // Colleague invitation auto-accept polling (enterprise mode only) — message polling for the
+    // enterprise chat itself now lives in messages.tsx, which owns that conversation UI.
     useEffect(() => {
         if (walletTab !== 'enterprise' || !isEnterpriseConfigured || !activeConfig) return;
 
@@ -382,8 +338,8 @@ export default function App() {
 
         const pollInvitations = async () => {
             const result = await client.getColleagueInvitations();
-            if (!result.success || !result.data?.invitations?.length) return;
-            for (const inv of result.data.invitations) {
+            if (!result.success || !result.data?.length) return;
+            for (const inv of result.data) {
                 console.log(`[ColleagueChat] Auto-accepting invitation from ${inv.fromEmail}`);
                 const accepted = await client.acceptInvitation(inv.oobBase64, inv.fromName || inv.fromEmail);
                 if (accepted.success && accepted.data?.connectionId) {
@@ -394,28 +350,10 @@ export default function App() {
             }
         };
 
-        const pollMessages = async () => {
-            const result = await client.getColleagueMessages(lastMessagePoll);
-            if (!result.success || !result.data?.messages?.length) return;
-            setColleagueMessages(prev => {
-                const next = new Map(prev);
-                for (const msg of result.data!.messages) {
-                    const existing = next.get(msg.connectionId) || [];
-                    if (!existing.find(m => m.id === msg.id)) {
-                        next.set(msg.connectionId, [...existing, msg]);
-                    }
-                }
-                return next;
-            });
-            setLastMessagePoll(Date.now());
-        };
-
         pollInvitations();
-        pollMessages();
 
         const invInterval  = setInterval(pollInvitations,  15000);
-        const msgInterval  = setInterval(pollMessages,      5000);
-        return () => { clearInterval(invInterval); clearInterval(msgInterval); };
+        return () => { clearInterval(invInterval); };
     }, [walletTab, isEnterpriseConfigured, activeConfig]);
 
     // Background grant polling: starts when access-request is sent, stops on grant or 2-min timeout.
@@ -785,13 +723,6 @@ export default function App() {
         processMessages();
     }, [app.messages, persistentRequests])
 
-    const toggleDetails = (index: number) => {
-        setShowDetails(prev => ({
-            ...prev,
-            [index]: !prev[index]
-        }));
-    };
-
     // Helper function to check if a connection request already has an established connection
     const hasAcceptedConnection = (message: SDK.Domain.Message): boolean => {
         try {
@@ -907,7 +838,7 @@ export default function App() {
                         </div>
 
                         {/* Wallet Tabs */}
-                        <div className="flex gap-1 mb-6 bg-slate-800/60 p-1 rounded-xl border border-slate-700/50 w-fit">
+                        <div className="flex flex-wrap gap-1 mb-6 bg-slate-800/60 p-1 rounded-xl border border-slate-700/50 w-fit">
                             <button
                                 onClick={() => setWalletTab('personal')}
                                 className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold transition-all ${
@@ -943,6 +874,17 @@ export default function App() {
                                 </button>
                             )}
                         </div>
+                        {/* Filter by connection name — shared between Personal and Enterprise tabs */}
+                        <div className="mb-4 max-w-md">
+                            <input
+                                type="text"
+                                value={connectionFilter}
+                                onChange={(e) => setConnectionFilter(e.target.value)}
+                                placeholder="🔍 Filter by connection name…"
+                                className="w-full px-4 py-2 bg-slate-800/60 border border-slate-700/50 rounded-xl text-sm text-white placeholder-slate-500 outline-none focus:border-cyan-500"
+                            />
+                        </div>
+
                         {/* Conditional connection source based on wallet tab */}
                         {(() => {
                             const isEnterpriseMode = walletTab === 'enterprise';
@@ -959,322 +901,205 @@ export default function App() {
                                 );
                             }
 
+                            const filterLower = connectionFilter.trim().toLowerCase();
+
                             if (isEnterpriseMode) {
-                                return (<>
-                                    <div className="flex items-center justify-between mb-4">
-                                        <span className="text-xs text-slate-500">{enterpriseConnections.length} connection{enterpriseConnections.length !== 1 ? 's' : ''}</span>
-                                        <button
-                                            onClick={handleEnterprisePortalLogin}
-                                            disabled={!!accessPendingFor || !!pendingAccessRequest || !!pendingGrantBase || portalLoginPending}
-                                            className="flex items-center gap-2 px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 rounded-xl text-sm font-semibold transition-all disabled:opacity-50"
-                                        >
-                                            {pendingGrantBase
-                                                ? '⌛ Approve proof in wallet...'
-                                                : portalLoginPending
-                                                    ? '⏳ Sending request...'
-                                                    : '🏢 Login to Employee Portal'}
-                                        </button>
-                                    </div>
-                                    {enterpriseConnections.map((connection, i) => {
-                                    // `label` is nearly always empty for these (see EnterpriseConnection's
-                                    // `goal` field comment — the Cloud Agent's invitee-side accept endpoint
-                                    // has no `label` field at all). `goal` is transmitted to the invitee, but
-                                    // it's a full sentence ("Establish connection between...") when present,
-                                    // and absent entirely for connections whose inviter only set `goalCode`
-                                    // (e.g. document-service's invitation, which sets goalCode: 'document-access'
-                                    // with no goal string) — so it's inconsistent as the primary label. Prefer
-                                    // a proper name we already control: activeConfig.enterpriseAgentName comes
-                                    // from the applied ServiceConfiguration VC, not from the Cloud Agent's
-                                    // per-connection fields, so it's always a real name once configured. The
-                                    // one known goalCode value that means something different (document-service)
-                                    // is called out explicitly so the two enterprise connections aren't both
-                                    // shown under the same label.
-                                    const displayName = connection.goalCode === 'document-access'
+                                // `label` is nearly always empty for these (see EnterpriseConnection's
+                                // `goal` field comment — the Cloud Agent's invitee-side accept endpoint
+                                // has no `label` field at all). `goal` is transmitted to the invitee, but
+                                // it's a full sentence ("Establish connection between...") when present,
+                                // and absent entirely for connections whose inviter only set `goalCode`
+                                // (e.g. document-service's invitation, which sets goalCode: 'document-access'
+                                // with no goal string) — so it's inconsistent as the primary label. Prefer
+                                // a proper name we already control: activeConfig.enterpriseAgentName comes
+                                // from the applied ServiceConfiguration VC, not from the Cloud Agent's
+                                // per-connection fields, so it's always a real name once configured. The
+                                // one known goalCode value that means something different (document-service)
+                                // is called out explicitly so the two enterprise connections aren't both
+                                // shown under the same label.
+                                const withNames = enterpriseConnections.map(connection => ({
+                                    connection,
+                                    displayName: connection.goalCode === 'document-access'
                                         ? 'Document Service'
-                                        : (activeConfig?.enterpriseAgentName || connection.label || connection.goal || `Connection ${connection.connectionId.substring(0, 8)}...`);
-                                    const isConnected = ['ConnectionResponseSent', 'ConnectionResponseReceived', 'Active', 'ACTIVE', 'active'].includes(connection.state);
-                                    const isDetailsShown = showDetails[i] || false;
+                                        : (activeConfig?.enterpriseAgentName || connection.label || connection.goal || `Connection ${connection.connectionId.substring(0, 8)}...`),
+                                }));
+                                const filtered = filterLower
+                                    ? withNames.filter(({ displayName }) => displayName.toLowerCase().includes(filterLower))
+                                    : withNames;
 
-                                    const copyToClipboard = async (text: string, label: string) => {
-                                        try {
-                                            await copyToClipboardWithLog(text, label);
-                                        } catch (error) {
-                                            console.error(`Failed to copy ${label}:`, error);
-                                        }
-                                    };
+                                return (<>
+                                    <div className="mb-4">
+                                        <span className="text-xs text-slate-500">{filtered.length} connection{filtered.length !== 1 ? 's' : ''}</span>
+                                    </div>
+                                    {filtered.length === 0 ? (
+                                        <p className="text-slate-400 text-sm">No connections match "{connectionFilter}".</p>
+                                    ) : (
+                                        <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-4">
+                                            {filtered.map(({ connection, displayName }) => {
+                                                const isConnected = ['ConnectionResponseSent', 'ConnectionResponseReceived', 'Active', 'ACTIVE', 'active'].includes(connection.state);
+                                                const isDocumentService = connection.goalCode === 'document-access';
 
-                                    return (
-                                        <div key={`ent-connection-${connection.connectionId}`} className="bg-slate-800/30 border border-slate-700/50 rounded-xl mb-2 hover:border-slate-600/50 transition-all duration-200">
-                                            <div className="flex items-center justify-between px-4 py-3">
-                                                <div className="flex items-center gap-3 min-w-0">
-                                                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? 'bg-emerald-500' : 'bg-amber-500'} animate-pulse`} />
-                                                    <span className="font-medium text-white text-sm truncate">{displayName}</span>
-                                                </div>
-                                                <div className="flex items-center gap-2 flex-shrink-0 ml-3">
-                                                    <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-400 border border-purple-500/30">
-                                                        ☁️ Enterprise
-                                                    </span>
-                                                    {isConnected && (
-                                                        <button
-                                                            onClick={() => setColleagueChatFor(prev => prev === connection.connectionId ? null : connection.connectionId)}
-                                                            title="Chat"
-                                                            className={`p-1.5 rounded-lg transition-all text-sm ${colleagueChatFor === connection.connectionId ? 'text-emerald-300 bg-emerald-500/10' : 'text-slate-400 hover:text-emerald-300 hover:bg-emerald-500/10'}`}
-                                                        >
-                                                            💬
-                                                        </button>
-                                                    )}
-                                                    <button
-                                                        onClick={() => toggleDetails(i)}
-                                                        title={isDetailsShown ? 'Hide details' : 'Show details'}
-                                                        className={`p-1.5 rounded-lg transition-all ${isDetailsShown ? 'text-cyan-300 bg-cyan-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}
-                                                    >
-                                                        {isDetailsShown ? '▲' : '▼'}
-                                                    </button>
-                                                </div>
-                                            </div>
-                                            {colleagueChatFor === connection.connectionId && (
-                                                <div className="border-t border-slate-700/50">
-                                                    <ColleagueChatPanel
-                                                        connectionId={connection.connectionId}
+                                                return (
+                                                    <ConnectionCard
+                                                        key={`ent-connection-${connection.connectionId}`}
                                                         displayName={displayName}
-                                                        messages={colleagueMessages.get(connection.connectionId) || []}
-                                                        onSend={(content) => handleSendColleagueMessage(connection.connectionId, content)}
+                                                        entityIcon={isDocumentService ? '📄' : '🏢'}
+                                                        entityAccentClass="bg-indigo-500/10 text-indigo-300"
+                                                        accessTargets={isConnected ? [{ key: 'portal-login', label: 'Employee Portal Login', icon: '🏢' }] : []}
+                                                        accessPending={portalLoginPending || !!pendingGrantBase}
+                                                        onMessage={() => router.push(`/messages?connection=${encodeURIComponent(connection.connectionId)}&mode=enterprise`)}
+                                                        onRequestAccess={() => handleEnterprisePortalLogin()}
+                                                        onViewDetails={() => setDetailsModal({
+                                                            displayName,
+                                                            fields: [
+                                                                { label: 'Connection ID', value: connection.connectionId },
+                                                                ...(connection.myDid ? [{ label: 'My DID', value: connection.myDid }] : []),
+                                                                ...(connection.theirDid ? [{ label: 'Their DID', value: connection.theirDid }] : []),
+                                                            ],
+                                                        })}
                                                     />
-                                                </div>
-                                            )}
-                                            {isDetailsShown && (
-                                                <div className="px-4 pb-4 space-y-3 border-t border-slate-700/50 pt-3 animate-fadeIn">
-                                                    <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
-                                                        <label className="text-sm font-semibold text-slate-300 block mb-2">Connection ID</label>
-                                                        <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">
-                                                            {connection.connectionId}
-                                                        </p>
-                                                    </div>
-                                                    {connection.myDid && (
-                                                        <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
-                                                            <div className="flex items-center justify-between mb-2">
-                                                                <label className="text-sm font-semibold text-slate-300">My DID</label>
-                                                                <button onClick={() => copyToClipboard(connection.myDid!, 'My DID')} className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">📋 Copy</button>
-                                                            </div>
-                                                            <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">{connection.myDid}</p>
-                                                        </div>
-                                                    )}
-                                                    {connection.theirDid && (
-                                                        <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
-                                                            <div className="flex items-center justify-between mb-2">
-                                                                <label className="text-sm font-semibold text-slate-300">Their DID</label>
-                                                                <button onClick={() => copyToClipboard(connection.theirDid!, 'Their DID')} className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">📋 Copy</button>
-                                                            </div>
-                                                            <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">{connection.theirDid}</p>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            )}
+                                                );
+                                            })}
                                         </div>
-                                    );
-                                })}
+                                    )}
                                 </>);
                             } else {
-                                return connections.map((connection, i) => {
-                                    const isEstablished = true;
-                                    const isDetailsShown = showDetails[i] || false;
-                                    const hostDID = connection.host.toString();
-                                    const isChatOpen = openChatFor === hostDID;
-
-                                    const displayName = connection.name || getConnectionNameWithFallback(
+                                // Plain function calls, not hooks — safe to call directly in this
+                                // map callback. usePhotoDID itself only runs inside ConnectionAvatar,
+                                // which is a real component rendered via JSX inside ConnectionCard, so
+                                // rules-of-hooks is satisfied without needing to hoist this whole card
+                                // into its own component. Matches via the issue-credential message that
+                                // delivered each credential (from === receiverDID), not credential.subject
+                                // — see connectionCredentialMatcher.ts for why.
+                                const withNames = connections.map(connection => ({
+                                    connection,
+                                    displayName: connection.name || getConnectionNameWithFallback(
                                         connection.receiver.toString(),
-                                        app.credentials
-                                    );
+                                        app.credentials,
+                                        undefined,
+                                        app.messages
+                                    ),
+                                }));
+                                const filtered = filterLower
+                                    ? withNames.filter(({ displayName }) => displayName.toLowerCase().includes(filterLower))
+                                    : withNames;
 
-                                    const connectionMetadata = getConnectionMetadata(hostDID);
-                                    const walletType = connectionMetadata?.walletType || 'local';
-                                    const isCloudWallet = walletType === 'cloud';
+                                if (filtered.length === 0) {
+                                    return <p className="text-slate-400 text-sm">No connections match "{connectionFilter}".</p>;
+                                }
 
-                                    const copyToClipboard = async (text: string, label: string) => {
-                                        try {
-                                            await copyToClipboardWithLog(text, label);
-                                        } catch (error) {
-                                            console.error(`Failed to copy ${label}:`, error);
-                                        }
-                                    };
+                                return (
+                                    <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-4">
+                                        {filtered.map(({ connection, displayName }) => {
+                                            const hostDID = connection.host.toString();
+                                            const receiverDID = connection.receiver.toString();
 
-                                    const badgeLabel = isCloudWallet ? '☁️ Cloud' : '🏠 Local';
-                                    const badgeClasses = isCloudWallet
-                                        ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
-                                        : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30';
+                                            const matchingCredentials = getCredentialsForConnection(receiverDID, app.credentials, app.messages);
+                                            const photoCandidates = getPhotoBearingCredentialsForConnection(receiverDID, app.credentials, app.messages);
 
-                                    // Messages for this specific connection
-                                    const conversationMessages = isChatOpen
-                                        ? filterChatAndCredentialMessages(app.messages)
-                                            .filter(msg => {
-                                                const from = msg.from?.toString();
-                                                const to = msg.to?.toString();
-                                                const receiverStr = connection.receiver.toString();
-                                                return (from === hostDID && to === receiverStr) ||
-                                                       (from === receiverStr && to === hostDID) ||
-                                                       from === hostDID || from === receiverStr ||
-                                                       to === hostDID || to === receiverStr;
-                                            })
-                                            .sort((a, b) => {
-                                                const aTime = a.createdTime ? (a.createdTime < 10000000000 ? a.createdTime * 1000 : a.createdTime) : 0;
-                                                const bTime = b.createdTime ? (b.createdTime < 10000000000 ? b.createdTime * 1000 : b.createdTime) : 0;
-                                                return aTime - bTime;
-                                            })
-                                        : [];
+                                            const connectionMetadata = getConnectionMetadata(hostDID);
+                                            const walletType = connectionMetadata?.walletType || 'local';
+                                            const isCloudWallet = walletType === 'cloud';
 
-                                    const handleSendMessage = async (content: string, toDID: string, securityLevel?: number) => {
-                                        if (!content) throw new Error('Message content is required');
-                                        const agent = app.agent.instance!;
-                                        if (securityLevel !== undefined && securityLevel > 0) {
-                                            await app.dispatch(sendMessage({ agent, content, recipientDID: toDID, securityLevel }));
-                                            return;
-                                        }
-                                        const message = new SDK.BasicMessage({ content }, connection.host, connection.receiver).makeMessage();
-                                        await app.dispatch(sendMessage({ agent, message }));
-                                    };
+                                            // Post-connection live identity verification (RealPerson-typed
+                                            // invitations only — see utils/liveIdentityVerification.ts and
+                                            // OOB.tsx's performLiveIdentityVerificationAndMaybeRespond). Absent
+                                            // entirely for connections that never carried a RealPerson preview.
+                                            // Shown as a checkmark overlaid on the card's photo — 'pending'/
+                                            // 'failed' aren't surfaced on the card itself (no icon clutter for a
+                                            // check that hasn't resolved either way); Details still shows the
+                                            // error via identityVerificationError if it's ever needed.
+                                            const identityVerificationStatus = connectionMetadata?.identityVerificationStatus;
 
-                                    return (
-                                        <div key={`connection${i}`} className="bg-slate-800/30 border border-slate-700/50 rounded-xl mb-2 hover:border-slate-600/50 transition-all duration-200">
-                                            {/* Connection row */}
-                                            <div className="flex items-center justify-between px-4 py-3">
-                                                <div className="flex items-center gap-3 min-w-0">
-                                                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isEstablished ? 'bg-emerald-500' : 'bg-amber-500'} animate-pulse`} />
-                                                    <span className="font-medium text-white text-sm truncate">{displayName}</span>
-                                                </div>
-                                                <div className="flex items-center gap-2 flex-shrink-0 ml-3">
-                                                    <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${badgeClasses}`}>
-                                                        {badgeLabel}
-                                                    </span>
-                                                    {/* Request Access dropdown — only shown when targets exist for this connection */}
-                                                    {getTargetsForConnection(connection).length > 0 && (
-                                                    <div className="relative">
-                                                        <button
-                                                            onClick={() => setAccessMenuFor(accessMenuFor === hostDID ? null : hostDID)}
-                                                            disabled={accessPendingFor === hostDID}
-                                                            title="Request access via VC proof"
-                                                            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold
-                                                                       bg-cyan-500/20 hover:bg-cyan-500/40 border border-cyan-500/40
-                                                                       text-cyan-300 hover:text-cyan-100 transition-all
-                                                                       disabled:opacity-50 disabled:cursor-not-allowed"
-                                                        >
-                                                            {accessPendingFor === hostDID ? '⏳' : '🔓'} Request Access
-                                                        </button>
-                                                        {accessMenuFor === hostDID && (
-                                                            <div className="absolute right-0 top-full mt-1 z-50 min-w-max
-                                                                            bg-slate-900 border border-slate-600/60 rounded-xl shadow-xl overflow-hidden">
-                                                                <p className="px-3 py-2 text-xs text-slate-400 border-b border-slate-700/50">
-                                                                    CA will send a VC proof request
-                                                                </p>
-                                                                {getTargetsForConnection(connection).map(({ key, label, icon }) => (
-                                                                    <button
-                                                                        key={key}
-                                                                        onClick={() => handleRequestAccess(connection, key)}
-                                                                        className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-white
-                                                                                   hover:bg-cyan-500/20 transition-colors text-left"
-                                                                    >
-                                                                        <span>{icon}</span>
-                                                                        <span>{label}</span>
-                                                                    </button>
-                                                                ))}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                    )}
-                                                    <button
-                                                        onClick={() => setOpenChatFor(isChatOpen ? null : hostDID)}
-                                                        title={isChatOpen ? 'Close chat' : 'Open chat'}
-                                                        className={`p-1.5 rounded-lg transition-all ${isChatOpen ? 'text-cyan-300 bg-cyan-500/10' : 'text-slate-400 hover:text-cyan-300 hover:bg-cyan-500/10'}`}
-                                                    >
-                                                        💬
-                                                    </button>
-                                                    <button
-                                                        onClick={() => toggleDetails(i)}
-                                                        title={isDetailsShown ? 'Hide details' : 'Show details'}
-                                                        className={`p-1.5 rounded-lg transition-all ${isDetailsShown ? 'text-cyan-300 bg-cyan-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}
-                                                    >
-                                                        {isDetailsShown ? '▲' : '▼'}
-                                                    </button>
-                                                    <button
-                                                        onClick={async () => {
-                                                            if (confirm(`Are you sure you want to delete the connection with "${displayName}"?\n\nThis will remove all associated messages and cannot be undone.`)) {
-                                                                try {
-                                                                    await app.dispatch(deleteConnection({ connectionHostDID: hostDID }));
-                                                                } catch (error) {
-                                                                    console.error('❌ [UI] Failed to delete connection:', error);
-                                                                    alert('Failed to delete connection. Please try again.');
-                                                                }
+                                            // Connections that expose service-access/1.0 capabilities, or that
+                                            // carried an EmployeeRole VC (issued BY a company, to the wallet
+                                            // holder — the photo on it is the holder's own face, not the
+                                            // company's), are to an organization/service rather than an
+                                            // individual contact — show a logo glyph instead of ConnectionAvatar,
+                                            // which would otherwise either find nothing or show the wrong photo.
+                                            const accessTargets = getTargetsForConnection(connection);
+                                            const hasEmployeeRoleCredential = matchingCredentials.some(c => getCredentialType(c) === 'EmployeeRole');
+                                            const isEntityConnection = accessTargets.length > 0 || hasEmployeeRoleCredential;
+                                            const isCA = !!connectionMetadata?.isCAConnection || displayName.toLowerCase().includes('certification authority');
+
+                                            const detailFields: ConnectionDetailsField[] = [];
+                                            if (isCloudWallet && connectionMetadata?.prismDid) {
+                                                detailFields.push({ label: 'PRISM DID', value: connectionMetadata.prismDid });
+                                            }
+                                            if (isCloudWallet && connectionMetadata?.enterpriseAgentUrl) {
+                                                detailFields.push({ label: 'Enterprise Agent URL', value: connectionMetadata.enterpriseAgentUrl });
+                                            }
+                                            detailFields.push({ label: 'Host DID (Your Identity)', value: hostDID });
+                                            detailFields.push({ label: 'Receiver DID (Connected Party)', value: receiverDID });
+
+                                            const previewPhotoFresh = !!connectionMetadata?.identityVerifiedAt
+                                                && (Date.now() - connectionMetadata.identityVerifiedAt) < PREVIEW_PHOTO_TTL_MS;
+
+                                            return (
+                                                <ConnectionCard
+                                                    key={`connection-${hostDID}`}
+                                                    displayName={displayName}
+                                                    verified={identityVerificationStatus === 'verified'}
+                                                    {...(isEntityConnection
+                                                        ? {
+                                                            entityIcon: isCA ? '🏛️' : '🏢',
+                                                            entityAccentClass: isCA
+                                                                ? 'bg-amber-500/10 text-amber-300'
+                                                                : 'bg-indigo-500/10 text-indigo-300',
+                                                        }
+                                                        : {
+                                                            photoBearingCredentials: photoCandidates,
+                                                            fallbackPhoto: previewPhotoFresh ? connectionMetadata?.verifiedCredentialSubject?.photo : undefined,
+                                                            fallbackUniqueId: previewPhotoFresh ? connectionMetadata?.verifiedCredentialSubject?.uniqueId : undefined,
+                                                        })}
+                                                    accessTargets={accessTargets}
+                                                    accessPending={accessPendingFor === hostDID}
+                                                    onMessage={() => router.push(`/messages?connection=${encodeURIComponent(hostDID)}&mode=personal`)}
+                                                    onRequestAccess={(key) => handleRequestAccess(connection, key)}
+                                                    onRequestIssuance={isCA ? () => setIssuanceRequestFor(connection) : undefined}
+                                                    onViewCredentials={() => setCredentialsModal({
+                                                        displayName,
+                                                        receiverDID,
+                                                        credentials: matchingCredentials,
+                                                        // Same previewPhotoFresh gate as ConnectionAvatar's fallbackPhoto/fallbackUniqueId above —
+                                                        // omit entirely once stale rather than showing a point-in-time snapshot as current.
+                                                        // getCredentialLayout/IDCardLayout/CertificateLayout already tolerate a missing issuer and
+                                                        // missing issued/expiry dates (rendered as 'N/A') — no need to fabricate those here.
+                                                        verifiedCredential: previewPhotoFresh && connectionMetadata?.verifiedCredentialSubject
+                                                            ? { credentialSubject: connectionMetadata.verifiedCredentialSubject }
+                                                            : undefined,
+                                                    })}
+                                                    onViewDetails={() => setDetailsModal({ displayName, fields: detailFields })}
+                                                    onDelete={async () => {
+                                                        if (confirm(`Are you sure you want to delete the connection with "${displayName}"?\n\nThis will remove all associated messages and cannot be undone.`)) {
+                                                            try {
+                                                                await app.dispatch(deleteConnection({ connectionHostDID: hostDID }));
+                                                            } catch (error) {
+                                                                console.error('❌ [UI] Failed to delete connection:', error);
+                                                                alert('Failed to delete connection. Please try again.');
                                                             }
-                                                        }}
-                                                        title="Delete connection"
-                                                        className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all"
-                                                    >
-                                                        🗑
-                                                    </button>
-                                                </div>
-                                            </div>
-
-                                            {/* Inline chat panel */}
-                                            {isChatOpen && (
-                                                <div className="border-t border-slate-700/50">
-                                                    <ErrorBoundary componentName="Chat">
-                                                        <Chat
-                                                            messages={conversationMessages}
-                                                            connection={connection}
-                                                            onSendMessage={handleSendMessage}
-                                                        />
-                                                    </ErrorBoundary>
-                                                </div>
-                                            )}
-
-                                            {/* Technical details panel */}
-                                            {isDetailsShown && (
-                                                <div className="px-4 pb-4 space-y-3 border-t border-slate-700/50 pt-3 animate-fadeIn">
-                                                    {isCloudWallet && connectionMetadata && (
-                                                        <div className="bg-purple-500/20 rounded-xl p-4 border border-purple-500/30 backdrop-blur-sm">
-                                                            <div className="flex items-center space-x-2 mb-3">
-                                                                <span className="text-lg">☁️</span>
-                                                                <label className="text-sm font-semibold text-purple-300">Cloud Wallet Configuration</label>
-                                                            </div>
-                                                            {connectionMetadata.prismDid && (
-                                                                <div className="mb-3">
-                                                                    <div className="flex items-center justify-between mb-1">
-                                                                        <label className="text-xs font-semibold text-purple-300">PRISM DID</label>
-                                                                        <button onClick={() => copyToClipboard(connectionMetadata.prismDid!, 'PRISM DID')} className="text-xs text-purple-400 hover:text-purple-300 transition-colors">📋 Copy</button>
-                                                                    </div>
-                                                                    <p className="text-xs font-mono text-purple-300 break-all bg-purple-900/40 p-2 rounded border border-purple-500/30">{connectionMetadata.prismDid}</p>
-                                                                </div>
-                                                            )}
-                                                            {connectionMetadata.enterpriseAgentUrl && (
-                                                                <div className="mb-3">
-                                                                    <label className="text-xs font-semibold text-purple-300 block mb-1">Enterprise Agent URL</label>
-                                                                    <p className="text-xs text-purple-300 break-all bg-purple-900/40 p-2 rounded border border-purple-500/30">{connectionMetadata.enterpriseAgentUrl}</p>
-                                                                </div>
-                                                            )}
-                                                            <div className="text-xs text-purple-400 mt-2">ℹ️ This connection uses your company's cloud-managed wallet</div>
-                                                        </div>
-                                                    )}
-                                                    <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
-                                                        <div className="flex items-center justify-between mb-2">
-                                                            <label className="text-sm font-semibold text-slate-300">Host DID (Your Identity)</label>
-                                                            <button onClick={() => copyToClipboard(connection.host.toString(), 'Host DID')} className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">📋 Copy</button>
-                                                        </div>
-                                                        <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">{connection.host.toString()}</p>
-                                                    </div>
-                                                    <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
-                                                        <div className="flex items-center justify-between mb-2">
-                                                            <label className="text-sm font-semibold text-slate-300">Receiver DID (Connected Party)</label>
-                                                            <button onClick={() => copyToClipboard(connection.receiver.toString(), 'Receiver DID')} className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors">📋 Copy</button>
-                                                        </div>
-                                                        <p className="text-xs font-mono text-slate-400 break-all bg-slate-900/50 p-2 border border-slate-700/50 rounded">{connection.receiver.toString()}</p>
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-                                    );
-                                });
+                                                        }
+                                                    }}
+                                                />
+                                            );
+                                        })}
+                                    </div>
+                                );
                             }
                         })()}
             </Box>
+
+            {/* Credential Issuance Modal — opened from a ConnectionCard's 🪪 button (CA connections only) */}
+            {issuanceRequestFor && app.agent.instance && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+                    <CredentialIssuanceRequestor
+                        agent={app.agent.instance}
+                        connection={issuanceRequestFor}
+                        capability="realperson"
+                        onClose={() => setIssuanceRequestFor(null)}
+                    />
+                </div>
+            )}
 
             {/* New Connection Modal */}
             {showNewConnectionModal && (
@@ -1359,59 +1184,27 @@ export default function App() {
                     </div>
                 </div>
             )}
-            </DBConnect>
-        </div>
-    );
-}
 
-// ─── Colleague Chat Panel ────────────────────────────────────────────────────
-
-function ColleagueChatPanel({ connectionId, displayName, messages, onSend }: {
-    connectionId: string;
-    displayName: string;
-    messages: ColleagueMessage[];
-    onSend: (content: string) => void;
-}) {
-    const [input, setInput] = React.useState('');
-    const bottomRef = React.useRef<HTMLDivElement>(null);
-
-    React.useEffect(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages]);
-
-    const send = () => {
-        const text = input.trim();
-        if (!text) return;
-        onSend(text);
-        setInput('');
-    };
-
-    return (
-        <div className="flex flex-col h-64 bg-slate-900/50">
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                {messages.length === 0 && (
-                    <p className="text-xs text-slate-500 text-center pt-4">No messages yet. Say hello!</p>
-                )}
-                {messages.map(msg => (
-                    <div key={msg.id} className={`flex ${msg.fromEmail === 'me' ? 'justify-end' : 'justify-start'}`}>
-                        <div className={`max-w-[75%] px-3 py-2 rounded-xl text-sm ${msg.fromEmail === 'me' ? 'bg-emerald-600/40 text-emerald-100' : 'bg-slate-700/60 text-slate-200'}`}>
-                            {msg.fromEmail !== 'me' && <p className="text-xs text-slate-400 mb-0.5">{msg.fromName}</p>}
-                            {msg.content}
-                        </div>
-                    </div>
-                ))}
-                <div ref={bottomRef} />
-            </div>
-            <div className="flex gap-2 p-3 border-t border-slate-700/50">
-                <input
-                    value={input}
-                    onChange={e => setInput(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && send()}
-                    placeholder={`Message ${displayName}...`}
-                    className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500/50"
+            {/* Connection Details Modal — opened from a ConnectionCard's ℹ️ menu item */}
+            {detailsModal && (
+                <ConnectionDetailsModal
+                    displayName={detailsModal.displayName}
+                    fields={detailsModal.fields}
+                    onClose={() => setDetailsModal(null)}
                 />
-                <button onClick={send} className="px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 rounded-lg text-sm font-semibold transition-all">Send</button>
-            </div>
+            )}
+
+            {/* Connection Credentials Modal — opened from a ConnectionCard's 📜 menu item */}
+            {credentialsModal && (
+                <ConnectionCredentialsModal
+                    displayName={credentialsModal.displayName}
+                    receiverDID={credentialsModal.receiverDID}
+                    credentials={credentialsModal.credentials}
+                    verifiedCredential={credentialsModal.verifiedCredential}
+                    onClose={() => setCredentialsModal(null)}
+                />
+            )}
+            </DBConnect>
         </div>
     );
 }

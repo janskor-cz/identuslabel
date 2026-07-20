@@ -8,6 +8,7 @@ import { useAppSelector } from '../reducers/store';
 import { ValidatedCAConfig } from '../utils/caValidation';
 import { ValidatedCompanyConfig } from '../utils/companyValidation';
 import { getCredentialType } from '../utils/credentialTypeDetector';
+import { isRealPersonTypedIdentity } from '../utils/vcValidation';
 import { usePhotoDID } from '../hooks/usePhotoDID';
 
 /**
@@ -97,6 +98,11 @@ interface InvitationPreviewModalProps {
   onReject?: () => Promise<void>; // ✅ PHASE 3: Add reject callback
   inviterIdentity: InviterIdentity | null;
   inviterLabel: string;
+  // Connection name to save — pre-filled with an auto-derived default, editable here as the
+  // final confirmation step (users previously had to get this right before seeing any
+  // invitation details, and had no way to rename it after the connection was saved).
+  alias: string;
+  onAliasChange: (alias: string) => void;
   invitationData?: {
     id?: string;
     from?: string;
@@ -132,6 +138,8 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
   onReject, // ✅ PHASE 3: Extract reject callback
   inviterIdentity,
   inviterLabel,
+  alias,
+  onAliasChange,
   invitationData,
   // ✅ NEW: Extract credential selection props
   availableCredentials,
@@ -160,26 +168,13 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
   const app = useAppSelector((state) => state.app);
 
   // ✅ REALPERSON UX: Detect if invitation has RealPersonIdentity credential attached
-  const isRealPersonInvitation = useMemo(() => {
-    if (!inviterIdentity?.vcProof || !inviterIdentity?.revealedData) return false;
-
-    // Check if revealedData has credentialType field or characteristic RealPerson fields
-    const revealedData = inviterIdentity.revealedData;
-
-    // Method 1: Check credentialType field
-    if (revealedData.credentialType === 'RealPersonIdentity') return true;
-
-    // Method 2: Check for characteristic RealPerson fields (firstName, lastName, uniqueId)
-    const hasRealPersonFields = revealedData.firstName && revealedData.lastName && revealedData.uniqueId;
-    if (hasRealPersonFields) return true;
-
-    // Method 3: Use getCredentialType helper with mock credential structure
-    const mockCredential = { credentialSubject: revealedData };
-    const credType = getCredentialType(mockCredential);
-
-    console.log('[MODAL] Detected invitation credential type:', credType);
-    return credType === 'RealPersonIdentity';
-  }, [inviterIdentity]);
+  // Shared with OOB.tsx's onConnectionHandleClick enforcement guard — see
+  // isRealPersonTypedIdentity's doc comment in utils/vcValidation.ts for why this MUST stay
+  // a single source of truth rather than two independently-maintained copies.
+  const isRealPersonInvitation = useMemo(
+    () => isRealPersonTypedIdentity(inviterIdentity),
+    [inviterIdentity]
+  );
 
   // ✅ REALPERSON UX: Dynamic header configuration based on verification status
   const headerConfig = useMemo(() => {
@@ -194,14 +189,20 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
       };
     }
 
+    // ⚠️ PRE-CONNECTION PREVIEW ONLY: `inviterIdentity.isVerified` reflects
+    // vcValidation.ts's signature + trusted-issuer check on the attached VC — it does NOT
+    // (and, pre-connection, cannot) prove the party sending this invitation currently controls
+    // the identity it describes. That is only established post-connection by a live
+    // present-proof round trip (see utils/liveIdentityVerification.ts and vcValidation.ts's
+    // "NOTE ON HOLDER BINDING"). Copy here must not claim "verified identity".
     if (inviterIdentity?.isVerified) {
       return {
-        title: 'Verified Connection Invitation',
-        subtitle: 'Identity verified via credential proof',
-        bgClass: 'bg-emerald-500/10',
-        iconBgClass: 'bg-emerald-500/20',
-        iconTextClass: 'text-emerald-400',
-        icon: '✅'
+        title: 'RealPerson Identity Preview',
+        subtitle: 'Claims to be this identity — will be verified after connecting',
+        bgClass: 'bg-cyan-500/10',
+        iconBgClass: 'bg-cyan-500/20',
+        iconTextClass: 'text-cyan-400',
+        icon: '⏳'
       };
     }
 
@@ -229,6 +230,13 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
   }, [isOpen, defaultWalletType, onWalletSelect]);
 
   // ✅ REALPERSON UX: Auto-select first RealPersonIdentity credential when modal opens
+  //
+  // NOTE: selecting a credential here only stages it for a possible response — it does NOT by
+  // itself cause OOB.tsx to send it. For a RealPerson-typed invitation, OOB.tsx's
+  // performLiveIdentityVerificationAndMaybeRespond() withholds the actual
+  // vc-proof-sharing/1.0/proof send until the inviter's identity has been LIVE-verified
+  // post-connection (see utils/liveIdentityVerification.ts) — this preview-time auto-selection
+  // happening early does not disclose anything early.
   useEffect(() => {
     if (!isOpen || !isRealPersonInvitation || !availableCredentials?.length) return;
     if (selectedVCForRequest) return; // Don't override existing selection
@@ -348,8 +356,24 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
                       ⚠️ Unverified (TOFU)
                     </span>
                   )
+                ) : isRealPersonInvitation ? (
+                  // RealPerson invitations: at preview time we can only confirm the attached VC
+                  // carries a valid signature from a trusted issuer — not that today's sender
+                  // actually controls that identity (holder binding only happens post-connection,
+                  // see utils/liveIdentityVerification.ts). Show that narrower, honest claim
+                  // instead of the generic VerificationBadge's "Verified Identity" label, which
+                  // would overstate what has actually been checked so far.
+                  inviterIdentity?.isVerified ? (
+                    <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">
+                      ✓ Signed by Trusted CA
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                      ⚠️ Unverified Preview
+                    </span>
+                  )
                 ) : (
-                  // Fallback to VerificationBadge for non-company invitations
+                  // Fallback to VerificationBadge for non-company, non-RealPerson invitations
                   <VerificationBadge inviterIdentity={inviterIdentity} size="md" showLabel={true} />
                 )}
               </div>
@@ -390,6 +414,24 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Connection Name — editable here, at the final confirmation step */}
+            <div className="space-y-2">
+              <label htmlFor="connection-alias" className="block text-sm font-semibold text-slate-400 uppercase tracking-wide">
+                Save Connection As
+              </label>
+              <input
+                id="connection-alias"
+                type="text"
+                value={alias}
+                onChange={(e) => onAliasChange(e.target.value)}
+                className="w-full p-3 text-sm text-white bg-slate-800/50 rounded-xl border border-slate-700/50 focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 placeholder-slate-500 transition-colors"
+                placeholder="e.g., Alice's Issuer Wallet, Business Partner, etc."
+              />
+              <p className="text-xs text-slate-500">
+                This is how the connection will appear in your Connections list.
+              </p>
             </div>
 
             {/* ✅ CA IDENTITY VERIFICATION: CA Identity Section */}

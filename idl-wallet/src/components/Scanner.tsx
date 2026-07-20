@@ -254,8 +254,23 @@ export const Scanner: React.FC<ScannerProps> = ({
           animation: scan 2s ease-in-out infinite;
         }
 
+        /*
+         * height: 100% + flex: 1 only take effect when an ancestor defines a concrete height
+         * (e.g. the fixed full-viewport overlay OOB.tsx wraps this in for mobile QR scanning) —
+         * with no definite-height ancestor these are no-ops (per CSS, a percentage height with
+         * no definite-height ancestor resolves to auto), so scanner-controls below still gets
+         * its natural height and scanner-view falls back to min-height, as in verify.tsx's
+         * non-fullscreen usage.
+         */
+        .scanner-container {
+          display: flex;
+          flex-direction: column;
+          height: 100%;
+        }
+
         .scanner-view {
           min-height: 400px;
+          flex: 1;
           background: #000;
           border-radius: 8px;
           overflow: hidden;

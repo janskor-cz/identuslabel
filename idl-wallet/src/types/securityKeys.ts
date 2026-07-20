@@ -2,7 +2,11 @@
 
 // Individual key component for dual-key structure
 export interface KeyComponent {
-  privateKeyBytes: string;  // base64url encoded
+  // Optional: keys created after the seed-derivation fix are never persisted with
+  // private key bytes (see keyIndex on SecurityKeyDual) - they're re-derived on demand
+  // via getSecurityKeyPrivateMaterial(). Only present on legacy entries predating that
+  // fix, or on transient Pluto-fallback entries assembled at read time.
+  privateKeyBytes?: string;  // base64url encoded
   publicKeyBytes: string;   // base64url encoded
   fingerprint: string;      // SHA256 hash formatted as XX:XX:XX...
   curve: 'Ed25519' | 'X25519';
@@ -14,6 +18,13 @@ export interface SecurityKeyDual {
   keyId: string;
   ed25519: KeyComponent;
   x25519: KeyComponent;
+  // HD derivation index used to create this key from the wallet seed (see keyDerivation.ts).
+  // Each "Generate New Key" click uses the next unused index so distinct clicks yield
+  // genuinely distinct key material, while every key stays re-derivable from the seed alone.
+  // Optional: entries created before this field existed (legacy localStorage data) or
+  // assembled transiently from a Pluto DID lookup genuinely lack it at runtime - the type
+  // must reflect that rather than claiming a guarantee older/foreign data doesn't meet.
+  keyIndex?: number;
   label?: string;
   createdAt: string;
   expiresAt?: string;

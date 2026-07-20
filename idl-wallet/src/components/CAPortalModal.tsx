@@ -1,5 +1,6 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { ensureSecurityClearanceKeys } from '@/utils/ensureSecurityKeys';
+import { useMountedApp } from '@/reducers/store';
 import { XIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/solid';
 
 interface CAPortalModalProps {
@@ -13,6 +14,7 @@ interface CAPortalModalProps {
 }
 
 export function CAPortalModal({ url, isMinimized, hasPendingRequests = false, onClose, onMinimize, onRestore, onOpenDocument }: CAPortalModalProps) {
+  const app = useMountedApp();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   // Track visited URL stack to know when back/forward are possible
   const [historyStack, setHistoryStack] = useState<string[]>([url]);
@@ -65,7 +67,7 @@ export function CAPortalModal({ url, isMinimized, hasPendingRequests = false, on
       }
       if (event.data?.type === 'REQUEST_WALLET_KEYS') {
         console.log('[Wallet] REQUEST_WALLET_KEYS received from', event.origin);
-        const keys = await ensureSecurityClearanceKeys();
+        const keys = await ensureSecurityClearanceKeys(app.defaultSeed);
         console.log('[Wallet] ensureSecurityClearanceKeys result:', keys ? 'ok' : 'null');
         const payload = {
           type: 'WALLET_KEYS',
@@ -78,7 +80,7 @@ export function CAPortalModal({ url, isMinimized, hasPendingRequests = false, on
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [onMinimize, onOpenDocument]);
+  }, [onMinimize, onOpenDocument, app.defaultSeed]);
 
   const goBack = () => {
     iframeRef.current?.contentWindow?.history.back();
@@ -103,7 +105,7 @@ export function CAPortalModal({ url, isMinimized, hasPendingRequests = false, on
           <button
             onClick={goBack}
             disabled={!canGoBack}
-            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            className="p-1 min-h-11 min-w-11 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
             aria-label="Back"
           >
             <ChevronLeftIcon className="w-5 h-5" />
@@ -111,7 +113,7 @@ export function CAPortalModal({ url, isMinimized, hasPendingRequests = false, on
           <button
             onClick={goForward}
             disabled={!canGoForward}
-            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            className="p-1 min-h-11 min-w-11 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
             aria-label="Forward"
           >
             <ChevronRightIcon className="w-5 h-5" />
@@ -123,7 +125,7 @@ export function CAPortalModal({ url, isMinimized, hasPendingRequests = false, on
           {/* Minimize */}
           <button
             onClick={onMinimize}
-            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+            className="p-1 min-h-11 min-w-11 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
             aria-label="Minimize Portal"
             title="Minimize"
           >
@@ -133,7 +135,7 @@ export function CAPortalModal({ url, isMinimized, hasPendingRequests = false, on
           {/* Close */}
           <button
             onClick={onClose}
-            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+            className="p-1 min-h-11 min-w-11 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
             aria-label="Close Portal"
           >
             <XIcon className="w-5 h-5" />

@@ -28,7 +28,7 @@ const fetch  = require('node-fetch');
 const { ServiceAccessService, CapabilityError, createTrustRegistry, createIssuerResolver, PROTOCOL_PREFIX: SERVICE_ACCESS_PREFIX } = require('service-access-didcomm');
 const { DocumentService }    = require('./DocumentService');
 const { verifyVPAndExtractClaims } = require('./VPVerificationService');
-const { resolveDocumentDEK, getLevelNumber } = require('./ReEncryptionService');
+const { resolveDocumentDEK, encryptForEphemeralKey, getLevelNumber } = require('./ReEncryptionService');
 const DeliveryAuditLog       = require('./DeliveryAuditLog');
 const { resolveDocumentDID } = require('./DIDDocumentResolver');
 const vcStore                = require('./VCKeyStore');
@@ -67,15 +67,39 @@ class DocumentDIDCommService {
     this.apiKey   = apiKey;
     this.docSvc   = docSvc;
 
+    // deliveryId → { documentDID, token, expiresAt }. Gates GET /document-blob: the blob URL in a
+    // grant carries a fresh high-entropy token, and the grant itself is only released over the
+    // accessToken-protected /access-grant-status poll — so the blob token never appears in an
+    // enumerable/guessable position. Serves the (still-encrypted) blob only to a caller holding it.
+    const blobGrants = new Map();
+    const registerBlobGrant = (deliveryId, documentDID) => {
+      const token = crypto.randomBytes(24).toString('base64url');
+      blobGrants.set(deliveryId, { documentDID, token, expiresAt: Date.now() + 10 * 60 * 1000 });
+      return token;
+    };
+    // Exposed for GET /document-blob (server.js): returns { documentDID } iff the token matches.
+    this.checkBlobToken = (deliveryId, token) => {
+      const g = blobGrants.get(deliveryId);
+      if (!g) return null;
+      if (Date.now() > g.expiresAt) { blobGrants.delete(deliveryId); return null; }
+      if (typeof token !== 'string' || token.length !== g.token.length) return null;
+      if (!crypto.timingSafeEqual(Buffer.from(token), Buffer.from(g.token))) return null;
+      return { documentDID: g.documentDID };
+    };
+
     this.serviceAccessSvc = new ServiceAccessService({
       cloudAgentUrl: agentUrl,
       apiKey,
       publicBaseUrl: config.DOCUMENT_SERVICE_URL,
-      verifiedEventAdapter: 'webhook', // this service already reacts to a real PresentationVerified push event
-      // The multitenancy agent's webhook payloads already carry connectionId directly (see
-      // _handleBasicMessage below) — there is no separate fromDid→connectionId lookup needed
-      // the way CA/company-admin need one, so this is an identity passthrough rather than a
-      // real resolver.
+      // 'polling', NOT 'webhook' — same as company-admin. The custom Cloud Agent's presentation
+      // webhook envelope is { type: 'PresentationUpdated', data: { status, presentationId, ... } }
+      // (see PresentationServiceNotifier.scala), which never matches the library's top-level
+      // 'PresentationVerified' check — the grant was never built. Polling the presentation
+      // record by id is the code path proven live by the employee-portal login flow.
+      verifiedEventAdapter: 'polling',
+      // _handleBasicMessage resolves the connectionId from the webhook payload's sender DID
+      // (`data.from`) BEFORE delegating to handleIncomingMessage, so by the time this resolver
+      // runs it already receives a real connectionId — identity passthrough is correct here.
       async resolveConnection(connectionId) { return connectionId; },
       resolveIssuerDID: createIssuerResolver({ cloudAgentUrl: agentUrl, apiKey }),
       trustRegistry: employeeRoleTrustRegistry,
@@ -84,9 +108,16 @@ class DocumentDIDCommService {
           label: 'Document Access', icon: '📄', mode: 'payload',
           trustedIssuerVcType: 'EmployeeRole',
           proofSpec: {
-            proofs: [{ schemaId: '', trustIssuers: [] }],
+            // proofs MUST be [] — same as company-admin's employee-portal capability. The VP
+            // carries multiple VCs (EmployeeRole + CISTraining + SecurityClearanceGrant) whose
+            // schemas/issuers differ; a proofs entry makes the Cloud Agent enforce its post-hoc
+            // per-credential schemaId check against EVERY credential in the VP (verified live:
+            // schemaId '' → expectedSchemaIds List("") → PresentationVerificationFailed for all).
+            // Issuer trust is enforced post-verification instead: the shared library's DID-keyed
+            // trust registry (EmployeeRole) + buildResult's clearance-issuer and releasableTo checks.
+            proofs: [],
             goalCode: 'document.access',
-            goal: 'Please verify your credentials to access this document',
+            goal: 'Present your Employee Role and Security Clearance credentials to access this document',
             claims: {},
             domain: 'identuslabel.cz'
           },
@@ -94,6 +125,15 @@ class DocumentDIDCommService {
             const documentDID = requestBody?.documentDID;
             if (!documentDID || !documentDID.startsWith('did:')) {
               throw new CapabilityError('MISSING_DID', 'Access request must include documentDID');
+            }
+            // The DEK must never leave the service in cleartext. The grant is delivered over an
+            // HTTP-pollable transport keyed only by a request id (see /access-grant-status), so a
+            // cleartext DEK would be exposed to anyone who learns that id. Require the requester's
+            // ephemeral X25519 public key and nacl.box the DEK to it — only the holder of the
+            // matching ephemeral secret (the wallet that made the request) can open it.
+            const ephemeralPublicKey = requestBody?.ephemeralPublicKey;
+            if (!ephemeralPublicKey || typeof ephemeralPublicKey !== 'string') {
+              throw new CapabilityError('MISSING_EPHEMERAL_KEY', 'Access request must include ephemeralPublicKey (base64 X25519)');
             }
 
             let docMeta;
@@ -103,26 +143,58 @@ class DocumentDIDCommService {
               throw new CapabilityError('DOCUMENT_NOT_FOUND', `Document DID not found: ${documentDID}`);
             }
 
-            // Reproduces the enterprise-vs-personal classification that
-            // VPVerificationService.verifyVPAndExtractClaims used to do — now operating on
-            // `credentials`, which the shared library has already cryptographically verified.
+            // Releasability policy (July 2026): the EmployeeRole VC is MANDATORY on this path —
+            // its issuer (the employing company) is what `releasableTo` is checked against inside
+            // resolveDocumentDEK. The SecurityClearance VC contributes the clearance LEVEL only;
+            // its issuer is deliberately NOT checked against releasableTo (clearances are issued
+            // by the CA, not by the employing company), but it must still come from a trusted
+            // clearance authority — otherwise a self-issued clearanceLevel claim would pass
+            // cryptographic verification and grant arbitrary levels.
+            // (`credentials` have already been cryptographically verified by the shared library.)
             const employeeRoleCred = credentials.find(c => c.claims?.role !== undefined && c.claims?.department !== undefined);
-            const clearanceCred    = credentials.find(c => c.claims?.clearanceLevel !== undefined);
-            if (!employeeRoleCred && !clearanceCred) {
-              throw new CapabilityError('NoUsableCredential', 'VP must contain an EmployeeRole or SecurityClearance credential');
+            if (!employeeRoleCred) {
+              throw new CapabilityError('MISSING_EMPLOYEE_ROLE',
+                'Document access requires an EmployeeRole credential — its issuer is checked against the document releasability list');
             }
+            const clearanceCred = credentials.find(c => c.claims?.clearanceLevel !== undefined);
 
-            const issuerDID = employeeRoleCred
-              ? (employeeRoleCred.claims?.issuerDID || employeeRoleCred.issuerDID)
-              : clearanceCred.issuerDID;
-            const companyDID = employeeRoleCred ? issuerDID : null;
-            const clearanceLevelStr = clearanceCred?.claims.clearanceLevel || null;
+            // SECURITY: the "company" for both the releasableTo check and the clearance
+            // same-company check is the CRYPTOGRAPHICALLY-VERIFIED issuer of the EmployeeRole
+            // (`payload.iss`, whose ES256K signature the shared library already validated) — NOT
+            // the credential's self-asserted, unsigned `claims.issuerDID`. Trusting the embedded
+            // value would let a holder assert any company DID and match any releasableTo list, and
+            // it breaks the same-company clearance check whenever the two disagree (observed live:
+            // an EmployeeRole signed by TechCorp 6ee757c2 but claiming issuerDID = ACME 474c9151,
+            // presented alongside a TechCorp-signed SecurityClearanceGrant → false mismatch).
+            // Document releasableTo lists are populated with the verified issuer DID, so this is
+            // also what makes access resolve correctly.
+            const companyDID = employeeRoleCred.issuerDID;
+
+            // PRISM DIDs compare by hash segment (short vs long form carry the same hash).
+            const prismHash = d => (typeof d === 'string' && d.startsWith('did:prism:')) ? d.split(':')[2] : d;
+            let clearanceLevelStr = null;
+            if (clearanceCred) {
+              const clearanceIssuer = clearanceCred.issuerDID;
+              const clearanceTrusted =
+                employeeRoleTrustRegistry.isTrustedIssuer(clearanceIssuer, 'SecurityClearanceGrant') ||
+                prismHash(clearanceIssuer) === prismHash(companyDID); // company-issued SecurityClearanceGrant
+              if (!clearanceTrusted) {
+                throw new CapabilityError('UNTRUSTED_CLEARANCE_ISSUER',
+                  'Security clearance credential was not issued by a trusted clearance authority');
+              }
+              clearanceLevelStr = clearanceCred.claims.clearanceLevel || null;
+            }
             const clearanceLevelNum = getLevelNumber(clearanceLevelStr || 'UNCLASSIFIED');
             const credentialSubjectDID = credentials.find(c => c.subjectDID)?.subjectDID || null;
             const credentialStatuses = credentials.map(c => c.credentialStatus).filter(Boolean);
 
+            // Releasability is checked against every verified credential issuer in the VP, not
+            // just the EmployeeRole's — same rule as VPVerificationService's HTTP /access path.
+            const verifiedIssuerDIDs = [...new Set(credentials.map(c => c.issuerDID).filter(Boolean))];
+
+            console.log(`[DocumentDIDCommService] DEK decision: doc=${documentDID.slice(0,40)} companyDID=${prismHash(companyDID)?.slice(0,12)} clearance=${clearanceLevelStr}(${clearanceLevelNum}) docLevel=${docMeta.clearanceLevel} releasableTo=[${(docMeta.releasableTo||[]).map(d=>prismHash(d)?.slice(0,10)).join(',')}]`);
             const result = await resolveDocumentDEK({
-              documentDID, companyDID, clearanceLevelNum, credentialStatuses, docMeta
+              documentDID, companyDID, verifiedIssuerDIDs, clearanceLevelNum, credentialStatuses, docMeta
             });
             if (!result.success) throw new CapabilityError(result.error, result.message);
 
@@ -136,17 +208,30 @@ class DocumentDIDCommService {
 
             console.log(`[DocumentDIDCommService] Access grant built. deliveryId=${deliveryId} doc=${documentDID.slice(0, 40)}...`);
 
+            // nacl.box the raw DEK to the requester's ephemeral key. The wallet recovers it with
+            // nacl.box.open(secretKey), then AES-GCM-decrypts the Iagon blob.
+            const encryptedDEK = encryptForEphemeralKey(
+              new Uint8Array(Buffer.from(result.dek, 'base64')),
+              ephemeralPublicKey
+            );
+
             return {
               documentDID, deliveryId,
-              // Iagon download URL — wallet fetches encrypted blob directly. Embedded in-band
-              // here rather than as a DIDComm-level attachment (the old document-access/1.0/grant
-              // used one) since the generic service-access/1.0 grant envelope doesn't define an
-              // attachments field; the wallet's document consumer needs updating to read this
-              // from `grant.body.result` instead — tracked as follow-up wallet work.
-              iagonDownloadUrl: `${config.IAGON_DOWNLOAD_BASE_URL}/storage/download?fileId=${result.iagonFileId}`,
+              // Download URL for the encrypted blob. MUST be the document-service same-origin proxy
+              // (GET /document-blob), NOT the raw gw.iagon.com URL: Iagon's download is a POST that
+              // requires an x-api-key header and is cross-origin, so a browser fetch of the raw URL
+              // fails with a CORS "Failed to fetch". The proxy runs the authenticated download
+              // server-side and streams back the still-encrypted bytes. The wallet's document
+              // consumer reads this from `grant.body.result` and AES-GCM-decrypts with the DEK.
+              // The URL carries a fresh per-delivery token so the endpoint isn't a DID-enumerable
+              // open proxy; the token is confidential because the grant is only released over the
+              // accessToken-protected /access-grant-status poll.
+              iagonDownloadUrl: `${config.DOCUMENT_SERVICE_URL}/document-blob?deliveryId=${deliveryId}&token=${registerBlobGrant(deliveryId, documentDID)}`,
               sections: [{
                 id: 's0', clearanceLevel: docMeta.clearanceLevel,
-                dek: result.dek, fileIv: result.fileIv, fileAuthTag: result.fileAuthTag,
+                // DEK is nacl.box-encrypted to the requester's ephemeral key (never cleartext).
+                encryptedDEK,
+                fileIv: result.fileIv, fileAuthTag: result.fileAuthTag,
                 fileAlgorithm: result.fileAlgorithm, contentHash: result.contentHash
               }]
             };
@@ -168,10 +253,17 @@ class DocumentDIDCommService {
     if (type === 'BasicMessageReceived') {
       return this._handleBasicMessage(event);
     }
+    // The custom Cloud Agent wraps presentation state changes as
+    //   { type: 'PresentationUpdated', data: { status: 'PresentationVerified', presentationId, ... } }
+    // — normalize to the flat shape the handlers below expect. (The service-access flow itself
+    // uses the polling adapter and doesn't depend on this event; this feeds the upload/branch path.)
+    if (type === 'PresentationUpdated' && event.data?.status === 'PresentationVerified') {
+      const normalized = { ...event.data, type: event.data.status };
+      if (await this.serviceAccessSvc.handleWebhookEvent(normalized)) return true;
+      return this._handlePresentationVerified(normalized);
+    }
     if (type === 'PresentationVerified') {
-      // Try the shared service-access/1.0 handler first — it only claims events for which it
-      // actually has a pending "document-access" request (matched by presentationId), so this
-      // is safe to attempt unconditionally before falling through to the upload/branch path.
+      // Flat-shape fallback (kept for compatibility with any direct/manual event injection).
       if (await this.serviceAccessSvc.handleWebhookEvent(event)) return true;
       return this._handlePresentationVerified(event);
     }
@@ -192,13 +284,33 @@ class DocumentDIDCommService {
   // ── Private: BasicMessage handler ─────────────────────────────────────────
 
   async _handleBasicMessage(event) {
-    const { connectionId, content } = event;
+    // The custom Cloud Agent build's webhook envelope is
+    //   { type: 'BasicMessageReceived', id, ts, data: { id, content, from, to, sentTime }, walletId }
+    // — there is NO top-level content and NO connectionId anywhere in the payload (see
+    // custom-cloud-agent DIDCommControllerImpl.scala `BasicMessageReceived`). This handler
+    // previously destructured { connectionId, content } off the top-level event and silently
+    // dropped every message. Mirror the CA's working handler: read event.data, unwrap the
+    // wallet's StandardMessageBody nesting, and resolve connectionId from the sender's DID.
+    const data = event.data || event;
+    let content = data.content;
     if (!content) return false;
+
+    // Wallets may wrap messages in StandardMessageBody: {"content":"...","timestamp":...}
+    try {
+      const stdBody = JSON.parse(content);
+      if (stdBody && typeof stdBody.content === 'string') content = stdBody.content;
+    } catch (_) { /* not JSON at this layer — use as-is */ }
 
     let envelope;
     try {
       envelope = JSON.parse(content);
     } catch (_) { return false; }
+
+    const connectionId = event.connectionId || await this._resolveConnectionIdByTheirDid(data.from);
+    if (!connectionId) {
+      console.warn(`[DocumentDIDCommService] BasicMessage from unknown sender — no connection matches theirDid=${(data.from || '').slice(0, 60)}...`);
+      return false;
+    }
 
     if (!envelope?.type?.startsWith('https://identuslabel.cz/protocols/')) return false;
     const { type, id: requestId, body = {} } = envelope;
@@ -212,8 +324,8 @@ class DocumentDIDCommService {
       return true;
     }
     if (type === `${SERVICE_ACCESS_PREFIX}/request`) {
-      // connectionId is already known here (from the webhook payload) — see the constructor's
-      // resolveConnection note for why this is an identity passthrough, not a real DID lookup.
+      // connectionId was resolved from the sender DID above — the shared library's
+      // resolveConnection is an identity passthrough (see constructor note).
       await this.serviceAccessSvc.handleIncomingMessage(connectionId, content);
       return true;
     }
@@ -478,6 +590,23 @@ class DocumentDIDCommService {
       const data = await this._agentFetch(`/connections/${connectionId}`);
       return data.theirDid || null;
     } catch (_) {
+      return null;
+    }
+  }
+
+  // Resolve a connectionId from the sender's peer DID (webhook BasicMessageReceived events
+  // carry `from`, never a connectionId). Newest match wins — each fresh invitation produces a
+  // distinct peer DID pair, but be defensive about duplicates.
+  async _resolveConnectionIdByTheirDid(theirDid) {
+    if (!theirDid) return null;
+    try {
+      const data = await this._agentFetch('/connections?limit=1000');
+      const matches = (data.contents || [])
+        .filter(c => c.theirDid === theirDid)
+        .sort((a, b) => String(a.updatedAt || a.createdAt || '').localeCompare(String(b.updatedAt || b.createdAt || '')));
+      return matches.length > 0 ? matches[matches.length - 1].connectionId : null;
+    } catch (e) {
+      console.error('[DocumentDIDCommService] Connection lookup by theirDid failed:', e.message);
       return null;
     }
   }

@@ -21,21 +21,32 @@ class ServiceConfigVCBuilder {
      * @param {string} employeeData.name - Employee name
      * @param {string} employeeData.department - Department
      * @param {string} employeeData.connectionId - DIDComm connection ID
+     * @param {Object|null} existingWallet - Reuse an already-provisioned employee wallet
+     *   (same shape as createEmployeeWallet's return value) instead of creating a new one.
+     *   Callers that provision the "real" onboarding wallet themselves (e.g. the AUTO-PROOF
+     *   enterprise-onboarding step) pass it here so this VC doesn't mint a second, orphaned
+     *   wallet+PRISM-DID+EmployeeRole-VC for the same employee.
      * @returns {Promise<Object>} { credentialSubject, employeeWallet }
      */
-    static async buildServiceConfigClaims(employeeData, company = null, realPersonClaims = null) {
+    static async buildServiceConfigClaims(employeeData, company = null, realPersonClaims = null, existingWallet = null) {
         try {
             console.log(`\n🏗️  [ServiceConfigVCBuilder] Building ServiceConfig claims for: ${employeeData.name}`);
 
-            // 1. Create individual employee wallet on Employee Cloud Agent (port 8300)
-            console.log('  → Step 1/3: Creating employee wallet with PRISM DID...');
-            const employeeWallet = await EmployeeWalletManager.createEmployeeWallet({
-                email: employeeData.email,
-                name: employeeData.name,
-                department: employeeData.department
-            }, company?.did, realPersonClaims);
+            let employeeWallet;
+            if (existingWallet) {
+                console.log('  → Step 1/3: Reusing already-provisioned employee wallet...');
+                employeeWallet = existingWallet;
+            } else {
+                // Create individual employee wallet on Employee Cloud Agent (port 8300)
+                console.log('  → Step 1/3: Creating employee wallet with PRISM DID...');
+                employeeWallet = await EmployeeWalletManager.createEmployeeWallet({
+                    email: employeeData.email,
+                    name: employeeData.name,
+                    department: employeeData.department
+                }, company?.did, realPersonClaims);
+            }
 
-            console.log(`  ✅ Employee wallet created:`);
+            console.log(`  ✅ Employee wallet ready:`);
             console.log(`     Wallet ID: ${employeeWallet.walletId}`);
             console.log(`     PRISM DID: ${employeeWallet.prismDid.substring(0, 60)}...`);
             console.log(`     API Key: ${employeeWallet.apiKey.substring(0, 20)}...`);

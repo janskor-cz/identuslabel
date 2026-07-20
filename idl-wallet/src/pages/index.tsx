@@ -21,16 +21,6 @@ const NAV_CARDS = [
     color: 'text-cyan-400',
   },
   {
-    icon: '🌐',
-    label: 'Browser',
-    path: '/browser',
-    description: 'Launch services linked to your credentials — portals and apps open automatically.',
-    gradient: 'from-purple-500/20 to-violet-500/20',
-    border: 'border-purple-500/30',
-    iconBg: 'bg-purple-500/20',
-    color: 'text-purple-400',
-  },
-  {
     icon: '📁',
     label: 'Documents',
     path: '/documents',

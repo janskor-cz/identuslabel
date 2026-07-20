@@ -1,5 +1,6 @@
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
+import { useRouter } from "next/router";
 
 import '../app/index.css'
 import { Box } from "@/app/Box";
@@ -11,6 +12,8 @@ import { CredentialCard } from "@/components/CredentialCard";
 import { getCredentialLayout } from '@/components/CredentialCardTypeLayouts';
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { verifyCredentialStatus } from "@/utils/credentialStatus";
+import { getCredentialsForConnection } from "@/utils/connectionCredentialMatcher";
+import { getConnectionNameWithFallback } from "@/utils/connectionNameResolver";
 import {
     getCredentialType,
     isCredentialExpired,
@@ -151,9 +154,27 @@ function buildEnterpriseCredentialAdapter(rawCred: any) {
 
 export default function App() {
     const app = useMountedApp();
+    const router = useRouter();
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [deletingCredentialId, setDeletingCredentialId] = useState<string | null>(null);
     const [refreshKey, setRefreshKey] = useState(0);
+
+    // Optional ?connection=<receiverDID> query param — set when arriving from a connection's
+    // "View in Credentials page" link (ConnectionCredentialsModal). Filters the personal-wallet
+    // lists below down to VCs issued by that connection, using the same match as the connections
+    // page (see connectionCredentialMatcher.ts's header comment for why this can't just compare
+    // credential.subject).
+    const connectionFilterDID = typeof router.query.connection === 'string' ? router.query.connection : null;
+    const connectionFilterName = useMemo(() => (
+        connectionFilterDID
+            ? getConnectionNameWithFallback(connectionFilterDID, app.credentials, undefined, app.messages)
+            : null
+    ), [connectionFilterDID, app.credentials, app.messages]);
+    const connectionFilteredIds = useMemo(() => (
+        connectionFilterDID
+            ? new Set(getCredentialsForConnection(connectionFilterDID, app.credentials, app.messages).map(c => c.id))
+            : null
+    ), [connectionFilterDID, app.credentials, app.messages]);
     // Top-level wallet tab
     const [walletTab, setWalletTab] = useState<'personal' | 'enterprise'>('personal');
     // Sub-tabs for personal wallet
@@ -584,8 +605,34 @@ export default function App() {
                         </div>
 
                         {/* ── PERSONAL WALLET ── */}
-                        {walletTab === 'personal' && (
+                        {walletTab === 'personal' && (() => {
+                            // When arriving via a connection's "View in Credentials page" link,
+                            // narrow all three groups down to VCs issued by that connection.
+                            const displayActiveCredentials = connectionFilteredIds
+                                ? activeCredentials.filter(c => connectionFilteredIds.has(c.id))
+                                : activeCredentials;
+                            const displayOldCredentials = connectionFilteredIds
+                                ? oldCredentials.filter(c => connectionFilteredIds.has(c.id))
+                                : oldCredentials;
+                            const displayOtherCredentials = connectionFilteredIds
+                                ? otherCredentials.filter(c => connectionFilteredIds.has(c.id))
+                                : otherCredentials;
+
+                            return (
                         <>
+                        {connectionFilterDID && (
+                            <div className="mb-4 flex items-center justify-between bg-cyan-500/10 border border-cyan-500/30 rounded-xl px-4 py-2.5">
+                                <span className="text-sm text-cyan-300">
+                                    Showing credentials from <span className="font-semibold">{connectionFilterName}</span>
+                                </span>
+                                <button
+                                    onClick={() => router.push('/credentials')}
+                                    className="text-sm text-cyan-400 hover:text-cyan-200 transition-colors"
+                                >
+                                    ✕ Clear filter
+                                </button>
+                            </div>
+                        )}
                         {app.credentials.length <= 0 ? (
                             <div className="text-center py-8">
                                 <p className="text-lg font-normal text-slate-300 lg:text-xl">No credentials found.</p>
@@ -596,7 +643,7 @@ export default function App() {
                                 {/* Sub-Tab Bar */}
                                 <div className="flex gap-1 mb-6 bg-slate-800/50 p-1 rounded-xl border border-slate-700/50 w-fit">
                                     {(['active', 'old', 'others'] as const).map(tab => {
-                                        const count = tab === 'active' ? activeCredentials.length : tab === 'old' ? oldCredentials.length : otherCredentials.length;
+                                        const count = tab === 'active' ? displayActiveCredentials.length : tab === 'old' ? displayOldCredentials.length : displayOtherCredentials.length;
                                         const labels = { active: 'Active', old: 'Old', others: 'Others' };
                                         const isActive = activeTab === tab;
                                         return (
@@ -622,16 +669,16 @@ export default function App() {
 
                                 {/* Active Tab */}
                                 {activeTab === 'active' && (
-                                    activeCredentials.length === 0 ? (
+                                    displayActiveCredentials.length === 0 ? (
                                         <div className="text-center py-8 text-slate-400">No active credentials.</div>
                                     ) : (
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            {activeCredentials.map((credential, i) => (
+                                            {displayActiveCredentials.map((credential, i) => (
                                                 <ErrorBoundary key={`active-${refreshKey}-${credential.id}-${i}`} componentName={`CredentialCard-Active-${i}`}>
                                                     <div className="relative">
                                                         <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
                                                             <span className="px-2 py-0.5 text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full">✓ Valid</span>
-                                                            <button onClick={() => handleDeleteCredential(credential)} className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
+                                                            <button onClick={() => handleDeleteCredential(credential)} className="p-2.5 min-h-11 min-w-11 flex items-center justify-center rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
                                                                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
                                                             </button>
                                                         </div>
@@ -645,7 +692,7 @@ export default function App() {
 
                                 {/* Old Tab */}
                                 {activeTab === 'old' && (() => {
-                                    const expiredOnly = oldCredentials.filter(c => {
+                                    const expiredOnly = displayOldCredentials.filter(c => {
                                         const st = credentialStatuses.get(c.id);
                                         return !st?.revoked && !st?.suspended;
                                     });
@@ -658,7 +705,7 @@ export default function App() {
                                                     <div className="relative opacity-70">
                                                         <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
                                                             <span className="px-2 py-0.5 text-xs font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full">⏱ Expired</span>
-                                                            <button onClick={() => handleDeleteCredential(credential)} className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
+                                                            <button onClick={() => handleDeleteCredential(credential)} className="p-2.5 min-h-11 min-w-11 flex items-center justify-center rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
                                                                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
                                                             </button>
                                                         </div>
@@ -672,15 +719,15 @@ export default function App() {
 
                                 {/* Others Tab */}
                                 {activeTab === 'others' && (
-                                    otherCredentials.length === 0 ? (
+                                    displayOtherCredentials.length === 0 ? (
                                         <div className="text-center py-8 text-slate-400">No other credentials.</div>
                                     ) : (
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            {otherCredentials.map((credential, i) => (
+                                            {displayOtherCredentials.map((credential, i) => (
                                                 <ErrorBoundary key={`others-${refreshKey}-${credential.id}-${i}`} componentName={`CredentialCard-Others-${i}`}>
                                                     <div className="relative">
                                                         <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
-                                                            <button onClick={() => handleDeleteCredential(credential)} className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
+                                                            <button onClick={() => handleDeleteCredential(credential)} className="p-2.5 min-h-11 min-w-11 flex items-center justify-center rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors" title="Delete credential">
                                                                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
                                                             </button>
                                                         </div>
@@ -695,7 +742,8 @@ export default function App() {
                             </>
                         )}
                         </>
-                        )}
+                            );
+                        })()}
 
                         {/* ── ENTERPRISE WALLET ── */}
                         {walletTab === 'enterprise' && isEnterpriseConfigured && (

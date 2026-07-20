@@ -33,8 +33,11 @@ const LOG_DIR = '/opt/project_identuslabel/idl-wallet/logs';
 const MAX_LOG_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_LOG_FILES = 50;
 
-// One log file per server process (resets on every yarn dev restart)
-let sessionLogFile: string | null = null;
+// One log file per browser tab/session (keyed by the client-generated sessionId),
+// not per server process - the wallet runs as a long-lived `next start` process
+// serving many concurrent logins, so a single process-wide variable here meant
+// every login/tab was funneled into the same file for the process's entire uptime.
+const sessionLogFiles = new Map<string, string>();
 
 export default async function handler(
   req: NextApiRequest,
@@ -46,7 +49,7 @@ export default async function handler(
   }
 
   try {
-    const { logs } = req.body;
+    const { logs, sessionId } = req.body;
 
     if (!Array.isArray(logs) || logs.length === 0) {
       return res.status(400).json({ success: false, message: 'Invalid logs format' });
@@ -59,8 +62,9 @@ export default async function handler(
       }
     }
 
-    // Get or create log file for current session
-    const logFile = getLogFilePath(logs[0].walletId);
+    // Get or create log file for this tab/session. Older cached client bundles
+    // (pre-sessionId) fall back to a single shared 'legacy' bucket rather than crashing.
+    const logFile = getLogFilePath(logs[0].walletId, typeof sessionId === 'string' && sessionId ? sessionId : 'legacy');
 
     // Format and write logs
     const formattedLogs = logs.map(entry => formatLogEntry(entry)).join('\n') + '\n';
@@ -87,25 +91,30 @@ export default async function handler(
 }
 
 /**
- * Get the log file path for the current session
+ * Get the log file path for a given tab/session
  */
-function getLogFilePath(walletId: string): string {
-  // Reuse the file created for this server process
-  if (sessionLogFile) return sessionLogFile;
+function getLogFilePath(walletId: string, sessionId: string): string {
+  const cacheKey = `${walletId}:${sessionId}`;
 
-  // New server start → new log file with timestamp
+  // Reuse the file already created for this session
+  const existing = sessionLogFiles.get(cacheKey);
+  if (existing) return existing;
+
+  // New session → new log file with timestamp + short session suffix
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T').join('-').slice(0, 19);
-  const filename = `wallet-debug-${walletId}-${timestamp}.log`;
+  const sessionSuffix = sessionId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 8);
+  const filename = `wallet-debug-${walletId}-${timestamp}-${sessionSuffix}.log`;
   const filepath = path.join(LOG_DIR, filename);
 
   const header = `==========================================================
 Wallet Debug Log - ${walletId}
 Session started: ${new Date().toISOString()}
+Session id: ${sessionId}
 ==========================================================
 
 `;
   fs.writeFileSync(filepath, header, 'utf-8');
-  sessionLogFile = filepath;
+  sessionLogFiles.set(cacheKey, filepath);
 
   return filepath;
 }

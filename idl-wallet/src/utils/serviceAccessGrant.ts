@@ -114,6 +114,19 @@ export function isTrustedGrantSender(
   if (capabilities.some(c => ['portal', 'login', 'security-clearance'].includes(c))) {
     try { return { trusted: true, originAllowlist: [new URL(CERTIFICATION_AUTHORITY.baseUrl).origin] }; } catch { /* fall through */ }
   }
+  // Company employee-portal capabilities (service-access/1.0 `${slug}-employee-portal` keys —
+  // see connectionAccessTargets.ts's companyEmployeePortalCapabilityKey) redirect through
+  // company-admin-portal. A personal ('local') wallet connection to a company has no
+  // enterpriseAgentUrl recorded (that field is only populated on the `walletType === 'cloud'`
+  // branch in OOB.tsx) — without this branch, a `local` wallet's company connection would fall
+  // through to the no-safe-origin case below and its (legitimate) redirect grant would always be
+  // rejected. company-admin-portal's own accessPath/publicBaseUrl (server.js's
+  // COMPANY_PUBLIC_BASE_URL) is a fixed, deployment-pinned origin — same kind of anchor as the CA
+  // fallback above, not a per-company guess (the origin is identical regardless of which company
+  // the capability belongs to).
+  if (capabilities.some(c => c.endsWith('-employee-portal'))) {
+    return { trusted: true, originAllowlist: ['https://identuslabel.cz'] };
+  }
 
   // Trusted for the capability itself, but no known safe origin for this connection.
   // `originAllowlist: undefined` means the CALLER must reject a `mode: redirect` grant (nothing

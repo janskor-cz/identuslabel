@@ -48,6 +48,7 @@ class EmployeePortalDatabase {
     entityId,
     apiKey,
     prismDid = null,
+    companyId = null,
     createdBy = 'system'
   }) {
     const salt = this.generateSalt();
@@ -67,9 +68,10 @@ class EmployeePortalDatabase {
         api_key_hint,
         prism_did,
         prism_did_short,
+        company_id,
         created_by,
         metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       ON CONFLICT (email) DO UPDATE SET
         full_name = EXCLUDED.full_name,
         department = EXCLUDED.department,
@@ -80,8 +82,9 @@ class EmployeePortalDatabase {
         api_key_hint = EXCLUDED.api_key_hint,
         prism_did = EXCLUDED.prism_did,
         prism_did_short = EXCLUDED.prism_did_short,
+        company_id = EXCLUDED.company_id,
         metadata = EXCLUDED.metadata
-      RETURNING id, email, full_name, department, wallet_id, created_at
+      RETURNING id, email, full_name, department, wallet_id, company_id, created_at
     `;
 
     const prismDidShort = prismDid ? prismDid.split(':').pop().substring(0, 8) : null;
@@ -98,6 +101,7 @@ class EmployeePortalDatabase {
       apiKeyHint,
       prismDid,
       prismDidShort,
+      companyId,
       createdBy,
       JSON.stringify({ createdAt: new Date().toISOString() })
     ];
@@ -159,6 +163,16 @@ class EmployeePortalDatabase {
    * Get employee by PRISM DID
    */
   async getEmployeeByDid(prismDid) {
+    // Compare only the DID's hash segment, not the full string. prismDid arrives as long-form
+    // (did:prism:<hash>:<key-material>) from callers like DocumentDIDAccess.tsx, which prefers
+    // the Cloud Agent's own DID listing — but this table stores the canonical short-form
+    // (did:prism:<hash>) written at publication time (see EmployeeWalletManager.js's
+    // partialData.canonicalDid). A raw exact-string match here silently returns no rows whenever
+    // the two forms don't happen to match verbatim, even for a fully onboarded employee. Mirrors
+    // the same hash-segment comparison prismDidsMatch() already uses elsewhere in server.js.
+    const hashSegment = prismDid?.split(':')[2] ?? null;
+    if (!hashSegment) return null;
+
     const query = `
       SELECT
         id,
@@ -170,16 +184,16 @@ class EmployeePortalDatabase {
         prism_did,
         techcorp_connection_id
       FROM employee_portal_accounts
-      WHERE prism_did = $1 AND deleted_at IS NULL
+      WHERE split_part(prism_did, ':', 3) = $1 AND deleted_at IS NULL
     `;
 
-    const result = await this.db.query(query, [prismDid]);
+    const result = await this.db.query(query, [hashSegment]);
     return result.rows[0] || null;
   }
 
   async getEmployeeByWalletId(walletId) {
     const query = `
-      SELECT id, email, full_name, department, wallet_id, entity_id, prism_did, techcorp_connection_id
+      SELECT id, email, full_name, department, wallet_id, entity_id, prism_did, techcorp_connection_id, company_id
       FROM employee_portal_accounts
       WHERE wallet_id = $1 AND deleted_at IS NULL AND is_active = true
     `;
@@ -187,25 +201,38 @@ class EmployeePortalDatabase {
     return result.rows[0] || null;
   }
 
-  async getAllActiveEmployees() {
+  /**
+   * List active employees. Pass companyId (see companies.js ids) to scope to one tenant —
+   * company_id is set from the issuer DID of each employee's EmployeeRole VC (the
+   * cryptographically authoritative source of "who employs this person"), not from email
+   * domain or which wallet happened to originate the connection. Omitting companyId returns
+   * every employee across every tenant — only safe for cross-tenant admin/ops use, never for
+   * a company-scoped or employee-facing view (colleague directory, admin chat, etc.).
+   */
+  async getAllActiveEmployees(companyId = null) {
     const query = `
-      SELECT email, full_name, department, wallet_id, prism_did
+      SELECT email, full_name, department, wallet_id, prism_did, company_id, techcorp_connection_id
       FROM employee_portal_accounts
       WHERE deleted_at IS NULL AND is_active = true
+        ${companyId ? 'AND company_id = $1' : ''}
       ORDER BY full_name ASC
     `;
-    const result = await this.db.query(query);
+    const result = await this.db.query(query, companyId ? [companyId] : []);
     return result.rows;
   }
 
-  async getEmployeeConnectionMap() {
+  /**
+   * See getAllActiveEmployees doc comment re: companyId scoping and its source of truth.
+   */
+  async getEmployeeConnectionMap(companyId = null) {
     const query = `
-      SELECT techcorp_connection_id, full_name, email, department
+      SELECT techcorp_connection_id, full_name, email, department, company_id
       FROM employee_portal_accounts
       WHERE deleted_at IS NULL AND is_active = true
         AND techcorp_connection_id IS NOT NULL
+        ${companyId ? 'AND company_id = $1' : ''}
     `;
-    const rows = (await this.db.query(query)).rows;
+    const rows = (await this.db.query(query, companyId ? [companyId] : [])).rows;
     const map = new Map();
     for (const row of rows) map.set(row.techcorp_connection_id, row);
     return map;

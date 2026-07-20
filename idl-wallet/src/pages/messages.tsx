@@ -1,5 +1,6 @@
 import SDK from "@hyperledger/identus-edge-agent-sdk";
 import React, { useEffect, useState, useCallback, useRef } from "react";
+import { useRouter } from "next/router";
 import '../app/index.css'
 import { FooterNavigation } from "@/components/FooterNavigation";
 import { Box } from "@/app/Box";
@@ -9,14 +10,15 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AgentRequire } from "@/components/AgentRequire";
 import { Chat } from "@/components/Chat";
 import { filterChatMessages, filterChatAndCredentialMessages, groupChatMessagesByConnection, MESSAGE_TYPES } from "@/utils/messageFilters";
-import { sendMessage, refreshEnterpriseConnections } from "@/actions";
+import { sendMessage } from "@/actions";
+import { refreshEnterpriseConnections } from "@/actions/enterpriseAgentActions";
 import { getItem, setItem } from "@/utils/prefixedStorage";
-import { getConnectionMetadata } from "@/utils/connectionMetadata";
 import { useSelector, useDispatch } from "react-redux";
 import {
   selectEnterpriseConnections,
   selectIsEnterpriseConfigured,
   selectEnterpriseClient,
+  selectActiveConfiguration,
   mergeColleagueMessages,
   addSentColleagueMessage,
   selectAllColleagueMessages,
@@ -50,6 +52,7 @@ interface UnifiedConnection {
 export default function App() {
     const app = useMountedApp();
     const dispatch = useDispatch();
+    const router = useRouter();
 
     const [messages, setMessages] = useState(app.messages);
     const [selectedConn, setSelectedConn] = useState<UnifiedConnection | null>(null);
@@ -59,12 +62,18 @@ export default function App() {
     const enterpriseConnections = useSelector(selectEnterpriseConnections);
     const isEnterpriseConfigured = useSelector(selectIsEnterpriseConfigured);
     const enterpriseClient = useSelector(selectEnterpriseClient);
+    const activeConfig = useSelector(selectActiveConfiguration);
     const allColleagueMessages = useSelector(selectAllColleagueMessages);
 
     // Enterprise chat send state
     const [enterpriseSendText, setEnterpriseSendText] = useState('');
     const [enterpriseSending, setEnterpriseSending] = useState(false);
     const enterpriseMsgEndRef = useRef<HTMLDivElement>(null);
+
+    // connectionId -> colleague name, for enterprise connections the Cloud Agent left unlabeled
+    // (it doesn't persist the label sent on the accept-side /connection-invitations call) —
+    // see EnterpriseAgentClient.getConnectionNames' comment for the full mechanism.
+    const [enterpriseConnectionNames, setEnterpriseConnectionNames] = useState<Record<string, string>>({});
 
     useEffect(() => {
         setMessages(app.messages);
@@ -77,6 +86,13 @@ export default function App() {
         }
     }, [isEnterpriseConfigured]);
 
+    useEffect(() => {
+        if (!isEnterpriseConfigured || !enterpriseClient) return;
+        enterpriseClient.getConnectionNames().then(result => {
+            if (result.success && result.data) setEnterpriseConnectionNames(result.data);
+        });
+    }, [isEnterpriseConfigured, enterpriseClient]);
+
     // Poll colleague messages every 5s when an enterprise connection is selected
     useEffect(() => {
         if (!isEnterpriseConfigured || !enterpriseClient || selectedConn?.mode !== 'enterprise') return;
@@ -84,7 +100,16 @@ export default function App() {
         let cancelled = false;
         async function poll() {
             if (cancelled || !enterpriseClient) return;
-            const since = allColleagueMessages[connId]?.at(-1)?.timestamp;
+            // Only advance the cursor from server-confirmed messages (real ids), never from our
+            // own optimistically-added "sent-*" placeholder (addSentColleagueMessage) — that one
+            // is timestamped with the browser's clock, not the server's. Mixing the two lets a
+            // clock-skewed browser clock produce a cursor newer than a genuinely later reply's
+            // server timestamp, which then gets silently filtered out by the server's `since`
+            // check on every subsequent poll — the reply is fetchable, just never asked for again.
+            const serverTimestamps = (allColleagueMessages[connId] || [])
+                .filter(m => !m.id?.startsWith('sent-'))
+                .map(m => m.timestamp);
+            const since = serverTimestamps.length > 0 ? Math.max(...serverTimestamps) : undefined;
             const result = await enterpriseClient.getColleagueMessages(since);
             if (!cancelled && result.success && result.data && result.data.length > 0) {
                 const forThis = result.data.filter(m => m.connectionId === connId);
@@ -176,14 +201,12 @@ export default function App() {
         setEnterpriseSending(false);
     }
 
-    // Build unified connection list
-    const personalFiltered = app.connections.filter(connection => {
-        const metadata = getConnectionMetadata(connection.host.toString());
-        return metadata?.establishedWithVCProof === true
-            || metadata?.isCAConnection === true
-            || connection.name?.includes('Certification Authority')
-            || !metadata;
-    });
+    // Build unified connection list — every established personal connection is messageable,
+    // matching connections.tsx's own "Established Connections" list (which shows all of them
+    // unfiltered). This used to only include CA/VC-proof-verified connections, silently hiding
+    // any other personal connection (e.g. a direct peer-to-peer test contact, or a company
+    // connection not made via VC proof) from the chat sidebar even though it was fully usable.
+    const personalFiltered = app.connections;
 
     const activeEnterpriseConns = enterpriseConnections.filter(c =>
         ['ConnectionResponseSent', 'ConnectionResponseReceived', 'ACTIVE', 'active'].includes(c.state)
@@ -196,13 +219,30 @@ export default function App() {
             name: c.name || 'Unknown Contact',
             personal: c
         })),
+        // Name resolution mirrors connections.tsx's "Established Connections" list — see that
+        // file's comment for why `label`/`goal` alone aren't reliable and enterpriseAgentName
+        // (from the applied ServiceConfiguration VC) is preferred, with document-access called
+        // out explicitly so it isn't shown under the same name as the company connection.
         ...activeEnterpriseConns.map(c => ({
             mode: 'enterprise' as ChatMode,
             id: c.connectionId,
-            name: c.label || c.connectionId.slice(0, 12),
+            name: c.goalCode === 'document-access'
+                ? 'Document Service'
+                : (activeConfig?.enterpriseAgentName || c.label || c.goal || enterpriseConnectionNames[c.connectionId] || c.connectionId.slice(0, 12)),
             enterprise: c
         }))
     ];
+
+    // Deep-link support: the Connections grid's "Message" action navigates here with
+    // ?connection=<hostDID|connectionId>. IDs are unique across both spaces (a DID string vs a
+    // UUID), so matching by id alone is enough — the &mode= param is informational only.
+    useEffect(() => {
+        if (!router.isReady || selectedConn) return;
+        const connParam = router.query.connection;
+        if (typeof connParam !== 'string') return;
+        const match = unifiedList.find(c => c.id === connParam);
+        if (match) selectConnection(match);
+    }, [router.isReady, router.query.connection, unifiedList, selectedConn]);
 
     function selectConnection(conn: UnifiedConnection) {
         setSelectedConn(conn);

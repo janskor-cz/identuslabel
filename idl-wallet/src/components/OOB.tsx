@@ -9,8 +9,9 @@ import { SecurityAlert } from "./SecurityAlert";
 import { InvitationPreviewModal } from "./InvitationPreviewModal";
 import { DisclosureLevel } from "../types/invitations";
 import { identifyCredentialType } from "@/utils/credentialSchemaExtractor";
-import { validateVerifiableCredential, parseInviterIdentity, safeBase64ParseJSON, detectInvitationFormat } from "../utils/vcValidation";
+import { validateVerifiableCredential, parseInviterIdentity, safeBase64ParseJSON, detectInvitationFormat, detectLiveVerifiableIdentityType, LiveVerifiableCredentialType } from "../utils/vcValidation";
 import { createVCProofAttachment } from "../utils/selectiveDisclosure";
+import { verifyAndRecordLiveIdentity } from "../utils/liveIdentityVerification";
 import { invitationStateManager } from '../utils/InvitationStateManager';
 import { getItem, setItem, removeItem, getKeysByPattern } from '@/utils/prefixedStorage';
 import { verifyCredentialStatus } from '@/utils/credentialStatus';
@@ -21,8 +22,9 @@ import { parseCACredentialFromInvitation, validateCACredential, ValidatedCAConfi
 import { parseCompanyCredentialFromInvitation, validateCompanyCredential, ValidatedCompanyConfig, verifyCompanyIssuer } from '@/utils/companyValidation';
 import { isCAVerified, getPinnedCA, pinCA, verifyPinnedCA, hashCredential, isCompanyVerified, getPinnedCompany, pinCompany, verifyPinnedCompany } from '@/utils/prefixedStorage';
 import { getCloudWalletConfig, verifyServiceConfigNotRevoked, CloudWalletConfig, isCloudWalletConfigValid, getCloudWalletErrorMessage } from '@/utils/cloudWalletConfig';
-import { saveConnectionMetadata, getConnectionMetadata } from '@/utils/connectionMetadata';
+import { saveConnectionMetadata, getConnectionMetadata, recordIdentityVerificationResult, WalletType } from '@/utils/connectionMetadata';
 import { CA_CAPABILITIES } from '@/config/serviceTrust';
+import { companyEmployeePortalCapabilityKey } from '@/utils/connectionAccessTargets';
 import { EnterpriseAgentClient } from '@/utils/EnterpriseAgentClient';
 import { createLongFormPrismDID, refreshCredentials } from '@/actions';
 import QRCode from 'react-qr-code';
@@ -46,6 +48,14 @@ async function connectionExists(
         return conn.host.toString() === hostDID.toString() &&
                conn.receiver.toString() === receiverDID.toString();
     });
+}
+
+// Extract a display name from an inviter's attached RealPersonIdentity VC, if present.
+// Shared by the proposed-connection-name computation and the accept-time fallback chain
+// (OOB.tsx's onConnectionHandleClick) so both stay in sync.
+function extractVcBasedName(inviterIdentity: any): string | null {
+    const { firstName, lastName } = inviterIdentity?.revealedData || {};
+    return firstName && lastName ? `${firstName} ${lastName}` : null;
 }
 
 // Helper function to copy text to clipboard with fallback
@@ -77,6 +87,89 @@ async function copyToClipboard(text: string): Promise<void> {
         // Show user feedback that copy failed
         alert('Copy failed. Please copy the text manually.');
         throw error;
+    }
+}
+
+// Send OUR OWN VC proof to `conn`'s remote party as a follow-up BasicMessage-style DIDComm
+// message. Extracted so it can be called either immediately (non-RealPerson invitations, or a
+// RealPerson invitation once live-verified — see performLiveIdentityVerificationAndMaybeRespond
+// below) with identical behavior to what this used to do inline. Never throws — a failed send is
+// logged and swallowed, matching this codebase's existing "non-fatal, connection still
+// established" convention for this exact message.
+async function sendOwnVCProofMessage(agent: SDK.Agent, conn: SDK.Domain.DIDPair, vcProofData: any): Promise<void> {
+    try {
+        const vcMessage = new SDK.Domain.Message(
+            JSON.stringify({ vcProof: vcProofData }),
+            undefined,
+            "https://identuslabel.cz/protocols/vc-proof-sharing/1.0/proof",
+            conn.host,
+            conn.receiver,
+        );
+        await agent.sendMessage(vcMessage);
+        console.log('✅ [RESPONSE] VC proof sent to inviter as follow-up message');
+    } catch (vcError: any) {
+        console.warn('⚠️ [RESPONSE] VC proof send failed (non-fatal — connection still established):', vcError.message);
+    }
+}
+
+// Post-connection live identity verification for a RealPerson- or SecurityClearance-typed
+// invitation (see utils/liveIdentityVerification.ts for the cryptographic design and per-type
+// trust-anchoring; `liveVerifiableType` selects which). Deliberately NOT awaited by its callers
+// below — it performs a live challenge/response round trip that requires a human on the inviter's
+// side to approve a presentation request (see actions/index.ts's acceptPresentationRequest, the
+// existing generic responder this relies on), which can take anywhere from seconds to minutes.
+// Blocking the Accept button on that would be a poor UX for a step whose entire purpose is a
+// soft, best-effort upgrade of trust state — the connection is already fully established by the
+// time this runs.
+//
+// Gates the "auto-disclose our own identity back" flow (the vc-proof-sharing/1.0/proof message):
+// for a live-verifiable-typed invitation, our own identity is only sent back once the inviter's
+// live identity has been verified — never on the strength of the pre-connection preview alone.
+// See CLAUDE.md task's "Gate the existing auto-disclosure" requirement.
+//
+// Fail-closed and non-throwing throughout: any error leaves the connection's stored
+// identityVerificationStatus as 'failed' (never silently 'verified'), and never sends the VC
+// proof back on anything other than an explicit `verified: true` result.
+async function performLiveIdentityVerificationAndMaybeRespond(
+    agent: SDK.Agent,
+    conn: SDK.Domain.DIDPair,
+    walletType: WalletType,
+    previewIdentity: any,
+    vcProofData: any,
+    liveVerifiableType: LiveVerifiableCredentialType
+): Promise<void> {
+    const hostDID = conn.host.toString();
+
+    const subjectDID: string | undefined =
+        previewIdentity?.validationResult?.subjectDID ||
+        previewIdentity?.vcProof?.subjectDID ||
+        previewIdentity?.vcProof?.credentialSubject?.id ||
+        previewIdentity?.revealedData?.id;
+    const uniqueId: string | undefined = previewIdentity?.revealedData?.uniqueId;
+
+    if (!subjectDID) {
+        console.warn('⚠️ [LIVE-VERIFY] No subject DID available from the preview identity — cannot live-verify, leaving connection unverified');
+        try {
+            recordIdentityVerificationResult(hostDID, walletType, {
+                identityVerificationStatus: 'failed',
+                identityVerificationError: 'No subject DID available from the pre-connection preview',
+            });
+        } catch { /* non-fatal */ }
+        return;
+    }
+
+    // Shared "record pending → verify → record result" sequence (see
+    // liveIdentityVerification.ts's verifyAndRecordLiveIdentity) — this function only layers the
+    // "maybe send our own identity back" step on top of it.
+    const result = await verifyAndRecordLiveIdentity(agent, hostDID, conn.receiver, walletType, subjectDID, uniqueId, liveVerifiableType);
+
+    if (result.verified) {
+        console.log('✅ [LIVE-VERIFY] Inviter identity live-verified — safe to disclose our own identity back');
+        if (vcProofData) {
+            await sendOwnVCProofMessage(agent, conn, vcProofData);
+        }
+    } else {
+        console.warn('⚠️ [LIVE-VERIFY] Inviter identity live verification FAILED — withholding our own identity disclosure:', result.error);
     }
 }
 
@@ -395,7 +488,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
             }
 
             // Store VC proof data for later use in RFC structure
-            let vcProofData = null;
+            let vcProofData: any = null;
             if (includeVCProof && selectedCredential && selectedFields.length > 0) {
                 console.log(`🎫 Creating VC proof with disclosure level: ${disclosureLevel}`);
                 console.log(`📋 Selected fields: [${selectedFields.join(', ')}]`);
@@ -450,7 +543,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
             // Add requests_attach if we have protocol requests (RFC 0434 compliant)
             if (vcProofData || includeVCRequest) {
-                const requestsAttach = [];
+                const requestsAttach: any[] = [];
 
                 // Add VC proof as inline data if present
                 if (includeVCProof && vcProofData) {
@@ -817,6 +910,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
                 setInviterLabel('');
                 setShowPreviewModal(false);
                 setParsedInvitationData(null);
+                setAlias(undefined);
             }
         }
     }, [oob, isParsing]);
@@ -835,9 +929,14 @@ export const OOB: React.FC<OOBProps> = (props) => {
                 revealedDataKeys: Object.keys(inviterIdentity.revealedData || {}),
                 revealedDataLength: Object.keys(inviterIdentity.revealedData || {}).length
             });
+            // Seed the connection name shown (and editable) in InvitationPreviewModal's final
+            // confirmation step — same priority chain the accept-time fallback in
+            // onConnectionHandleClick uses, so an unedited value round-trips unchanged.
+            const vcBasedName = extractVcBasedName(inviterIdentity);
+            setAlias(vcBasedName || companyConfig?.companyName || inviterLabel || "Unknown Connection");
             setShowPreviewModal(true);
         }
-    }, [inviterIdentity, parsedInvitationData, showPreviewModal, isAcceptingConnection]);
+    }, [inviterIdentity, parsedInvitationData, showPreviewModal, isAcceptingConnection, companyConfig, inviterLabel]);
 
     // Parse proper DIDComm v2.0 invitation format and raw peer DIDs
     const parseProperDIDCommInvitation = (url: string) => {
@@ -933,6 +1032,31 @@ export const OOB: React.FC<OOBProps> = (props) => {
     // ✅ PHASE 1: Separated connection acceptance function
     // This ONLY handles connection creation, verification already done automatically
     // ✅ PHASE 3: Added invitation state tracking for connection acceptance
+    //
+    // 🔒 SECURITY DESIGN: this is the ONLY function that actually calls
+    // agent.createNewPeerDID / agent.connectionManager.addConnection / agent.acceptInvitation to
+    // establish a connection, so it is where the RealPerson trust model is enforced. That model
+    // is NO LONGER "block Accept until the VC validates" — see the NOTE immediately below for why
+    // — it is instead: let the connection establish on the (still signature + issuer-pinning
+    // checked, but not holder-bound) preview, then live-verify the inviter's identity AFTER
+    // connecting and gate what THIS wallet discloses back on that live result. See
+    // performLiveIdentityVerificationAndMaybeRespond (top of this file) for where that happens in
+    // the RFC 0434 branch below.
+    //
+    // NOTE: this used to hard-block connection establishment for RealPerson-typed invitations
+    // whose vc-proof-0 hadn't passed a pre-connection holder-binding check. That check has been
+    // removed (see vcValidation.ts's "NOTE ON HOLDER BINDING" doc comment) — holder binding
+    // cannot be proven before a connection exists, so a RealPerson-typed invitation is now
+    // allowed to connect on a lightweight, unverified preview alone. Trust is established AFTER
+    // connection via a live, nonce-bound challenge-response (see above) — a failed or never-
+    // completed live verification simply leaves the connection's identity badge as "unverified";
+    // it does not block or undo the connection itself.
+    //
+    // A RealPerson VC that fails even its own signature/issuer-pinning check (the still-blocking
+    // checks in vcValidation.ts) never reaches `isVerified: true` either — `inviterIdentity.
+    // validationResult.errors` will be non-empty and the preview UI (InvitationPreviewModal.tsx)
+    // already surfaces that; this handler does not additionally re-check it here, matching the
+    // "preview only, not gate" design.
     async function onConnectionHandleClick() {
         if (!oob) {
             return;
@@ -1024,6 +1148,21 @@ export const OOB: React.FC<OOBProps> = (props) => {
 
             // Priority: manual alias > VC name > company name > invitation label > fallback
             let connectionLabel = alias || vcBasedName || companyConfig?.companyName || inviterLabel || "Unknown Connection";
+
+            // service-access/1.0 capabilities to record for this connection at establishment
+            // time (see connectionMetadata.ts's `capabilities` field and the 4 saveConnectionMetadata
+            // call sites below) — CA connections get CA_CAPABILITIES; company connections get the
+            // single capability key company-admin-portal registers for that company's employee
+            // portal (see connectionAccessTargets.ts's companyEmployeePortalCapabilityKey doc
+            // comment for why this exact derivation matches the server's naming convention).
+            // Applies to BOTH walletType branches ('local' and 'cloud') — this was previously
+            // CA-only regardless of wallet type, which left personal ('local') wallet company
+            // connections with no capability to request access with at all.
+            const companyCapabilityKey = isCompanyInvitation ? companyEmployeePortalCapabilityKey(companyConfig?.companyName) : null;
+            if (isCompanyInvitation && !companyCapabilityKey) {
+                console.warn('⚠️ [METADATA] Company invitation had no usable companyName to derive an employee-portal capability key from — Request Access will not be available for this connection');
+            }
+            const companyCapabilities = companyCapabilityKey ? [companyCapabilityKey] : undefined;
 
             // ✅ PHASE 1: Extract invitation ID for state tracking
             let invitationId = null;
@@ -1137,7 +1276,8 @@ export const OOB: React.FC<OOBProps> = (props) => {
                             establishedWithVCProof: !!inviterIdentity?.vcProof,
                             vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
                             isCAConnection: isCAInvitation || undefined,
-                            capabilities: isCAInvitation ? CA_CAPABILITIES : undefined
+                            isCompanyConnection: isCompanyInvitation || undefined,
+                            capabilities: isCAInvitation ? CA_CAPABILITIES : companyCapabilities
                         });
                         console.log('✅ [METADATA] Saved local wallet metadata for accepted connection (peer-DID path)');
                         if (createdPrismDid) {
@@ -1152,7 +1292,8 @@ export const OOB: React.FC<OOBProps> = (props) => {
                             establishedWithVCProof: !!inviterIdentity?.vcProof,
                             vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
                             isCAConnection: isCAInvitation || undefined,
-                            capabilities: isCAInvitation ? CA_CAPABILITIES : undefined
+                            isCompanyConnection: isCompanyInvitation || undefined,
+                            capabilities: isCAInvitation ? CA_CAPABILITIES : companyCapabilities
                         });
                         console.log('✅ [METADATA] Saved cloud wallet metadata for accepted connection (peer-DID path)');
                     }
@@ -1270,7 +1411,8 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     establishedWithVCProof: !!inviterIdentity?.vcProof,
                                     vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
                                     isCAConnection: isCAInvitation || undefined,
-                            capabilities: isCAInvitation ? CA_CAPABILITIES : undefined
+                                    isCompanyConnection: isCompanyInvitation || undefined,
+                                    capabilities: isCAInvitation ? CA_CAPABILITIES : companyCapabilities
                                 });
                                 console.log('✅ [METADATA] Saved local wallet metadata for accepted connection (Cloud Agent path)');
                                 if (createdPrismDid) {
@@ -1285,7 +1427,8 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     establishedWithVCProof: !!inviterIdentity?.vcProof,
                                     vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
                                     isCAConnection: isCAInvitation || undefined,
-                            capabilities: isCAInvitation ? CA_CAPABILITIES : undefined
+                                    isCompanyConnection: isCompanyInvitation || undefined,
+                                    capabilities: isCAInvitation ? CA_CAPABILITIES : companyCapabilities
                                 });
                                 console.log('✅ [METADATA] Saved cloud wallet metadata for accepted connection (Cloud Agent path)');
                             }
@@ -1378,6 +1521,35 @@ export const OOB: React.FC<OOBProps> = (props) => {
                             } else if (isCompanyInvitation && companyAlreadyPinned) {
                                 console.log('✅ [COMPANY INIT] Company identity re-verified successfully');
                                 alert(`✅ Reconnected to known Company:\n\n${companyConfig?.companyName}\n\nCompany identity verified against saved pin.`);
+                            }
+
+                            // ✅ LIVE IDENTITY VERIFICATION (CA/Company): TOFU pinning above only proves
+                            // "this DID is the same one we saw before" — it never cryptographically proves
+                            // the peer at the other end of THIS connection currently controls that DID. Once
+                            // the connection is established, send a fresh present-proof challenge back to
+                            // the CA/company's own peer DID and verify a live-signed response of their own
+                            // CertificationAuthorityIdentity/CompanyIdentity VC — same round trip
+                            // RealPerson/SecurityClearance invitations already get on the personal-wallet
+                            // RFC 0434 path (see performLiveIdentityVerificationAndMaybeRespond above), just
+                            // without that path's "send our own identity back" step: there is no equivalent
+                            // auto-disclosure-back concept here — the wallet's own identity disclosure to the
+                            // CA happens via the separate, already-working service-access/1.0 protocol.
+                            // Fire-and-forget for the same reason as every other call site in this file: the
+                            // responder may take a moment, and this is a soft, best-effort trust upgrade that
+                            // must never block the Accept flow. Requires the server-side responder (CA's/
+                            // company's Cloud Agent answering an inbound request-presentation) to be live —
+                            // until then this simply times out and leaves the connection unverified, same as
+                            // any other live-verification failure.
+                            if (isCAInvitation && caConfig?.caDID) {
+                                void verifyAndRecordLiveIdentity(
+                                    agent, connection.host.toString(), connection.receiver, 'cloud',
+                                    caConfig.caDID, undefined, 'CertificationAuthorityIdentity'
+                                );
+                            } else if (isCompanyInvitation && companyConfig?.companyDID) {
+                                void verifyAndRecordLiveIdentity(
+                                    agent, connection.host.toString(), connection.receiver, 'cloud',
+                                    companyConfig.companyDID, undefined, 'CompanyIdentity'
+                                );
                             }
 
                             // ✅ PHASE 3: Mark connection as established
@@ -1518,10 +1690,13 @@ export const OOB: React.FC<OOBProps> = (props) => {
                         console.warn('⚠️ [MEDIATOR] Registration check error:', mediatorError);
                     }
 
-                    // Step 2: if the user also selected a VC to share back, send it as a follow-up
-                    // BasicMessage once the DIDPair has been persisted by the SDK (up to ~10 s).
-                    if (vcProofData) {
-                        console.log('📤 [RESPONSE] VC proof selected — waiting for connection then sending...');
+                    // Step 2: locate our side of the freshly-persisted DIDPair (up to ~10 s) —
+                    // needed either to send a VC proof back and/or to run post-connection live
+                    // identity verification of the inviter (RealPerson- or SecurityClearance-typed
+                    // invitations only; see performLiveIdentityVerificationAndMaybeRespond above).
+                    const liveVerifiableType = detectLiveVerifiableIdentityType(inviterIdentity);
+                    if (liveVerifiableType !== null || vcProofData) {
+                        console.log('📤 [RESPONSE] Waiting for connection to be persisted...');
                         let ourConnection: SDK.Domain.DIDPair | undefined;
                         for (let attempt = 0; attempt < 10; attempt++) {
                             await new Promise(r => setTimeout(r, 1000));
@@ -1532,21 +1707,17 @@ export const OOB: React.FC<OOBProps> = (props) => {
                         }
 
                         if (ourConnection) {
-                            try {
-                                const vcMessage = new SDK.Domain.Message(
-                                    JSON.stringify({ vcProof: vcProofData }),
-                                    undefined,
-                                    "https://identuslabel.cz/protocols/vc-proof-sharing/1.0/proof",
-                                    ourConnection.host,
-                                    ourConnection.receiver,
+                            if (liveVerifiableType !== null) {
+                                // Fire-and-forget — see performLiveIdentityVerificationAndMaybeRespond's
+                                // doc comment for why this deliberately isn't awaited here.
+                                void performLiveIdentityVerificationAndMaybeRespond(
+                                    agent, ourConnection, walletType, inviterIdentity, vcProofData, liveVerifiableType
                                 );
-                                await agent.sendMessage(vcMessage);
-                                console.log('✅ [RESPONSE] VC proof sent to inviter as follow-up message');
-                            } catch (vcError: any) {
-                                console.warn('⚠️ [RESPONSE] VC proof send failed (non-fatal — connection still established):', vcError.message);
+                            } else if (vcProofData) {
+                                await sendOwnVCProofMessage(agent, ourConnection, vcProofData);
                             }
                         } else {
-                            console.warn('⚠️ [RESPONSE] Could not find new connection in pluto after 10 s — VC proof not sent');
+                            console.warn('⚠️ [RESPONSE] Could not find new connection in pluto after 10 s — VC proof / live verification not sent');
                         }
                     }
 
@@ -1606,6 +1777,24 @@ export const OOB: React.FC<OOBProps> = (props) => {
                         console.warn('⚠️ [MEDIATOR] Failed to register peer DID with mediator:', mediatorError);
                     }
 
+                    // Send the invitee's VC proof as a follow-up message here too — this path
+                    // is reached whenever the SDK's acceptInvitation() throws (e.g. mediator
+                    // 500), and previously skipped this step entirely, silently dropping the
+                    // VC proof even though the connection itself was established successfully.
+                    // For a RealPerson- or SecurityClearance-typed invitation, this is gated
+                    // behind live identity verification of the inviter — same rationale as the
+                    // primary RFC 0434 path above (see performLiveIdentityVerificationAndMaybeRespond's
+                    // doc comment).
+                    const fallbackLiveVerifiableType = detectLiveVerifiableIdentityType(inviterIdentity);
+                    if (fallbackLiveVerifiableType !== null) {
+                        void performLiveIdentityVerificationAndMaybeRespond(
+                            agent, didPair, walletType, inviterIdentity, vcProofData, fallbackLiveVerifiableType
+                        );
+                    } else if (vcProofData) {
+                        console.log('📤 [RESPONSE] VC proof selected — sending on manually-created connection...');
+                        await sendOwnVCProofMessage(agent, didPair, vcProofData);
+                    }
+
                     // ✅ PHASE 3: Mark connection as established (fallback path)
                     if (invitationId) {
                         try {
@@ -1630,6 +1819,9 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     setHasVCRequest(false);
                     setShowPreviewModal(false);
                     setConnectedName(connectionLabel);
+                    setSelectedVCForResponse(null);
+                    setResponseFields([]);
+                    setResponseDisclosureLevel('minimal');
                 }
             } else if (invitation.invitation) {
                 // Handle other invitation formats (legacy, manual)
@@ -1833,6 +2025,10 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     console.log("✅ Found VC proof in RFC-compliant attachment:", vcProof);
 
                                     // Validate the VC proof using cryptographic verification
+                                    // (signature + trusted-issuer pinning). This is a pre-
+                                    // connection PREVIEW only — see vcValidation.ts's "NOTE ON
+                                    // HOLDER BINDING" doc comment for why no holder-binding check
+                                    // is performed here; that happens post-connection instead.
                                     const validationResult = await validateVerifiableCredential(vcProof, app.agent.instance, app.agent.instance?.pluto);
                                     console.log('VC Proof validation result:', validationResult);
 
@@ -1892,7 +2088,11 @@ export const OOB: React.FC<OOBProps> = (props) => {
                 }
                 const vcProof = vcProofResult.data;
 
-                // Validate the VC proof using cryptographic verification
+                // Validate the VC proof using cryptographic verification (signature + trusted-
+                // issuer pinning). This legacy format (kept for backward-compat parsing only —
+                // nothing in this codebase generates it anymore) has no `id` field either way, and
+                // no holder-binding check is performed here regardless — see vcValidation.ts's
+                // "NOTE ON HOLDER BINDING" doc comment.
                 const validationResult = await validateVerifiableCredential(vcProof, app.agent.instance, app.agent.instance?.pluto);
 
                 // Parse inviter identity from VC proof
@@ -1914,7 +2114,14 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     revealedData: {},
                     validationResult: {
                         isValid: false,
-                        errors: ['No identity verification provided'],
+                        // Not attaching a VC proof is normal for a plain DIDComm connection request —
+                        // it is not a validation failure, so this must stay a warning (non-blocking)
+                        // rather than an error. Populating `errors` here would disable Accept for
+                        // every generic connection request in InvitationPreviewModal's
+                        // hasValidationErrors check, which is reserved for a proof that was actually
+                        // supplied and failed cryptographic verification.
+                        errors: [],
+                        warnings: ['No identity verification provided'],
                         issuer: null,
                         issuedAt: null,
                         expiresAt: null
@@ -1999,23 +2206,6 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     </div>
                                 )}
 
-                                {/* Your Connection Alias Input */}
-                                <div>
-                                    <label className="block text-sm font-semibold text-slate-300 mb-2">
-                                        Your Connection Alias (Optional)
-                                    </label>
-                                    <input
-                                        className="w-full p-4 text-sm text-white bg-slate-800/50 rounded-xl border border-slate-700/50 focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 placeholder-slate-500 transition-colors"
-                                        placeholder="e.g., Alice's Issuer Wallet, Business Partner, etc."
-                                        type="text"
-                                        value={alias ?? ""}
-                                        onChange={(e) => { setAlias(e.target.value) }}
-                                    />
-                                    <p className="text-xs text-slate-400 mt-2">
-                                        Add your own label for this connection (will use inviter's label if empty)
-                                    </p>
-                                </div>
-
                                 {/* OOB Invitation Input */}
                                 <div>
                                     <label className="block text-sm font-semibold text-slate-300 mb-2">
@@ -2034,18 +2224,32 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                         {showScanner ? '❌ Close Scanner' : '📷 Scan Invitation QR Code'}
                                     </button>
 
-                                    {/* Inline QR Scanner */}
+                                    {/* Full-screen QR Scanner overlay — fills the viewport like a
+                                        native camera app instead of a small box inside the modal
+                                        (previous inline rendering was cramped on mobile) */}
                                     {showScanner && (
-                                        <div className="mb-3 rounded-xl overflow-hidden border-2 border-cyan-500/50">
-                                            <Scanner
-                                                allowedTypes={['oob-invitation', 'ca-identity-verification', 'peer-did'] as MessageType[]}
-                                                onScan={handleScan}
-                                                onError={handleScanError}
-                                                preferredCamera="back"
-                                                scanMode="single"
-                                                pauseAfterScan={true}
-                                                showOverlay={true}
-                                            />
+                                        <div className="fixed inset-0 z-[60] bg-black flex flex-col">
+                                            <div className="flex items-center justify-between px-4 py-3 bg-black/90">
+                                                <h3 className="text-white font-semibold">📷 Scan Invitation QR Code</h3>
+                                                <button
+                                                    onClick={() => setShowScanner(false)}
+                                                    className="text-white text-2xl w-10 h-10 flex items-center justify-center rounded-full hover:bg-white/10 transition-colors"
+                                                    aria-label="Close scanner"
+                                                >
+                                                    ✕
+                                                </button>
+                                            </div>
+                                            <div className="flex-1 min-h-0">
+                                                <Scanner
+                                                    allowedTypes={['oob-invitation', 'ca-identity-verification', 'peer-did'] as MessageType[]}
+                                                    onScan={handleScan}
+                                                    onError={handleScanError}
+                                                    preferredCamera="back"
+                                                    scanMode="single"
+                                                    pauseAfterScan={true}
+                                                    showOverlay={true}
+                                                />
+                                            </div>
                                         </div>
                                     )}
 
@@ -2332,6 +2536,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
                     setInviterIdentity(null);
                     setInviterLabel('');
                     setOOB('');
+                    setAlias(undefined);
                     // ✅ NEW: Also clear response VC selection
                     setSelectedVCForResponse(null);
                     setResponseFields([]);
@@ -2352,6 +2557,10 @@ export const OOB: React.FC<OOBProps> = (props) => {
                 inviterIdentity={inviterIdentity}
                 inviterLabel={inviterLabel}
                 invitationData={parsedInvitationData}
+                // Connection name — editable at this final confirmation step, pre-filled with
+                // the same auto-derived name onConnectionHandleClick's fallback chain would use
+                alias={alias ?? ''}
+                onAliasChange={setAlias}
                 // ✅ NEW: Wire up credential selection props for response
                 availableCredentials={availableCredentials}
                 selectedVCForRequest={selectedVCForResponse}

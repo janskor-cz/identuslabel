@@ -233,7 +233,7 @@ async function handleSubmit() {
  * @returns {Promise<boolean>} True if issued, false if timeout
  */
 async function pollForVCIssuance(recordId) {
-    const maxAttempts = 30; // 30 attempts
+    const maxAttempts = 60; // 60 attempts
     const interval = 2000; // 2 seconds
     let attempts = 0;
 

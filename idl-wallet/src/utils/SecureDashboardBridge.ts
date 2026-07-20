@@ -20,11 +20,21 @@
  * Updated: October 31, 2025
  */
 
+import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { base64url } from 'jose';
 import { decryptMessage, EncryptedMessageBody } from './messageEncryption';
 import { getItem } from './prefixedStorage';
 import { findKeyByFingerprintInPluto, extractKeysFromPrismDID } from './plutoKeyExtractor';
 import { storeDocument, StoredDocument, DocumentStatus } from './documentStorage';
+import { getSecurityKeyPrivateMaterial } from './securityKeyStorage';
+import { store } from '../reducers/store';
+
+// This module runs as plain (non-React) code, so it has no hook access to Redux state.
+// It reads the store singleton directly to reach the wallet seed for on-demand key
+// re-derivation - same window/React tree as the main wallet (this bridge is initialized
+// from _app.tsx, not a separate window.open page; the "separate window" in this flow is
+// an external CA-portal dashboard that opens this wallet window).
+const apollo = new SDK.Apollo();
 
 // Module-level agent reference for Pluto fallback
 let _sdkAgent: any = null;
@@ -308,9 +318,11 @@ async function handleDecryptRequest(
       console.log(`🔑 [SecureDashboardBridge] Found ${keys.length} keys in localStorage`);
 
       for (const key of keys) {
-        if (key?.x25519?.privateKeyBytes && key?.x25519?.publicKeyBytes) {
+        if (!key?.x25519?.publicKeyBytes) continue;
+        const material = getSecurityKeyPrivateMaterial(key, apollo, store.getState().app.defaultSeed);
+        if (material) {
           keyPairsToTry.push({
-            privateKeyBytes: base64url.decode(key.x25519.privateKeyBytes),
+            privateKeyBytes: base64url.decode(material.x25519PrivateKeyBytes),
             publicKeyBytes: base64url.decode(key.x25519.publicKeyBytes),
             source: `localStorage:${key.keyId} (pubKey: ${key.x25519.publicKeyBytes.substring(0, 12)}...)`
           });
@@ -470,17 +482,23 @@ async function getEd25519KeyFromPluto(): Promise<Uint8Array | null> {
       const activeKeyId = securityKeysData.activeKeyId;
       const keys = securityKeysData.keys || [];
       const activeKey = keys.find((k: any) => k.keyId === activeKeyId);
+      const seed = store.getState().app.defaultSeed;
 
-      if (activeKey?.ed25519?.privateKeyBytes) {
-        console.log('🔑 [SecureDashboardBridge] Using localStorage Ed25519 key');
-        return base64url.decode(activeKey.ed25519.privateKeyBytes);
+      if (activeKey?.ed25519?.publicKeyBytes) {
+        const material = getSecurityKeyPrivateMaterial(activeKey, apollo, seed);
+        if (material) {
+          console.log('🔑 [SecureDashboardBridge] Using localStorage Ed25519 key');
+          return base64url.decode(material.ed25519PrivateKeyBytes);
+        }
       }
 
       // If active key doesn't have Ed25519, try all keys
       for (const key of keys) {
-        if (key?.ed25519?.privateKeyBytes) {
+        if (!key?.ed25519?.publicKeyBytes) continue;
+        const material = getSecurityKeyPrivateMaterial(key, apollo, seed);
+        if (material) {
           console.log('🔑 [SecureDashboardBridge] Using fallback localStorage Ed25519 key:', key.keyId);
-          return base64url.decode(key.ed25519.privateKeyBytes);
+          return base64url.decode(material.ed25519PrivateKeyBytes);
         }
       }
     } catch (parseError) {

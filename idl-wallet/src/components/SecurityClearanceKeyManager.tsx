@@ -13,13 +13,16 @@ import {
   deleteSecurityKey,
   exportPublicKey,
   updateKeyUsage,
-  generateFingerprint
+  generateFingerprint,
+  getNextSecurityClearanceKeyIndex
 } from '../utils/securityKeyStorage';
-import * as sodium from 'libsodium-wrappers';
+import { useMountedApp } from '@/reducers/store';
+import { deriveSecurityClearanceKeyPair } from '../utils/KeyProvider';
 
 const apollo = new SDK.Apollo();
 
 export function SecurityClearanceKeyManager() {
+  const app = useMountedApp();
   const [keys, setKeys] = useState<SecurityKey[]>([]);
   const [activeKey, setActiveKey] = useState<SecurityKey | undefined>();
   const [isGenerating, setIsGenerating] = useState(false);
@@ -40,55 +43,41 @@ export function SecurityClearanceKeyManager() {
 
   const handleGenerateKey = async () => {
     if (isGenerating) return;
+    if (!app.defaultSeed) {
+      alert('Wallet seed not ready yet. Please wait for wallet to finish initializing.');
+      return;
+    }
 
     setIsGenerating(true);
     try {
-      // Ensure libsodium is ready
-      await sodium.ready;
+      // Derive Ed25519 + X25519 from the wallet's own seed at a dedicated derivation
+      // path, instead of a fresh throwaway random mnemonic each time. Apollo's X25519
+      // branch derives the Ed25519 root at that path internally and birationally maps
+      // it, so both curves come from one genuinely matched identity (previously the
+      // X25519 key was derived independently via libsodium from a different, unrelated
+      // Ed25519 keypair and did not correspond to the stored Ed25519 public key).
+      //
+      // Each click uses the next unused keyIndex so distinct clicks yield genuinely
+      // distinct key material (a fixed index would make every click regenerate the
+      // exact same key, since derivation from a given seed is deterministic).
+      const keyIndex = getNextSecurityClearanceKeyIndex();
+      const { ed25519: ed25519PrivateKey, x25519: x25519PrivateKey } = deriveSecurityClearanceKeyPair(apollo, app.defaultSeed, keyIndex);
 
-      // Step 1: Generate Ed25519 key pair using SDK Apollo
-      const mnemonics = apollo.createRandomMnemonics();
-      const seed = apollo.createSeed(mnemonics, "security-clearance-seed");
+      // Only public keys/fingerprints are persisted - private key bytes are never
+      // written to storage; they're re-derived on demand via getSecurityKeyPrivateMaterial().
+      const ed25519PublicKeyB64 = jose.base64url.encode(ed25519PrivateKey.publicKey().value);
+      const x25519PublicKeyB64 = jose.base64url.encode(x25519PrivateKey.publicKey().value);
 
-      const ed25519PrivateKey = apollo.createPrivateKey({
-        type: SDK.Domain.KeyTypes.EC,
-        curve: SDK.Domain.Curve.ED25519,
-        seed: Array.from(seed.value).map(b => b.toString(16).padStart(2, '0')).join(''),
-      });
-
-      const ed25519PublicKey = ed25519PrivateKey.publicKey();
-
-      // Step 2: Derive X25519 key pair from Ed25519 seed using libsodium
-      // libsodium requires exactly 32 bytes for crypto_sign_seed_keypair
-      // SDK's createSeed() may return 64 bytes - we need to truncate to 32
-      const seedBytes = new Uint8Array(seed.value).slice(0, 32);
-
-      // Generate proper libsodium Ed25519 keypair from seed (for correct key derivation)
-      const libsodiumEd25519Keypair = sodium.crypto_sign_seed_keypair(seedBytes);
-
-      // Derive X25519 keys from Ed25519 keys
-      const x25519PrivateKey = sodium.crypto_sign_ed25519_sk_to_curve25519(libsodiumEd25519Keypair.privateKey);
-      const x25519PublicKey = sodium.crypto_sign_ed25519_pk_to_curve25519(libsodiumEd25519Keypair.publicKey);
-
-      // Step 3: Convert all keys to base64url for storage
-      const ed25519PrivateKeyB64 = jose.base64url.encode(ed25519PrivateKey.value);
-      const ed25519PublicKeyB64 = jose.base64url.encode(ed25519PublicKey.value);
-      const x25519PrivateKeyB64 = jose.base64url.encode(x25519PrivateKey);
-      const x25519PublicKeyB64 = jose.base64url.encode(x25519PublicKey);
-
-      // Step 4: Generate fingerprints for both keys
       const ed25519Fingerprint = generateFingerprint(ed25519PublicKeyB64);
       const x25519Fingerprint = generateFingerprint(x25519PublicKeyB64);
 
-      // Step 5: Store dual-key in localStorage
       const newKey = await addSecurityKeyDual(
-        ed25519PrivateKeyB64,
         ed25519PublicKeyB64,
         ed25519Fingerprint,
-        x25519PrivateKeyB64,
         x25519PublicKeyB64,
         x25519Fingerprint,
-        newKeyLabel || undefined
+        newKeyLabel || undefined,
+        keyIndex
       );
 
       console.log('✅ Generated new dual-key security clearance key:', {
