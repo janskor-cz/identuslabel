@@ -4,6 +4,12 @@ export interface PendingAccessRequest {
   target: string;
   label: string;
   icon: string;
+  // Empty string momentarily, between the modal opening and sendProtocolAccessRequest resolving
+  // with the id it actually put on the wire — see requestConnectionAccess.
+  requestId: string;
+  // Set once a service-access/1.0/error arrives whose `thid` matches requestId — see
+  // GlobalGrantWatcher in _app.tsx. Absent while still waiting.
+  error?: { code: string; message: string };
 }
 
 interface CAPortalContextValue {

@@ -278,6 +278,15 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
 
   if (!isOpen) return null;
 
+  // 🔒 SECURITY: `alias` is not just a local display note — it is sent on the wire as our own
+  // self-declared name (HandshakeRequest.fromOutOfBand's `label`) AND used as the local DIDPair
+  // name (see OOB.tsx's onConnectionHandleClick doc comment). A blank alias used to silently fall
+  // through to the literal string "Unknown Connection" on both sides of the connection once sent
+  // — misleading to the inviter and to the invitee's own Connections list. Require a non-blank,
+  // non-whitespace-only value here instead of ever falling back to a placeholder that then gets
+  // treated as if the user had chosen it.
+  const isAliasBlank = !alias || alias.trim().length === 0;
+
   const handleAccept = async () => {
     setIsAccepting(true);
     try {
@@ -416,22 +425,36 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
               </div>
             </div>
 
-            {/* Connection Name — editable here, at the final confirmation step */}
+            {/* Connection Name — editable here, at the final confirmation step.
+                NOTE: this value is NOT just a private local note — the SDK's
+                HandshakeRequest.fromOutOfBand() sends it as `label` on the outgoing
+                connections/1.0/request, so the inviter sees exactly what's typed here
+                as your self-declared name. Copy below must make that explicit. */}
             <div className="space-y-2">
               <label htmlFor="connection-alias" className="block text-sm font-semibold text-slate-400 uppercase tracking-wide">
-                Save Connection As
+                Your Name (shown to the inviter)
               </label>
               <input
                 id="connection-alias"
                 type="text"
                 value={alias}
                 onChange={(e) => onAliasChange(e.target.value)}
-                className="w-full p-3 text-sm text-white bg-slate-800/50 rounded-xl border border-slate-700/50 focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 placeholder-slate-500 transition-colors"
-                placeholder="e.g., Alice's Issuer Wallet, Business Partner, etc."
+                className={`w-full p-3 text-sm text-white bg-slate-800/50 rounded-xl border focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 placeholder-slate-500 transition-colors ${
+                  isAliasBlank ? 'border-red-500/50' : 'border-slate-700/50'
+                }`}
+                placeholder="e.g., Alice, Business Partner, etc."
               />
-              <p className="text-xs text-slate-500">
-                This is how the connection will appear in your Connections list.
-              </p>
+              {isAliasBlank ? (
+                <p className="text-xs text-red-400">
+                  Required — this is sent to the inviter as your self-declared name, and also used
+                  as this connection's name in your own Connections list. It cannot be left blank.
+                </p>
+              ) : (
+                <p className="text-xs text-slate-500">
+                  Sent to the inviter as your self-declared name for this connection request, and
+                  also used as the name for this connection in your own Connections list.
+                </p>
+              )}
             </div>
 
             {/* ✅ CA IDENTITY VERIFICATION: CA Identity Section */}
@@ -1069,11 +1092,17 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
                   // Company and CA invitations don't require the invitee to share credentials —
                   // skip step 2 and show Accept directly.
                   const hasCredentialsToShare = isRealPersonInvitation && (availableCredentials?.length ?? 0) > 0;
+                  const blocked = hasValidationErrors || isAliasBlank;
+                  const blockedTitle = hasValidationErrors
+                    ? 'Cannot proceed: credential verification failed'
+                    : isAliasBlank
+                    ? 'Enter your name above before continuing'
+                    : undefined;
                   return hasCredentialsToShare ? (
                     <button
                       onClick={() => setStep(2)}
-                      disabled={hasValidationErrors}
-                      title={hasValidationErrors ? 'Cannot proceed: credential verification failed' : undefined}
+                      disabled={blocked}
+                      title={blockedTitle}
                       className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-purple-500 text-white font-semibold rounded-xl hover:opacity-90 focus:ring-4 focus:ring-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
                     >
                       {hasValidationErrors ? '⛔ Verification Failed' : 'Next →'}
@@ -1081,8 +1110,8 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
                   ) : (
                     <button
                       onClick={handleAccept}
-                      disabled={isAccepting || hasValidationErrors}
-                      title={hasValidationErrors ? 'Cannot accept: credential verification failed' : undefined}
+                      disabled={isAccepting || blocked}
+                      title={blockedTitle}
                       className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-purple-500 text-white font-semibold rounded-xl hover:opacity-90 focus:ring-4 focus:ring-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
                     >
                       {hasValidationErrors ? '⛔ Verification Failed' : isAccepting ? '⏳ Accepting...' : '✓ Accept Invitation'}
@@ -1092,7 +1121,8 @@ export const InvitationPreviewModal: React.FC<InvitationPreviewModalProps> = ({
               ) : (
                 <button
                   onClick={handleAccept}
-                  disabled={isAccepting}
+                  disabled={isAccepting || isAliasBlank}
+                  title={isAliasBlank ? 'Enter your name before continuing (go back to step 1)' : undefined}
                   className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-purple-500 text-white font-semibold rounded-xl hover:opacity-90 focus:ring-4 focus:ring-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
                 >
                   {isAccepting ? '⏳ Accepting...' : '✓ Accept Invitation'}

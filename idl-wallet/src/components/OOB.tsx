@@ -50,14 +50,6 @@ async function connectionExists(
     });
 }
 
-// Extract a display name from an inviter's attached RealPersonIdentity VC, if present.
-// Shared by the proposed-connection-name computation and the accept-time fallback chain
-// (OOB.tsx's onConnectionHandleClick) so both stay in sync.
-function extractVcBasedName(inviterIdentity: any): string | null {
-    const { firstName, lastName } = inviterIdentity?.revealedData || {};
-    return firstName && lastName ? `${firstName} ${lastName}` : null;
-}
-
 // Helper function to copy text to clipboard with fallback
 async function copyToClipboard(text: string): Promise<void> {
     try {
@@ -116,8 +108,13 @@ async function sendOwnVCProofMessage(agent: SDK.Agent, conn: SDK.Domain.DIDPair,
 // invitation (see utils/liveIdentityVerification.ts for the cryptographic design and per-type
 // trust-anchoring; `liveVerifiableType` selects which). Deliberately NOT awaited by its callers
 // below — it performs a live challenge/response round trip that requires a human on the inviter's
-// side to approve a presentation request (see actions/index.ts's acceptPresentationRequest, the
-// existing generic responder this relies on), which can take anywhere from seconds to minutes.
+// side to approve a presentation request. The current responder for an incoming
+// present-proof/3.0/request-presentation message is UnifiedProofRequestModal.tsx (globally
+// mounted in _app.tsx, fed by actions/index.ts's handleMessages dispatching
+// presentationRequestReceived) + sendVerifiablePresentation (actions/index.ts) — NOT
+// components/Message.tsx's acceptPresentationRequest, which is orphaned dead code (not imported
+// by any page/component; messages.tsx was rewritten onto Chat.tsx, which only handles
+// BASIC_MESSAGE piuri, in commit 053a969). Round trip can take anywhere from seconds to minutes.
 // Blocking the Accept button on that would be a poor UX for a step whose entire purpose is a
 // soft, best-effort upgrade of trust state — the connection is already fully established by the
 // time this runs.
@@ -932,8 +929,14 @@ export const OOB: React.FC<OOBProps> = (props) => {
             // Seed the connection name shown (and editable) in InvitationPreviewModal's final
             // confirmation step — same priority chain the accept-time fallback in
             // onConnectionHandleClick uses, so an unedited value round-trips unchanged.
-            const vcBasedName = extractVcBasedName(inviterIdentity);
-            setAlias(vcBasedName || companyConfig?.companyName || inviterLabel || "Unknown Connection");
+            //
+            // 🔒 BUG FIX: this field is NOT just a local note — agent.acceptInvitation()'s second
+            // argument is sent on the wire as OUR OWN self-declared name (see HandleOOBInvitation.ts /
+            // HandshakeRequest.fromOutOfBand in the SDK). It must never default to the INVITER's own
+            // name. extractVcBasedName(inviterIdentity) is deliberately excluded here — that's the
+            // name from the INVITER's attached VC, and using it as our own default silently echoes
+            // the inviter's identity back to them as if we'd declared it ourselves.
+            setAlias(companyConfig?.companyName || inviterLabel || "");
             setShowPreviewModal(true);
         }
     }, [inviterIdentity, parsedInvitationData, showPreviewModal, isAcceptingConnection, companyConfig, inviterLabel]);
@@ -1136,18 +1139,49 @@ export const OOB: React.FC<OOBProps> = (props) => {
             const invitation = parseProperDIDCommInvitation(oob);
             console.log("✅ Parsed invitation:", invitation);
 
-            // Extract name from inviter's VC if available
-            let vcBasedName = null;
-            if (inviterIdentity?.revealedData) {
-                const { firstName, lastName } = inviterIdentity.revealedData;
-                if (firstName && lastName) {
-                    vcBasedName = `${firstName} ${lastName}`;
-                    console.log('🏷️ [CONNECTION LABEL] Extracted name from inviter VC:', vcBasedName);
-                }
+            // 🔒 BUG FIX: previously extracted a "vcBasedName" from inviterIdentity.revealedData and
+            // used it as a fallback for our OWN self-declared name below — but inviterIdentity is the
+            // INVITER's own identity (parsed from their attached VC), not ours. connectionLabel is sent
+            // on the wire as our own name via agent.acceptInvitation()'s second argument (see
+            // HandleOOBInvitation.ts / HandshakeRequest.fromOutOfBand in the SDK), so it must never
+            // default to the inviter's own name — that silently echoes their identity back to them as
+            // if we'd declared it ourselves. See the same fix in the preview-modal alias-seeding effect
+            // above.
+
+            // Priority: manual alias > company name > invitation label. Deliberately NO literal
+            // placeholder fallback here — see 🔒 SECURITY guard immediately below.
+            const trimmedAlias = alias?.trim();
+            let connectionLabel = trimmedAlias || companyConfig?.companyName || inviterLabel || "";
+
+            // 🔒 SECURITY: connectionLabel is sent on the wire as OUR OWN self-declared name (see
+            // note above) AND used as the local DIDPair name — it must never silently fall through
+            // to a placeholder literal like "Unknown Connection". That used to happen whenever the
+            // user left the alias field blank and neither companyConfig nor inviterLabel applied
+            // (a plain personal-to-personal invitation): the literal string was then sent to the
+            // inviter over the wire AND stored in the invitee's own Connections list — i.e.
+            // "unknown connection on both sides" (confirmed via
+            // wallet-debug-idl-2026-07-29-08-29-58-fed1f643.log line 4791: `💾 Storing connection
+            // with name: "Unknown Connection"`). InvitationPreviewModal.tsx now disables its
+            // Accept/Next buttons while the alias field is blank, so this should be unreachable via
+            // normal UI — this is a defense-in-depth guard for any other/future caller.
+            if (!connectionLabel.trim()) {
+                console.error('❌ [ACCEPT] Refusing to accept invitation with no self-declared connection name (would have produced a misleading placeholder both on the wire and locally)');
+                alert('Please enter your name before accepting this invitation.');
+                return;
             }
 
-            // Priority: manual alias > VC name > company name > invitation label > fallback
-            let connectionLabel = alias || vcBasedName || companyConfig?.companyName || inviterLabel || "Unknown Connection";
+            // Separate, LOCAL-ONLY best guess at "who is the inviter" — deliberately NOT folded into
+            // connectionLabel above (that value is sent over the wire as OUR OWN self-declared name).
+            // Saved to ConnectionMetadata.counterpartyDisplayName so our own Connections list can show
+            // who we connected to, rather than our own name reflected back. Unverified (pre-connection
+            // preview only) — see that field's doc comment for the full priority chain.
+            const inviterPreviewName = inviterIdentity?.revealedData
+                ? (() => {
+                    const { firstName, lastName } = inviterIdentity.revealedData;
+                    return firstName && lastName ? `${firstName} ${lastName}` : null;
+                  })()
+                : null;
+            const inviterDisplayName = inviterPreviewName || companyConfig?.companyName || inviterLabel || undefined;
 
             // service-access/1.0 capabilities to record for this connection at establishment
             // time (see connectionMetadata.ts's `capabilities` field and the 4 saveConnectionMetadata
@@ -1275,6 +1309,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
                             prismDid: createdPrismDid,
                             establishedWithVCProof: !!inviterIdentity?.vcProof,
                             vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
+                            counterpartyDisplayName: inviterDisplayName,
                             isCAConnection: isCAInvitation || undefined,
                             isCompanyConnection: isCompanyInvitation || undefined,
                             capabilities: isCAInvitation ? CA_CAPABILITIES : companyCapabilities
@@ -1291,6 +1326,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
                             enterpriseAgentApiKey: cloudConfig.enterpriseAgentApiKey,
                             establishedWithVCProof: !!inviterIdentity?.vcProof,
                             vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
+                            counterpartyDisplayName: inviterDisplayName,
                             isCAConnection: isCAInvitation || undefined,
                             isCompanyConnection: isCompanyInvitation || undefined,
                             capabilities: isCAInvitation ? CA_CAPABILITIES : companyCapabilities
@@ -1410,6 +1446,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     prismDid: createdPrismDid,
                                     establishedWithVCProof: !!inviterIdentity?.vcProof,
                                     vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
+                                    counterpartyDisplayName: inviterDisplayName,
                                     isCAConnection: isCAInvitation || undefined,
                                     isCompanyConnection: isCompanyInvitation || undefined,
                                     capabilities: isCAInvitation ? CA_CAPABILITIES : companyCapabilities
@@ -1426,6 +1463,7 @@ export const OOB: React.FC<OOBProps> = (props) => {
                                     enterpriseAgentApiKey: cloudConfig.enterpriseAgentApiKey,
                                     establishedWithVCProof: !!inviterIdentity?.vcProof,
                                     vcProofType: inviterIdentity?.vcProof ? 'RealPerson' : undefined,
+                                    counterpartyDisplayName: inviterDisplayName,
                                     isCAConnection: isCAInvitation || undefined,
                                     isCompanyConnection: isCompanyInvitation || undefined,
                                     capabilities: isCAInvitation ? CA_CAPABILITIES : companyCapabilities

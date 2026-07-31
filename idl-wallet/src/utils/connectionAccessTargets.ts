@@ -126,13 +126,25 @@ export async function requestConnectionAccess(params: {
   dispatch: (action: any) => Promise<any>;
   connection: SDK.Domain.DIDPair;
   target: string;
-  setPendingAccessRequest: (v: { target: string; label: string; icon: string } | null) => void;
+  setPendingAccessRequest: (v: { target: string; label: string; icon: string; requestId: string } | null) => void;
 }): Promise<void> {
   const { agent, dispatch, connection, target, setPendingAccessRequest } = params;
   const targetInfo = getTargetsForConnection(connection).find(t => t.key === target);
-  setPendingAccessRequest({ target, label: targetInfo?.label ?? target, icon: targetInfo?.icon ?? '🔗' });
+  const label = targetInfo?.label ?? target;
+  const icon = targetInfo?.icon ?? '🔗';
+  // Show the "waiting" modal immediately (requestId filled in once the send resolves and the
+  // thunk hands back the id it actually put on the wire) rather than waiting on the dispatch —
+  // sendMessage does real crypto work and shouldn't gate the user's first feedback.
+  setPendingAccessRequest({ target, label, icon, requestId: '' });
   try {
-    await dispatch(sendProtocolAccessRequest({ agent, connection, target }));
+    const result = await dispatch(sendProtocolAccessRequest({ agent, connection, target }));
+    const requestId = (result as { payload?: string })?.payload;
+    if (!requestId) throw new Error('sendProtocolAccessRequest did not return a requestId');
+    // requestId is generated inside the thunk (and returned as its payload) rather than here, so
+    // there is exactly one source of truth for the id actually sent on the wire — GlobalGrantWatcher
+    // matches an incoming service-access/1.0/error's `thid` against this to know which pending
+    // request (if any) it should report failure on.
+    setPendingAccessRequest({ target, label, icon, requestId });
   } catch (e: any) {
     console.error('[connectionAccessTargets] Access request failed:', e.message);
     setPendingAccessRequest(null);

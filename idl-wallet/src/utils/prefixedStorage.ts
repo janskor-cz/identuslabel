@@ -10,10 +10,31 @@
  * Solution: All localStorage operations MUST use this utility to ensure proper prefixing.
  */
 
+// Scoped per logged-in user: see setPrefixedStorageWalletId(). Null (the default) keeps the
+// original single-tenant prefix ('wallet-idl-', no suffix) so existing users' already-stored
+// data isn't orphaned on next login. Once a per-user id is set, every key gets an extra
+// per-user segment. This was previously a hardcoded constant — meaning every wallet profile on
+// the same browser (e.g. multiple profiles used on one device over time) silently shared one
+// localStorage bucket for everything routed through getItem/setItem here (security clearance
+// keys, CA/company TOFU pins, connection metadata, etc.), contrary to this file's own isolation
+// claim above. Mirrors documentStorage.ts's setDocumentStorageWalletId() pattern — a module-level
+// setter rather than reading Redux state directly, to avoid a circular import (this module is
+// imported by actions/index.ts's dependency chain).
+let currentWalletId: string | null = null;
+
+/**
+ * Set the wallet/user identifier all keys in this module are scoped under.
+ * Call at login (see actions/index.ts's connectDatabase thunk, alongside the equivalent
+ * setDocumentStorageWalletId call) so each user's data lands in their own storage.
+ */
+export function setPrefixedStorageWalletId(walletId: string | null): void {
+  currentWalletId = walletId;
+}
+
 // Get wallet storage prefix from configuration
 function getStoragePrefix(): string {
   // IDL wallet configuration - must match app.ts getWalletConfig()
-  return 'wallet-idl-';
+  return currentWalletId ? `wallet-idl-${currentWalletId}-` : 'wallet-idl-';
 }
 
 /**

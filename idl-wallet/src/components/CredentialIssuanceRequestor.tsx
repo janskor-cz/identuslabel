@@ -26,6 +26,7 @@ interface IssuanceField {
     label: string;
     type: string; // open, additive set — unrecognized types fall back to a text input
     required: boolean;
+    options?: string[]; // when present, renders as a fixed-choice dropdown instead of free text
 }
 
 interface Props {
@@ -166,12 +167,25 @@ export const CredentialIssuanceRequestor: React.FC<Props> = ({ agent, connection
                             <label className="block text-xs text-slate-300 mb-1">
                                 {f.label}{f.required ? ' *' : ''}
                             </label>
-                            <input
-                                type={f.type === 'date' ? 'date' : 'text'}
-                                value={values[f.key] || ''}
-                                onChange={e => handleFieldChange(f.key, e.target.value)}
-                                className="w-full bg-slate-700 text-white rounded px-3 py-2 text-sm border border-slate-600 focus:border-blue-500 focus:outline-none"
-                            />
+                            {f.options ? (
+                                <select
+                                    value={values[f.key] || ''}
+                                    onChange={e => handleFieldChange(f.key, e.target.value)}
+                                    className="w-full bg-slate-700 text-white rounded px-3 py-2 text-sm border border-slate-600 focus:border-blue-500 focus:outline-none"
+                                >
+                                    <option value="" disabled>Select…</option>
+                                    {f.options.map(opt => (
+                                        <option key={opt} value={opt}>{opt}</option>
+                                    ))}
+                                </select>
+                            ) : (
+                                <input
+                                    type={f.type === 'date' ? 'date' : 'text'}
+                                    value={values[f.key] || ''}
+                                    onChange={e => handleFieldChange(f.key, e.target.value)}
+                                    className="w-full bg-slate-700 text-white rounded px-3 py-2 text-sm border border-slate-600 focus:border-blue-500 focus:outline-none"
+                                />
+                            )}
                         </div>
                     ))}
                     <button

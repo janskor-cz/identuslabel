@@ -20,6 +20,7 @@ import { TRUSTED_SERVICES } from '@/config/serviceTrust';
 import { CERTIFICATION_AUTHORITY } from '@/config/certificationAuthority';
 
 export const SERVICE_ACCESS_GRANT_TYPE = 'https://identuslabel.cz/protocols/service-access/1.0/grant';
+export const SERVICE_ACCESS_ERROR_TYPE = 'https://identuslabel.cz/protocols/service-access/1.0/error';
 
 export interface ServiceAccessGrant {
   id: string;
@@ -57,6 +58,39 @@ export function parseServiceAccessGrant(message: SDK.Domain.Message): ServiceAcc
       accessUrl: b.accessUrl,
       result: b.result,
     };
+  } catch {
+    return null;
+  }
+}
+
+export interface ServiceAccessError {
+  thid?: string;
+  code: string;
+  message: string;
+}
+
+/**
+ * Parse a service-access/1.0/error envelope out of a received message's content, or null. The
+ * service sends this whenever a requested capability could not be granted (untrusted issuer,
+ * schema mismatch, expired request, ...) — see ServiceAccessService._sendError in
+ * packages/service-access-didcomm. Unlike grants, no trust check is applied to errors: worst case
+ * an untrusted sender can make the wallet display a bogus "access denied" for a request it can
+ * already see was made (the requestId is a wallet-generated, connection-scoped nonce, not a
+ * secret), which grants no capability and is a strict improvement over the previous behavior of
+ * silently dropping every error and leaving the "waiting" modal spinning forever.
+ */
+export function parseServiceAccessError(message: SDK.Domain.Message): ServiceAccessError | null {
+  try {
+    const body = typeof message.body === 'string' ? JSON.parse(message.body) : message.body;
+    const raw = (body as any)?.content ?? '';
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.type !== SERVICE_ACCESS_ERROR_TYPE) return null;
+
+    const b = parsed.body ?? {};
+    if (!b.error) return null;
+
+    return { thid: parsed.thid, code: b.error, message: b.message || 'Access request failed.' };
   } catch {
     return null;
   }

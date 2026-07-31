@@ -35,8 +35,12 @@
  * Security Clearance key-exchange handshake; that established, working pattern is mirrored here
  * rather than adding a new message-pickup listener. On the RESPONDING side (the inviter's
  * wallet), nothing new is needed either: an incoming `request-presentation` message is already
- * handled generically by the existing `acceptPresentationRequest` thunk (`actions/index.ts`),
- * which a human there approves from their Message inbox — this file's timeout is therefore
+ * handled generically by `UnifiedProofRequestModal.tsx` (globally mounted in `_app.tsx`, fed by
+ * `actions/index.ts`'s `handleMessages` dispatching `presentationRequestReceived`) together with
+ * `sendVerifiablePresentation` (`actions/index.ts`) — a human there approves from that modal.
+ * (NOT `components/Message.tsx`'s `acceptPresentationRequest` — that component is orphaned dead
+ * code, not imported by any page/component since `messages.tsx` was rewritten onto `Chat.tsx` in
+ * commit 053a969; `Chat.tsx` only handles `BASIC_MESSAGE` piuri.) This file's timeout is therefore
  * generous (minutes, not seconds) to allow for that live human-in-the-loop step.
  *
  * ── WHY agent.handlePresentation() ALONE IS NOT ENOUGH ──────────────────────────────────────
@@ -121,6 +125,59 @@ export interface LiveIdentityVerificationResult {
   // use should still treat them as a point-in-time snapshot (see identityVerifiedAt) rather than
   // an ongoing revocation-checked guarantee.
   verifiedSubject?: Record<string, any>;
+}
+
+/**
+ * Per-type field-name hints for the live-verification present-proof request's `claims` filter.
+ *
+ * WHY THIS EXISTS: the responder side (`UnifiedProofRequestModal.tsx`) filters and labels its
+ * credential picker using `extractRequestedFields()` (`utils/proofRequestFieldMatching.ts`),
+ * which reads the REAL DIF Presentation Exchange `input_descriptors[].constraints.fields[].path`
+ * that Pollux's `createPresentationDefinitionRequest` builds directly from these `claims` keys.
+ * That is deliberately NOT sourced from `domain`/`goal`/`goalCode`/`comment` here — confirmed by
+ * reading the SDK source directly (not assumed): `CreatePresentationRequest.ts` hardcodes
+ * `domain: 'N/A'` inside the JWT `PresentationOptions` it builds (no caller-settable domain for
+ * this call), and its private `createRequest()` constructs the outgoing `RequestPresentation`
+ * with a literal `{ proofTypes: [] }` — it never forwards a caller-supplied goalCode/comment into
+ * the message body at all. (`options.domain`-based schema hints, and goalCode/comment string
+ * matching, are real mechanisms elsewhere in this codebase — but only for requests the CA/company-
+ * admin servers build directly via the Cloud Agent's REST presentation API, which has richer
+ * options than this SDK method exposes.) Named `claims` keys are therefore the ONLY lever
+ * available to make the responder's picker filtered/labeled instead of generic and unfiltered for
+ * a wallet-to-wallet request built through `agent.initiatePresentationRequest`.
+ *
+ * Each field below is given a permissive `{ type: 'string', pattern: '.*' }` filter — deliberately
+ * never an empty `{}` filter. An empty filter object is truthy but has no `.pattern`/`.enum`/
+ * `.const`, so Pollux's `validateInputDescriptor` can never mark it satisfied even when the field
+ * genuinely exists on the returned credential — `agent.handlePresentation()` below would then
+ * always throw, and this function would always report `verified: false` (silently timing out from
+ * the caller's perspective). That is the exact bug `initiateVCHandshake()`/`ensureSenderVC()` in
+ * `actions/index.ts` sidestep by using `claims: {}` — i.e. NO named fields at all — for their own,
+ * different, "accept any credential" handshake; it is also why this function itself used to pass
+ * `{ claims: {} }`. `pattern: '.*'` keeps each field non-empty (so it still contributes a real
+ * `path` entry the responder can filter/label on) while matching any value a genuine credential
+ * actually carries, so it can never itself cause a live, valid presentation to be rejected.
+ */
+function buildLiveVerificationClaims(expectedType: LiveVerifiableCredentialType): Record<string, any> {
+  const ANY_STRING = { type: 'string', pattern: '.*' };
+  switch (expectedType) {
+    case 'RealPersonIdentity':
+      return { firstName: ANY_STRING, lastName: ANY_STRING, uniqueId: ANY_STRING };
+    case 'SecurityClearance':
+      // clearanceLevel is the one field every SecurityClearance credential in this codebase sets
+      // (see hasSecurityClearanceFields' field list in vcValidation.ts) and the same field
+      // initiateVCHandshake()'s doc comment references as having tried (and rejected) with an
+      // empty filter for this exact reason.
+      return { clearanceLevel: ANY_STRING };
+    case 'CertificationAuthorityIdentity':
+      // Mirrors the looksLikeCA shape check below (website + issuedDate).
+      return { website: ANY_STRING, issuedDate: ANY_STRING };
+    case 'CompanyIdentity':
+      // Mirrors the looksLikeCompany shape check below (companyName + registrationNumber).
+      return { companyName: ANY_STRING, registrationNumber: ANY_STRING };
+    default:
+      return {};
+  }
 }
 
 function decodeJwtPayload(jws: string): any {
@@ -289,10 +346,11 @@ export async function verifyLiveIdentity(
       const sentRequest = await agent.initiatePresentationRequest(
         SDK.Domain.CredentialType.JWT,
         peerDID,
-        { claims: {} } // Empty claims filter — a non-empty but pattern/enum/const-less filter
-        // object breaks Pollux's validateInputDescriptor (same rationale documented in
-        // actions/index.ts's initiateVCHandshake()); we validate the returned credential
-        // ourselves below instead of constraining it up front.
+        // Named, permissively-filtered claims — see buildLiveVerificationClaims' doc comment for
+        // why this (not domain/goal/goalCode, which this SDK call cannot convey) is what lets the
+        // responder's UnifiedProofRequestModal show a filtered, labeled picker instead of a
+        // generic unfiltered one, without risking a false-negative on our own verification below.
+        { claims: buildLiveVerificationClaims(expectedPreview.expectedType) }
       );
       sentRequestThid = sentRequest?.thid;
       if (!sentRequestThid) {
