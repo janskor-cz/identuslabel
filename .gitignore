@@ -90,6 +90,7 @@ clean-identus-wallet/
 # External git repositories (use git submodules if needed)
 hyperledger-identus-ssi/
 identus-mediator/
+custom-cloud-agent/
 identus-infrastructure/
 
 # Schema caches (regenerated)
@@ -97,6 +98,10 @@ identus-infrastructure/
 
 # Runtime data (regenerated)
 company-admin-portal/data/
+# Live in-person verification codes — short-lived secrets, never commit
+certification-authority/data/credential-verification-codes.json
+# Ad-hoc data backups
+**/*.bak-*
 
 # Sensitive credentials (keep these templates only)
 # NOTE: multitenancy-test-credentials.txt is included for documentation purposes
