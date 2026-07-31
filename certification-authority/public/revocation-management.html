@@ -300,11 +300,25 @@
             <div class="section">
                 <h2>📋 Issued Credentials</h2>
 
-                <div class="controls-bar">
+                <div class="controls-bar" style="flex-wrap: wrap; gap: 12px;">
                     <div class="credential-count" id="credentialCount">
                         Loading credentials...
                     </div>
-                    <div>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <input
+                            type="text"
+                            id="searchInput"
+                            placeholder="🔍 Search Record ID, Unique ID, Holder DID, or name..."
+                            oninput="applyFilters()"
+                            style="padding: 8px 12px; border: 2px solid #e0e0e0; border-radius: 6px; min-width: 300px;"
+                        >
+                        <select
+                            id="typeFilterSelect"
+                            onchange="applyFilters()"
+                            style="padding: 8px 12px; border: 2px solid #e0e0e0; border-radius: 6px;"
+                        >
+                            <option value="all">All Types</option>
+                        </select>
                         <button class="btn secondary" onclick="refreshCredentials()">
                             🔄 Refresh
                         </button>
@@ -337,6 +351,8 @@
         }
 
         let credentials = [];
+        let searchQuery = '';
+        let typeFilterValue = 'all';
 
         // Load credentials on page load
         window.addEventListener('load', () => {
@@ -440,7 +456,6 @@
                 console.log(`✅ [REVOCATION] Loaded ${credentials.length} revocable credentials`);
 
                 await displayCredentials();
-                updateCredentialCount();
 
             } catch (error) {
                 console.error('❌ [REVOCATION] Error loading credentials:', error);
@@ -462,6 +477,7 @@
             const container = document.getElementById('credentialsList');
 
             if (credentials.length === 0) {
+                updateCredentialCount([]);
                 container.innerHTML = `
                     <div class="empty-state">
                         <div class="empty-state-icon">📋</div>
@@ -492,7 +508,89 @@
             // Update credentials with actual revocation status
             credentials = statusChecks;
 
-            container.innerHTML = credentials.map(credential => {
+            populateTypeFilter();
+            renderCredentialsList();
+        }
+
+        // Human-readable type for a credential — prefers the semantic credentialType claim
+        // (e.g. "RealPersonIdentity") over the raw schema GUID, since that's what holders and
+        // staff actually recognize. This is also the filter/grouping key.
+        function getCredentialTypeLabel(credential) {
+            return credential.credentialType || (credential.schemaId ? credential.schemaId.split('/').pop() : 'Unknown');
+        }
+
+        // Friendlier display names for known types — used in the card header and filter dropdown.
+        const CREDENTIAL_TYPE_DISPLAY_NAMES = {
+            'RealPersonIdentity': 'RealPerson VC',
+            'SecurityClearance': 'Security Clearance',
+            'CertificationAuthorityIdentity': 'CA Identity',
+            'EmployeeRole': 'Employee Role'
+        };
+
+        function getCredentialTypeDisplayName(credential) {
+            const type = getCredentialTypeLabel(credential);
+            return CREDENTIAL_TYPE_DISPLAY_NAMES[type] || type;
+        }
+
+        // Different VC types name their holder-identifier claim differently — RealPerson uses
+        // uniqueId, SecurityClearance uses holderUniqueId. Present one unified field.
+        function getHolderId(credential) {
+            return credential.uniqueId || credential.holderUniqueId || 'Unknown';
+        }
+
+        function populateTypeFilter() {
+            const select = document.getElementById('typeFilterSelect');
+            const previousValue = select.value;
+            const types = [...new Set(credentials.map(getCredentialTypeLabel))].sort();
+            select.innerHTML = '<option value="all">All Types</option>' +
+                types.map(t => `<option value="${t}">${CREDENTIAL_TYPE_DISPLAY_NAMES[t] || t}</option>`).join('');
+            if (types.includes(previousValue)) select.value = previousValue;
+        }
+
+        function getFilteredCredentials() {
+            return credentials.filter(credential => {
+                if (typeFilterValue !== 'all' && getCredentialTypeLabel(credential) !== typeFilterValue) {
+                    return false;
+                }
+                if (!searchQuery) return true;
+                const haystack = [
+                    credential.recordId,
+                    credential.uniqueId,
+                    credential.holderUniqueId,
+                    credential.subjectId,
+                    credential.holderFirstName,
+                    credential.holderLastName,
+                    credential.holderName
+                ].filter(Boolean).join(' ').toLowerCase();
+                return haystack.includes(searchQuery);
+            });
+        }
+
+        function applyFilters() {
+            searchQuery = document.getElementById('searchInput').value.trim().toLowerCase();
+            typeFilterValue = document.getElementById('typeFilterSelect').value;
+            renderCredentialsList();
+        }
+
+        function renderCredentialsList() {
+            const container = document.getElementById('credentialsList');
+            const filtered = getFilteredCredentials();
+            updateCredentialCount(filtered);
+
+            if (filtered.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🔍</div>
+                        <h3>No Matching Credentials</h3>
+                        <p style="color: #666; margin-top: 1rem;">
+                            No credentials match the current search / type filter.
+                        </p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = filtered.map(credential => {
                 const isRevoked = credential.isRevoked;
                 const badgeClass = isRevoked ? 'badge-revoked' : 'badge-issued';
                 const badgeText = isRevoked ? '🚫 REVOKED' : '✅ ISSUED';
@@ -500,18 +598,11 @@
                 const createdAt = credential.issuedAt ? new Date(credential.issuedAt).toLocaleString() : 'Unknown';
                 const updatedAt = credential.updatedAt ? new Date(credential.updatedAt).toLocaleString() : 'Unknown';
 
-                // Extract subject information from claims
-                const holderDid = credential.subjectId || 'Unknown';
-                const subjectName = credential.claims?.name || credential.claims?.fullName || credential.claims?.givenName || 'Unknown';
-
-                // Extract credential status ID
-                const statusId = credential.credentialStatusId || 'Not Available';
-
                 return `
                     <div class="credential-card">
                         <div class="credential-header">
                             <div class="credential-id">
-                                🎫 ${subjectName !== 'Unknown' ? subjectName : 'Credential Record'}
+                                🎫 ${getCredentialTypeDisplayName(credential)}
                             </div>
                             <div class="credential-badge ${badgeClass}">
                                 ${badgeText}
@@ -527,30 +618,9 @@
                             </div>
 
                             <div class="detail-item">
-                                <div class="detail-label">Credential Status ID</div>
+                                <div class="detail-label">Holder ID</div>
                                 <div class="detail-value" style="font-family: monospace; font-size: 0.85rem;">
-                                    ${statusId}
-                                </div>
-                            </div>
-
-                            <div class="detail-item">
-                                <div class="detail-label">Schema ID</div>
-                                <div class="detail-value" style="font-family: monospace; font-size: 0.85rem;">
-                                    ${credential.schemaId ? credential.schemaId.split('/').pop() : 'Unknown'}
-                                </div>
-                            </div>
-
-                            <div class="detail-item">
-                                <div class="detail-label">Holder DID</div>
-                                <div class="detail-value" style="font-family: monospace; font-size: 0.85rem;">
-                                    ${holderDid.substring(0, 30)}...
-                                </div>
-                            </div>
-
-                            <div class="detail-item">
-                                <div class="detail-label">Protocol State</div>
-                                <div class="detail-value">
-                                    ${credential.protocolState}
+                                    ${getHolderId(credential)}
                                 </div>
                             </div>
 
@@ -623,13 +693,16 @@
             }).join('');
         }
 
-        function updateCredentialCount() {
+        function updateCredentialCount(filtered) {
             const total = credentials.length;
-            const revoked = credentials.filter(c => c.isRevoked === true).length;
-            const active = total - revoked;
+            const shown = filtered.length;
+            const revoked = filtered.filter(c => c.isRevoked === true).length;
+            const active = shown - revoked;
+            const shownLabel = shown === total ? `📊 Total: <strong>${total}</strong> credentials` :
+                `📊 Showing: <strong>${shown}</strong> of <strong>${total}</strong> credentials`;
 
             document.getElementById('credentialCount').innerHTML = `
-                📊 Total: <strong>${total}</strong> credentials
+                ${shownLabel}
                 &nbsp;|&nbsp;
                 ✅ Active: <strong>${active}</strong>
                 &nbsp;|&nbsp;
@@ -650,8 +723,8 @@
                 `⚠️ REVOKE CREDENTIAL\n\n` +
                 `Are you sure you want to revoke this credential?\n\n` +
                 `Record ID: ${recordId}\n` +
-                `Schema: ${credential.schemaId ? credential.schemaId.split('/').pop() : 'Unknown'}\n` +
-                `Holder: ${credential.subjectId ? credential.subjectId.substring(0, 30) + '...' : 'Unknown'}\n\n` +
+                `Type: ${getCredentialTypeDisplayName(credential)}\n` +
+                `Holder ID: ${getHolderId(credential)}\n\n` +
                 `This action is IRREVERSIBLE!\n` +
                 `The credential holder will no longer be able to use this credential.\n\n` +
                 `Click OK to proceed with revocation, or Cancel to abort.`;

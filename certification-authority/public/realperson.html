@@ -657,9 +657,18 @@
                 const data = await response.json();
                 
                 if (data.success) {
-                    availableSchemas = data.schemas.filter(schema => schema.name === 'RealPerson');
+                    // v4.0.0 ONLY. The server issues nothing else (see issueRealPersonCredential's
+                    // REALPERSON_SCHEMA_VERSION gate in server.js), and the wallets pin v4.0.0 as
+                    // their trusted RealPerson schema — offering an older version here could only
+                    // produce a credential that gets rejected later, or a confusing server-side
+                    // error at issuance time. v3.0.0 in particular has no `photo` property at all.
+                    availableSchemas = data.schemas.filter(
+                        schema => schema.name === 'RealPerson' && schema.version === '4.0.0'
+                    );
                     const select = document.getElementById('schemaSelection');
-                    select.innerHTML = '<option value="">Select a schema...</option>';
+                    select.innerHTML = availableSchemas.length
+                        ? '<option value="">Select a schema...</option>'
+                        : '<option value="">RealPerson v4.0.0 not found in registry</option>';
                     
                     availableSchemas.forEach(schema => {
                         const option = document.createElement('option');
@@ -671,9 +680,9 @@
                         select.appendChild(option);
                     });
                     
-                    // Auto-select the latest version (4.0.0 preferred, fallback to newest available)
-                    const preferred = availableSchemas.find(schema => schema.version === '4.0.0')
-                                   || availableSchemas[availableSchemas.length - 1];
+                    // Auto-select v4.0.0 — after the filter above it is the only entry, so this is
+                    // now a convenience (no click needed) rather than a preference among versions.
+                    const preferred = availableSchemas.find(schema => schema.version === '4.0.0');
                     if (preferred) {
                         const prefOption = Array.from(select.options).find(opt => opt.value === preferred.guid);
                         if (prefOption) {

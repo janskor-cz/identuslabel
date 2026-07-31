@@ -690,7 +690,7 @@ Ready to demonstrate client-side DID operations...
                                 ` : '')}
                             </div>
                             <div>
-                                <button class="btn" onclick="approveCredential('${request.recordId}', '${holderName.replace(/'/g, "\\\'")}')">
+                                <button class="btn" onclick="toggleApprovalCodeForm('${request.recordId}')">
                                     ✅ Approve & Issue
                                 </button>
                                 <br><br>
@@ -702,6 +702,31 @@ Ready to demonstrate client-side DID operations...
                                     ❌ Reject Request
                                 </button>
                             </div>
+                        </div>
+
+                        <div id="approval-code-form-${request.recordId}" style="display:none; margin-top:14px; padding:14px; background:#e8f5e9; border:1px solid #2e7d32; border-radius:8px;">
+                            <strong style="color:#2e7d32;">🔐 In-Person Verification</strong>
+                            <p style="font-size:0.85rem; color:#555; margin:6px 0 10px;">
+                                A 6-digit code was sent to the holder's wallet over DIDComm chat when they accepted the offer.
+                                Ask the holder to read it out, then enter it below to issue the credential.
+                            </p>
+                            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                                <input
+                                    type="text"
+                                    id="approval-code-${request.recordId}"
+                                    placeholder="6-digit code"
+                                    maxlength="6"
+                                    inputmode="numeric"
+                                    style="padding:8px 12px; border:2px solid #ccc; border-radius:6px; width:140px; font-family:monospace; font-size:1rem; letter-spacing:2px;"
+                                >
+                                <button class="btn" onclick="approveCredential('${request.recordId}', '${holderName.replace(/'/g, "\\\'")}')">
+                                    ✅ Confirm & Issue
+                                </button>
+                                <button class="btn secondary" onclick="toggleApprovalCodeForm('${request.recordId}')">
+                                    Cancel
+                                </button>
+                            </div>
+                            <div id="approval-code-status-${request.recordId}" style="font-size:0.85rem; margin-top:8px;"></div>
                         </div>
                     </div>
                 `;
@@ -715,11 +740,29 @@ Ready to demonstrate client-side DID operations...
             `;
         }
 
+        function toggleApprovalCodeForm(recordId) {
+            const form = document.getElementById(`approval-code-form-${recordId}`);
+            if (!form) return;
+            const showing = form.style.display !== 'none';
+            form.style.display = showing ? 'none' : 'block';
+            if (!showing) {
+                const input = document.getElementById(`approval-code-${recordId}`);
+                if (input) { input.value = ''; input.focus(); }
+                const status = document.getElementById(`approval-code-status-${recordId}`);
+                if (status) status.innerHTML = '';
+            }
+        }
+
         async function approveCredential(recordId, holderName) {
-            if (!confirm(`Are you sure you want to approve and issue the credential for ${holderName}?`)) {
+            const codeInput = document.getElementById(`approval-code-${recordId}`);
+            const statusEl = document.getElementById(`approval-code-status-${recordId}`);
+            const verificationCode = codeInput ? codeInput.value.trim() : '';
+
+            if (!verificationCode) {
+                if (statusEl) statusEl.innerHTML = '<span style="color:#c00;">Enter the code the holder read out to you.</span>';
                 return;
             }
-            
+
             try {
                 log(`⚖️ Approving credential request: ${recordId}`);
                 const response = await fetch(`/api/credentials/approve/${recordId}`, {
@@ -729,12 +772,13 @@ Ready to demonstrate client-side DID operations...
                     },
                     body: JSON.stringify({
                         approve: true,
-                        notes: `Approved by admin at ${new Date().toISOString()}`
+                        notes: `Approved by admin at ${new Date().toISOString()}`,
+                        verificationCode
                     })
                 });
-                
+
                 const data = await response.json();
-                
+
                 if (data.success) {
                     log(`✅ Credential approved and issued for ${holderName}`);
                     alert(`✅ Credential successfully approved and issued to ${holderName}!`);
@@ -745,7 +789,11 @@ Ready to demonstrate client-side DID operations...
                 }
             } catch (error) {
                 log(`❌ Approval failed: ${error.message}`);
-                alert(`❌ Failed to approve credential: ${error.message}`);
+                if (statusEl) {
+                    statusEl.innerHTML = `<span style="color:#c00;">❌ ${error.message}</span>`;
+                } else {
+                    alert(`❌ Failed to approve credential: ${error.message}`);
+                }
             }
         }
 

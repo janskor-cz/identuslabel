@@ -40,7 +40,9 @@ class CredentialIssuanceService {
    * CapabilityDescriptor: {
    *   schemaName, schemaVersion,        // sent verbatim in fields-required, for wallet-side UI —
    *                                     // this library does not read or enforce them itself
-   *   fields: [{ key, label, type, required }],
+   *   fields: [{ key, label, type, required, options? }],   // options: string[] constrains the
+   *                                     // field to a fixed choice set (e.g. type: 'select') —
+   *                                     // enforced generically below regardless of type
    *   validate?: (values) => string|null|Promise<string|null>,   // extra, capability-specific
    *                                     // checks beyond the generic required/date checks below;
    *                                     // return an error message to reject, null/undefined to pass
@@ -182,6 +184,9 @@ class CredentialIssuanceService {
     for (const f of capability.fields) {
       if (f.type === 'date' && values[f.key] && !DATE_RE.test(String(values[f.key]))) {
         return `Field "${f.key}" must be a date in YYYY-MM-DD format.`;
+      }
+      if (Array.isArray(f.options) && values[f.key] && !f.options.includes(values[f.key])) {
+        return `Field "${f.key}" must be one of: ${f.options.join(', ')}.`;
       }
     }
     return null;

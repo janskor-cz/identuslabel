@@ -149,9 +149,13 @@ function displayProfile(profile) {
             clearanceLevelEl.textContent = clearanceLevel;
             clearanceLevelEl.style.color = getClearanceColor(clearanceLevel);
             clearanceLevelEl.style.fontWeight = '600';
-            // Hide verify button if clearance is already verified
+            // Keep the button available even when clearance already shows a level — the
+            // employee's personal wallet may hold a newer clearance VC (different level,
+            // reissued after the old one was revoked) that this stale enterprise-side grant
+            // hasn't picked up yet. Relabel it so it reads as a refresh, not a first-time ask.
             if (verifyClearanceBtn) {
-                verifyClearanceBtn.style.display = 'none';
+                verifyClearanceBtn.style.display = 'inline-block';
+                verifyClearanceBtn.textContent = 'Update Clearance';
             }
         } else {
             clearanceLevelEl.textContent = 'Not Verified';
@@ -160,6 +164,7 @@ function displayProfile(profile) {
             // Show verify button if no clearance
             if (verifyClearanceBtn) {
                 verifyClearanceBtn.style.display = 'inline-block';
+                verifyClearanceBtn.textContent = 'Verify Clearance';
             }
         }
     }
