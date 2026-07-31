@@ -19,7 +19,12 @@
  *   node scripts/register-service-tenants.js --service document-service
  *
  * Prerequisites:
- *   MULTITENANCY_ADMIN_TOKEN env var (or edit ADMIN_TOKEN below).
+ *   MULTITENANCY_ADMIN_TOKEN env var — REQUIRED, no default. It is the agent's
+ *   ADMIN_TOKEN (see /root/test-multitenancy-cloud-agent.yml) and grants full control
+ *   over every tenant wallet, so it must never be written into this file. Likewise the
+ *   per-service API keys below: only non-secret identifiers (walletId/entityId/DID) are
+ *   recorded here. Pass a service's key via <SERVICE>_API_KEY when re-running against an
+ *   already-registered service.
  *   node-fetch v2: cd /opt/project_identuslabel && npm install node-fetch@2
  *
  * Run from repo root:
@@ -31,7 +36,11 @@ const crypto = require('crypto');
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 const AGENT_URL    = process.env.MULTITENANCY_AGENT_URL || 'http://91.99.4.54:8200';
-const ADMIN_TOKEN  = process.env.MULTITENANCY_ADMIN_TOKEN || 'N9TEJXrZlIX4Qg8R1RSlJwC820QZKwXb';
+const ADMIN_TOKEN  = process.env.MULTITENANCY_ADMIN_TOKEN;
+if (!ADMIN_TOKEN) {
+  console.error('MULTITENANCY_ADMIN_TOKEN is required (agent ADMIN_TOKEN — do not hardcode it here).');
+  process.exit(1);
+}
 const ONLY_SERVICE = (() => {
   const idx = process.argv.indexOf('--service');
   return idx >= 0 ? process.argv[idx + 1] : null;
@@ -41,23 +50,33 @@ const VERIFY_ONLY = process.argv.includes('--verify');
 // ── Already-registered identities (Phase 1, 2026-04-05) ───────────────────────
 // If a service already has these credentials they are SKIPPED (idempotent).
 // Update this table when re-running after a reset.
+//
+// 🔒 API keys are NOT stored here. This file is tracked in a public repository, and the
+// three keys that used to sit in this table were live tenant credentials on the agent —
+// they were rotated and revoked on 2026-07-31. Each key now comes from the environment
+// (DOCUMENT_SERVICE_API_KEY, CERTIFICATION_AUTHORITY_API_KEY, COMPANY_ADMIN_PORTAL_API_KEY),
+// and is only needed for the DID-creation step against an already-registered service.
+// The live values are in each service's own config: identus-document-service's
+// data/service-wallet.json, and SERVICE_API_KEY in the CA's and company-admin's .env.
+const envKey = (service) => process.env[`${service.toUpperCase().replace(/-/g, '_')}_API_KEY`] || null;
+
 const EXISTING = {
   'document-service': {
     walletId:  '0f81c57d-bd64-4133-be53-3aaebe6137d9',
     entityId:  '87f8ae1d-9604-43cb-8ade-804723d52e74',
-    apiKey:    '03b7ca7ae01e3c8439f0c37d8b6e37339227cdbd30b2aaa4676eacc55f95fabf',
+    apiKey:    envKey('document-service'),
     did:       'did:prism:19d62c0b38a3ecf011fc637acd6decbdf3e579a34087d0a2151de3cc1968455d',
   },
   'certification-authority': {
     walletId:  '20c400c0-f5a8-4b8b-b43c-a92f237730b3',
     entityId:  '7b70df78-0558-4db0-af37-5107174bc999',
-    apiKey:    'de2360b873a9a04e4e6e60d185e10b659b0d4786cc3ffb5e134ed7aadeb87317',
+    apiKey:    envKey('certification-authority'),
     did:       'did:prism:929f673c458da7e3dd18170df30abf721887cad9bea4ccde6d16c680afc2278c',
   },
   'company-admin-portal': {
     walletId:  '9fca9469-f508-45e4-80e0-b187cee31d53',
     entityId:  '991f02fc-4bb7-4802-bf16-bab74df57631',
-    apiKey:    'b926dde98ccecaa12096b9bee7d128433bd147b8f830bb825ec9929b80afb10e',
+    apiKey:    envKey('company-admin-portal'),
     did:       'did:prism:32751bea5985532bc17b0516c2a958c80107079a3fe8b834560cad693b79d108',
   },
 };

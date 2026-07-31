@@ -527,7 +527,7 @@ InvitationGenerated
 **Enterprise Cloud Agent** (Employee Wallets):
 ```bash
 ENTERPRISE_CLOUD_AGENT_URL="http://91.99.4.54:8300"
-ENTERPRISE_ADMIN_TOKEN="3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu"
+ENTERPRISE_ADMIN_TOKEN="${ENTERPRISE_ADMIN_TOKEN}"
 ```
 
 **TechCorp Cloud Agent** (Company Wallet):
@@ -540,7 +540,7 @@ TECHCORP_WALLET_ID="40e3db59-afcb-46f7-ae39-47417ad894d9"
 **Hardcoded in EmployeeWalletManager.js** (lines 21-28):
 ```javascript
 const ENTERPRISE_CLOUD_AGENT_URL = process.env.ENTERPRISE_CLOUD_AGENT_URL || 'http://91.99.4.54:8300';
-const ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu';
+const ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN || '${ENTERPRISE_ADMIN_TOKEN}';
 const TECHCORP_CLOUD_AGENT_URL = process.env.TECHCORP_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
 const TECHCORP_API_KEY = process.env.TECHCORP_API_KEY || 'b45cde041306c6bceafee5b1da755e49635ad1cd132b26964136a81dda3e0aa2';
 const TECHCORP_WALLET_ID = process.env.TECHCORP_WALLET_ID || '40e3db59-afcb-46f7-ae39-47417ad894d9';
@@ -908,7 +908,7 @@ docker logs enterprise-cloud-agent | grep -i prism
 **Configuration Constants** (lines 21-28):
 ```javascript
 const ENTERPRISE_CLOUD_AGENT_URL = process.env.ENTERPRISE_CLOUD_AGENT_URL || 'http://91.99.4.54:8300';
-const ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu';
+const ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN || '${ENTERPRISE_ADMIN_TOKEN}';
 const TECHCORP_CLOUD_AGENT_URL = process.env.TECHCORP_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
 const TECHCORP_API_KEY = process.env.TECHCORP_API_KEY || 'b45cde041306c6bceafee5b1da755e49635ad1cd132b26964136a81dda3e0aa2';
 const TECHCORP_WALLET_ID = process.env.TECHCORP_WALLET_ID || '40e3db59-afcb-46f7-ae39-47417ad894d9';
@@ -926,7 +926,7 @@ extra_hosts:
 
 **Environment Variables** (key sections):
 ```yaml
-ADMIN_TOKEN: "3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu"
+ADMIN_TOKEN: "${ENTERPRISE_ADMIN_TOKEN}"
 API_KEY_ENABLED: 'true'
 REST_SERVICE_URL: http://91.99.4.54:8300/cloud-agent
 DIDCOMM_SERVICE_URL: https://identuslabel.cz/enterprise/didcomm

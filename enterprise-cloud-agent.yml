@@ -55,7 +55,7 @@ services:
     image: identuslabel/identus-cloud-agent:2.1-basicmsg
     environment:
       # SECURITY: Secure admin token (32 chars random)
-      ADMIN_TOKEN: "3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu"
+      ADMIN_TOKEN: "${ENTERPRISE_ADMIN_TOKEN}"
 
       # Multitenancy Configuration
       API_KEY_ENABLED: 'true'

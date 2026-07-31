@@ -54,13 +54,13 @@ services:
     image: identuslabel/identus-cloud-agent:2.1-basicmsg
     environment:
       # SECURITY: Secure admin token (32 chars random)
-      ADMIN_TOKEN: "N9TEJXrZlIX4Qg8R1RSlJwC820QZKwXb"
+      ADMIN_TOKEN: "${MULTITENANCY_ADMIN_TOKEN}"
 
       # Multitenancy Configuration
       API_KEY_ENABLED: 'true'
       API_KEY_AUTO_PROVISIONING: 'false'  # Manual tenant creation only
       API_KEY_AUTHENTICATE_AS_DEFAULT_USER: 'false'
-      API_KEY_SALT: "3c5734ee9ec393fdadd72d6f53f95d1b0ae6599055a73914fe1b31a83898e6dc"
+      API_KEY_SALT: "${API_KEY_SALT}"
       DEFAULT_WALLET_ENABLED: 'false'  # No default wallet in multitenancy mode
 
       # Service URLs

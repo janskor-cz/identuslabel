@@ -601,7 +601,7 @@ async function resolveLinkedPhotoDID(photoDID) {
   try {
     const resp = await fetch(
       `${ENTERPRISE_CLOUD_AGENT_URL}/dids/${encodeURIComponent(photoDID)}`,
-      { headers: { 'apikey': process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu' } }
+      { headers: { 'apikey': process.env.ENTERPRISE_ADMIN_TOKEN } }
     );
     if (!resp.ok) return null;
     const doc = await resp.json();
@@ -11711,7 +11711,10 @@ app.listen(PORT, async () => {
   // We use a deterministic key per entity (so restarts stay idempotent) and register in the background.
   console.log('🔧 Registering enterprise agent webhooks for all employee wallets (background)...');
   const enterpriseWebhookUrl = `${COMPANY_PUBLIC_BASE_URL}/api/enterprise-messages-webhook`;
-  const ENTERPRISE_ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu';
+  // No hardcoded fallback: this is the enterprise agent's full admin token, and this file is
+  // tracked in a public repository. It comes from company-admin-portal/.env only.
+  const ENTERPRISE_ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN;
+  if (!ENTERPRISE_ADMIN_TOKEN) throw new Error('ENTERPRISE_ADMIN_TOKEN is not set');
   (async () => {
     try {
       let offset = 0; const limit = 100; let registered = 0; let skipped = 0;
