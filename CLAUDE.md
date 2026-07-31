@@ -45,28 +45,112 @@ kill $(lsof -ti :3020) 2>/dev/null; sleep 1
 cd /opt/project_identuslabel/identus-document-service && PORT=3020 nohup node server.js > /opt/project_identuslabel/document-service.log 2>&1 &
 
 # Alice Wallet (port 3001) - OBSOLETE, do not use
-# cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
+# cd /opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
 # fuser -k 3001/tcp && rm -rf .next && yarn dev > /tmp/alice.log 2>&1 &
 
-# IDL Wallet (port 3002) - PRIMARY WALLET (Caddy routes /wallet → 3002)
+# IDL Wallet v1 (port 3002) - PRIMARY WALLET (Caddy routes /wallet → 3002)
+# ⚠️ FROZEN as of 2026-07-30 (tag `wallet-v1-frozen`) — SECURITY FIXES ONLY, no feature work.
+#    v1 runs on a patched fork of the DISCONTINUED @hyperledger/identus-edge-agent-sdk@6.6.0.
+#    Its successor package is @hyperledger/identus-sdk (now 8.1.0). v2 is being built on v8;
+#    v1 retires once v2 passes kotlin-port/11-acceptance-tests.md.
+#    Plan: .claude/plans/ · Background: kotlin-port/13-sdk-version-strategy.md
+#
 # IMPORTANT: runs as production build (next start), NOT yarn dev
 # After any source change you MUST rebuild:
 cd /opt/project_identuslabel/idl-wallet && yarn build
 kill $(lsof -ti :3002) 2>/dev/null; sleep 1
 nohup node_modules/.bin/next start --port 3002 --hostname 0.0.0.0 > /opt/project_identuslabel/idl-wallet.log 2>&1 &
+
+# IDL Wallet v2 (port 3004) - SDK v8 SUCCESSOR, under construction (Caddy: /wallet-v2 → 3004)
+# Coexists with frozen v1 on 3002. Storage isolation is a SECURITY property, not a convenience:
+# both are served from identuslabel.cz, so they share one browser origin and therefore share
+# IndexedDB/localStorage. The ONLY thing keeping v2 out of v1's live user data is the namespace
+# constant in idl-wallet-v2/src/config/walletNamespace.ts (v2 = idl2, v1 = idl).
+#   INVARIANT — must return nothing but walletNamespace.ts itself:
+#     grep -rn "identus-wallet-idl\b\|wallet-idl-\|'idl'" idl-wallet-v2/src/
+# NOT on port 3003 — the Caddyfile already claims that for the /test-wallet staging route.
+# Caddy route: run `sudo idl-wallet-v2/deploy-caddy-route.sh` (needs root; idempotent).
+#
+# ⚠️ v2 PATCHES THE SDK AT POSTINSTALL — see "SDK: v2 patches upstream npm" below before
+#    upgrading @hyperledger/identus-sdk or debugging a patch that appears not to work.
+cd /opt/project_identuslabel/idl-wallet-v2 && yarn build
+kill $(lsof -ti :3004) 2>/dev/null; sleep 1
+nohup node_modules/.bin/next start --port 3004 --hostname 0.0.0.0 > /opt/project_identuslabel/idl-wallet-v2.log 2>&1 &
+
+# Presentation Deck (port 3040) - static IDL Wallet / DID+VC explainer deck
+# Zero-dependency static file server (server.js, built-in http module only).
+# Caddy route /presentation* -> 127.0.0.1:3040 already wired in /root/Caddyfile
+# (see presentation/deploy-caddy-route.sh — only needs re-running if the route is ever removed).
+kill $(lsof -ti :3040) 2>/dev/null; sleep 1
+cd /opt/project_identuslabel/presentation && PORT=3040 nohup node server.js > /opt/project_identuslabel/presentation.log 2>&1 &
 ```
 
-### SDK Development (OBSOLETE — Alice Wallet only)
-> **Note**: Alice Wallet (port 3001) is obsolete. IDL Wallet uses the SDK via npm packages.
-> This workflow only applies if modifying SDK source for legacy Alice Wallet testing.
+### SDK: IDL Wallet v1 runs on a LOCAL PATCHED FORK, not an npm package
 
-After modifying SDK source in `/root/clean-identus-wallet/sdk-v6-test/sdk-ts/src/`:
+⚠️ **This corrects a long-standing error in this file, which claimed "IDL Wallet uses the SDK via
+npm packages." It does not.** `idl-wallet/package.json` declares:
+
+```
+"@hyperledger/identus-edge-agent-sdk": "file:../clean-identus-wallet/sdk-v6-test/sdk-ts"
+```
+
+That is a **git working tree** at `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts`
+— upstream `v6.6.0` plus **4 local commits** (`v6.6.0-4-g17799031`) carrying **13 distinct patches**
+across 20 files. They are load-bearing: without them, credential offers from Cloud Agent throw,
+presentations are signed with the wrong curve, and duplicate-key conflicts break connections.
+
+- Patch set documented: `kotlin-port/01-sdk-gap-analysis.md` Part A
+- Patch diff preserved: `kotlin-port/artifacts/sdk-fork.patch`
+- Also pushed to `fork/master` on `janskor-cz/identus-edge-wallet`
+- Freeze tags: `wallet-v1-frozen` (this repo), `wallet-v1-frozen-sdk` (the fork)
+
+**The path was previously `/root/clean-identus-wallet/...`, which no longer exists** — the tree was
+moved to `/opt`. Until fixed (2026-07-30) any `yarn install` in `idl-wallet` would have failed. The
+dependency is now a **relative** `file:` path so it survives future moves.
+
+After modifying SDK source, rebuild the SDK and reinstall it into the wallet:
 ```bash
-cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts
-yarn build
-cp -r build/* demos/alice-wallet/node_modules/@hyperledger/identus-edge-agent-sdk/build/
-cd demos/alice-wallet && rm -rf .next && yarn dev
-# Users must hard refresh browser (Ctrl+Shift+R)
+cd /opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts && yarn build
+cd /opt/project_identuslabel/idl-wallet && yarn install --force && yarn build   # then restart 3002
+```
+Test any dependency change in a **copy** first, never the live tree:
+```bash
+tar -C idl-wallet -cf - --exclude=node_modules --exclude=.next --exclude=.git . \
+  | (mkdir -p /opt/project_identuslabel/.installtest && tar -C /opt/project_identuslabel/.installtest -xf -)
+cd /opt/project_identuslabel/.installtest && yarn install && yarn build   # verified working 2026-07-30
+```
+
+> **Alice Wallet (port 3001) is obsolete.** Its demos under `sdk-ts/demos/` had their
+> `node_modules`/`.next` build artifacts deleted on 2026-07-30 to reclaim 20 GB (disk was at 98%).
+> Sources are still git-tracked and on `fork/master`; run `yarn install` in a demo to restore it.
+
+### SDK: v2 patches upstream npm (no fork)
+
+v1 pins a **local patched fork** (above). **v2 does not** — it depends on the published package
+(`"@hyperledger/identus-edge-agent-sdk": "npm:@hyperledger/identus-sdk@8.1.0"`), so patches cannot
+live in a git tree. They are applied post-install by `idl-wallet-v2/scripts/patch-sdk.js`, wired to
+`postinstall` (also runnable as `yarn patch-sdk`).
+
+Each patch is an idempotent, self-verifying **exact string replacement over the shipped minified
+bundle** — not a unified diff, which for a one-line 1 MB file would be unreadable and would break
+on any upstream rebuild. Re-running is safe. **The script exits 1 rather than skipping when a patch
+no longer matches**, so an SDK upgrade fails loudly instead of silently dropping a fix; re-derive
+each patch against the new bundle, or delete it if upstream fixed the bug.
+
+Current patches:
+
+| ID | Fixes |
+|----|-------|
+| `P1` | DIF presentation submissions were signed with an arbitrary key (`getDIDPrivateKeysByDID(...).at(0)` — RxDB sorts by random `uuid`, so ~50% of DIDs drew `master-0`). Master keys are excluded from every PRISM verification relationship, so those VPs passed the SDK's own verifier but failed the authentication-scoped check in `idl-wallet-v2/src/utils/liveIdentityVerification.ts`, breaking live identity verification and the reciprocal identity disclosure in `OOB.tsx`. |
+
+⚠️ **The SDK ships every module twice — ESM `build/*.js` and CJS `build/*.cjs`, with identical
+minified identifiers.** `package.json` sets `main: ./build/index.cjs`, and **Next.js bundles the
+CJS copy**. Patching only the `.js` chunk builds and deploys cleanly while changing nothing. Always
+confirm a patch landed in the built artifact, not just `node_modules`:
+
+```bash
+cd /opt/project_identuslabel/idl-wallet-v2
+grep -o 'signWithDID([^)]*"AUTHENTICATION_KEY")' .next/static/chunks/pages/_app-*.js
 ```
 
 ### Health Checks
@@ -77,12 +161,15 @@ curl http://91.99.4.54:8200/_system/health               # Multitenancy Agent (8
 curl https://identuslabel.cz/ca/api/health               # CA Server (3005)
 curl https://identuslabel.cz/company-admin/api/health    # Company Admin (3010)
 curl https://identuslabel.cz/document-service/health     # Document Service (3020)
+curl -o /dev/null -w '%{http_code}\n' https://identuslabel.cz/wallet        # IDL Wallet v1 (3002, FROZEN)
+curl -o /dev/null -w '%{http_code}\n' https://identuslabel.cz/wallet-v2     # IDL Wallet v2 (3004)
+curl -o /dev/null -w '%{http_code}\n' https://identuslabel.cz/presentation  # Presentation Deck (3040)
 ```
 
 ### Testing
 ```bash
 # Wallet tests (Alice Wallet — OBSOLETE, kept for SDK regression testing only)
-cd /root/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
+cd /opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/demos/alice-wallet
 yarn test              # Run all tests
 yarn test:basic        # Basic load test
 yarn test:connect-ca   # CA connection test
@@ -95,10 +182,12 @@ node test-employee-wallet-creation.js
 
 ### Viewing Logs
 ```bash
-tail -f /opt/project_identuslabel/idl-wallet.log        # IDL Wallet (primary)
+tail -f /opt/project_identuslabel/idl-wallet.log        # IDL Wallet v1 (frozen)
+tail -f /opt/project_identuslabel/idl-wallet-v2.log     # IDL Wallet v2 (SDK v8)
 tail -f /opt/project_identuslabel/ca.log                # Certification Authority
 tail -f /opt/project_identuslabel/company-admin.log     # Company Admin Portal
 tail -f /opt/project_identuslabel/document-service.log  # Document Service
+tail -f /opt/project_identuslabel/presentation.log      # Presentation Deck
 docker logs identus-mediator-identus-mediator-1 --tail 100  # Mediator
 ```
 
@@ -140,7 +229,12 @@ PRISM Node (50053)    Multitenancy Agent (8200)
 
 /opt/project_identuslabel/identus-document-service/ # Stateless VP-gated document service (port 3020)
 
-/root/clean-identus-wallet/sdk-v6-test/sdk-ts/     # Identus SDK source (OBSOLETE — Alice Wallet only)
+/opt/project_identuslabel/presentation/            # Static DID+VC explainer deck (port 3040)
+  ├── server.js                                    # Zero-dependency static file server
+  ├── index.html                                   # Deck content
+  └── deploy-caddy-route.sh                        # One-time Caddy route setup (needs /root access)
+
+/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts/  # PATCHED SDK FORK — v1 depends on this (file: dep)
   └── demos/alice-wallet/                          # Alice Wallet — OBSOLETE, do not use
 ```
 
@@ -321,10 +415,12 @@ No server-side fallback lookups are performed — the employee's VC selection is
 
 | Service | URL | Port |
 |---------|-----|------|
-| IDL Wallet | https://identuslabel.cz/wallet | 3002 |
+| IDL Wallet v1 | https://identuslabel.cz/wallet | 3002 — **FROZEN** |
+| IDL Wallet v2 | https://identuslabel.cz/wallet-v2 | 3004 — SDK v8, in progress |
 | CA Portal | https://identuslabel.cz/ca | 3005 |
 | Company Admin | https://identuslabel.cz/company-admin | 3010 |
 | Document Service | https://identuslabel.cz/document-service | 3020 |
+| Presentation Deck | https://identuslabel.cz/presentation | 3040 |
 | Cloud Agent | https://identuslabel.cz/cloud-agent | 8000 |
 | Enterprise Agent | https://identuslabel.cz/enterprise | 8300 |
 | Multitenancy Agent | http://91.99.4.54:8200 | 8200 |

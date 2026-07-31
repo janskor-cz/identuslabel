@@ -1,0 +1,8 @@
+17799031a67cba04d87b761e4c0e1f7ba948a713 2026-03-21
+    feat: VC-based document access, QR scanner fix, security level standardization
+910e670ec7a1863d145c150d4d0f6c8f27f06120 2026-01-02
+    Fix Security Clearance credential display name in wallet
+cd10bb7b8f52b47dc8589ef46e6077c0d3beb4c4 2025-12-13
+    Add My Documents page and classified document viewer
+f15d7ba6658407d0b4452fb38db7bc6cf552ef76 2025-12-11
+    Custom Identus SDK modifications for SSI infrastructure
