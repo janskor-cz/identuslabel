@@ -2,6 +2,30 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## ⚠️ This tree spans FOUR git repositories
+
+`/opt/project_identuslabel/` is one directory but **not** one repo. Check which one you are in
+before committing — `git status` from the wrong directory will silently show the wrong thing.
+
+| Directory | Repository | Contents |
+|---|---|---|
+| `/opt/project_identuslabel/` | `janskor-cz/identuslabel` | CA, company-admin-portal, `packages/`, the frozen `idl-wallet` v1, presentation deck, `kotlin-port/`, infra + docs |
+| `idl-wallet-v2/` | `janskor-cz/idl-wallet` | IDL Wallet v2 (SDK v8) — **gitignored by the parent** |
+| `identus-document-service/` | `janskor-cz/identus-document-service` | VP-gated document microservice — **gitignored by the parent** |
+| `clean-identus-wallet/sdk-v6-test/sdk-ts/` | `janskor-cz/identus-edge-wallet` (`fork` remote) | Patched SDK v6 fork that v1 depends on — **gitignored by the parent** |
+
+The nesting is deliberate and must be preserved: `certification-authority`, `company-admin-portal`
+and `identus-document-service` all depend on the shared libraries via relative
+`file:../packages/...`, and `idl-wallet` v1 reaches `../clean-identus-wallet/...`. npm resolves
+those **by filesystem path, not by repo boundary**, so moving any of these directories breaks
+`yarn install` in the others. Split done 2026-07-31.
+
+**Runtime data is no longer tracked** in any of them (`certification-authority/data/*.json` except
+`ca-authority-credential.json`, `idl-wallet/data/`, `idl-wallet-v2/data/`,
+`identus-document-service/data/` except `admin-config.json`). Do not `git add` a whole `data/`
+directory — that is how live verification codes and a Cloud Agent wallet apiKey previously reached
+a public repo.
+
 ## Build & Development Commands
 
 ### Infrastructure Services (Docker)
