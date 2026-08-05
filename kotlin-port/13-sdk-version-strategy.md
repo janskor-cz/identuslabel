@@ -125,6 +125,35 @@ This is the part that makes the upgrade worth doing on its own merits:
 | #624 "wire up SD-JWT Key Binding JWT for presentation proofs" | Strengthens SD-JWT holder binding (`06`) |
 | #536 "support both 'jwt' and 'prism/jwt' credential formats" | Part of the format aliasing in `04` §4.5 |
 
+## 2026-08 correction — Option B's outcome already exists, via a different route
+
+Everything below §13.5 was written as a forward-looking recommendation. As of 2026-08, it's worth
+reading as **history with one correction**, not a plan still to be executed:
+
+**`idl-wallet-v2` already is the "Option B" outcome** — TS migrated 6.6.0 → 8.1.0 — but it was
+reached via a **parallel rewrite** (a new wallet stood up alongside the frozen v1), not the in-place
+`idl-wallet` migration §13.6/§13.7 describe. Concretely:
+
+- `idl-wallet-v2/package.json` depends on stock `npm:@hyperledger/identus-sdk@8.1.0` — no `file:`
+  fork dependency at all.
+- The fork shrank from 13 patches to exactly the **2 hard ones this document predicted** (§13.2:
+  P1, P13) — and even those are no longer SDK patches in the v1 sense: P1 is a post-install exact-
+  string patch over the shipped bundle (`idl-wallet-v2/scripts/patch-sdk.js`), and P13 is an
+  app-layer compat shim (`idl-wallet-v2/src/utils/sdkCompat.ts`'s `deleteCredential`), not a modified
+  SDK internal.
+- §13.6's "rescue the fork" and §13.7's step-by-step 6.6.0→7→8 migration plan **did not need to run**
+  — v1 stayed frozen and untouched throughout; v2 was built fresh instead. Both sections are kept
+  below as a record of the path *not* taken, in case a future in-place migration of some other wallet
+  ever needs the same playbook.
+- §13.1's "the fork's source is gone" (item 4) was itself already wrong by the time this was written
+  — the tree had moved, not vanished (see `01-sdk-gap-analysis.md`'s A.0 correction) — but it's moot
+  either way now that v2 doesn't depend on the fork at all.
+
+**What still stands, unchanged:** §13.2's per-patch v8 status table, §13.3/§13.4's breaking-changes
+tables, and §13.8's list of documents 01–12 needing a re-baseline before the Kotlin port begins —
+that re-baseline is real, outstanding work (tracked as an issue on `idl-wallet-kotlin`), just against
+`idl-wallet-v2` as the live example rather than as a migration still to be planned.
+
 ## 13.5 Strategy — three options
 
 The wallet needs (a) off a dead package and (b) optionally ported to Kotlin. These interact.

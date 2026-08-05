@@ -57,6 +57,19 @@ git diff v6.6.0..HEAD -- src/
 > ⚠️ **Also note:** that repo's `.git/config` contains a GitHub PAT embedded in a `fork` remote URL.
 > The token should be revoked; do not copy the remote into any new repository.
 
+> **2026-08 correction — this whole section is now history, not current state.** The fork was
+> recovered (it had moved to `/opt/project_identuslabel/clean-identus-wallet/sdk-v6-test/sdk-ts`, not
+> deleted) and the "Option B" migration `13-sdk-version-strategy.md` recommends has already
+> happened — not as an in-place migration of this wallet, but as a **parallel rewrite**:
+> `idl-wallet-v2` runs on stock `@hyperledger/identus-sdk@8.1.0`, no forked SDK tree at all. Its only
+> two departures from stock upstream are a single post-install patch (P1, signing-key selection —
+> `idl-wallet-v2/scripts/patch-sdk.js`) and an app-layer compat shim for the missing
+> `deleteCredential` (P13 — `idl-wallet-v2/src/utils/sdkCompat.ts`, not an SDK patch). **The Kotlin
+> port's source of truth is `idl-wallet-v2`, not the frozen v1 described in this Part A.** See
+> `13-sdk-version-strategy.md`'s own 2026-08 correction for the full account. Part A is kept below
+> as history — it still explains *why* several v1 behaviours existed, which is useful when deciding
+> whether v2 (and therefore Kotlin) still needs them.
+
 ### A.1 Patch inventory
 
 Each row states what the patch changed, why, and what the Kotlin port must do. **"Remedy" is the
@@ -413,6 +426,12 @@ Same category of hidden knowledge; they live in `idl-wallet/src` and must surviv
 Verified against `github.com/hyperledger-identus/sdk-kmp` @ `main` (latest tag `v5.0.0`), files
 `sdk/src/commonMain/kotlin/org/hyperledger/identus/walletsdk/edgeagent/EdgeAgent.kt` and
 `…/domain/buildingblocks/Pluto.kt`. Anything not directly read is marked **unverified**.
+
+> **2026-08 correction:** the table below was written against TS **v6** (the frozen v1 wallet). Per
+> `13-sdk-version-strategy.md` §13.8's own instruction, this needs re-baselining to **TS v8
+> (`idl-wallet-v2`) → Kotlin `sdk-kmp` v5** before being trusted for the actual port — several rows
+> compare against SDK calls (`createNewPeerDID`, `castor.parseDID`, `agent.sendMessage`, …) that v8
+> renamed or removed. Filed as an issue on `idl-wallet-kotlin`, not corrected inline here yet.
 
 ### B.1 Coordinates and platform
 

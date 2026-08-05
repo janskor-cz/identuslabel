@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## ⚠️ This tree spans FOUR git repositories
+## ⚠️ This tree spans FIVE git repositories
 
 `/opt/project_identuslabel/` is one directory but **not** one repo. Check which one you are in
 before committing — `git status` from the wrong directory will silently show the wrong thing.
@@ -13,12 +13,14 @@ before committing — `git status` from the wrong directory will silently show t
 | `idl-wallet-v2/` | `janskor-cz/idl-wallet` | IDL Wallet v2 (SDK v8) — **gitignored by the parent** |
 | `identus-document-service/` | `janskor-cz/identus-document-service` | VP-gated document microservice — **gitignored by the parent** |
 | `clean-identus-wallet/sdk-v6-test/sdk-ts/` | `janskor-cz/identus-edge-wallet` (`fork` remote) | Patched SDK v6 fork that v1 depends on — **gitignored by the parent** |
+| `idl-wallet-kotlin/` | `janskor-cz/idl-wallet-kotlin` | Kotlin Multiplatform port of `idl-wallet-v2`, desktop-first — **gitignored by the parent**; checked out here for porting-source proximity only, no `file:`-style dependency. Development happens on the maintainer's personal computer, not this server. |
 
 The nesting is deliberate and must be preserved: `certification-authority`, `company-admin-portal`
 and `identus-document-service` all depend on the shared libraries via relative
 `file:../packages/...`, and `idl-wallet` v1 reaches `../clean-identus-wallet/...`. npm resolves
 those **by filesystem path, not by repo boundary**, so moving any of these directories breaks
-`yarn install` in the others. Split done 2026-07-31.
+`yarn install` in the others. Split done 2026-07-31. `idl-wallet-kotlin` joined 2026-08-05 as a
+plain sibling checkout (Gradle, not npm — no filesystem-path dependency to preserve).
 
 **Runtime data is no longer tracked** in any of them (`certification-authority/data/*.json` except
 `ca-authority-credential.json`, `idl-wallet/data/`, `idl-wallet-v2/data/`,

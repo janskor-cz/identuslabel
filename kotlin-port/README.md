@@ -39,13 +39,15 @@ decisions in `02-architecture.md` exist solely to accommodate its findings.
 
 ## The eight constraints that shape everything
 
-1. **The TS wallet runs on a patched fork of a *discontinued* SDK, and the fork's source is gone.**
-   `package.json` points at `/root/clean-identus-wallet/sdk-v6-test/sdk-ts`, which no longer exists.
-   The only copy is `idl-wallet/node_modules/@hyperledger/identus-edge-agent-sdk` — a git repo at
-   `v6.6.0` + 4 local commits across 20 files. 13 distinct patches, all load-bearing. → `01` Part A.
-   **Worse than it looks:** that npm package received no release after 6.6.0; the SDK was renamed to
-   `@hyperledger/identus-sdk` and is now at **8.1.0**. A `yarn install` in `idl-wallet` today would
-   break the running wallet. → **`13` §13.1, and do §13.6 first.**
+1. **`idl-wallet` v1 is frozen on a patched fork of a *discontinued* SDK — but that's history, not
+   the porting target.** `idl-wallet` (v1, port 3002) still runs on a privately patched
+   `@hyperledger/identus-edge-agent-sdk@6.6.0` (13 patches, `01` Part A) and stays frozen indefinitely
+   — it is **not** what this port targets. **The actual porting source is `idl-wallet-v2`** (port
+   3004), which already runs on stock `@hyperledger/identus-sdk@8.1.0` with no forked SDK tree at
+   all — just one post-install patch (P1) and one app-layer compat shim (P13, `sdkCompat.ts`). See
+   `13-sdk-version-strategy.md`'s 2026-08 correction and `01-sdk-gap-analysis.md`'s A.0 correction
+   for the full account of how v1's fork problem was resolved (via a parallel rewrite, not an
+   in-place migration) without ever needing v1 to move off 6.6.0.
 
 2. **`sdk-kmp` is Android + JVM only — there is no iOS artifact.**
    `github.com/hyperledger-identus/sdk-kmp`, latest tag `v5.0.0`, Maven
@@ -112,7 +114,8 @@ The Kotlin wallet targets the same running services, so specs are verifiable end
 | CA Portal | `https://identuslabel.cz/ca` | 3005 |
 | Company Admin | `https://identuslabel.cz/company-admin` | 3010 |
 | Document Service | `https://identuslabel.cz/document-service` | 3020 |
-| IDL Wallet (reference impl) | `https://identuslabel.cz/wallet` | 3002 |
+| IDL Wallet v2 (porting source, SDK v8) | `https://identuslabel.cz/wallet-v2` | 3004 |
+| IDL Wallet v1 (frozen, historical reference only) | `https://identuslabel.cz/wallet` | 3002 |
 
 Mediator DID is hardcoded at `idl-wallet/src/reducers/app.ts:19`. The CA's invitation is fetched
 live from `GET /ca/api/well-known/invitation` (regenerated across CA restarts — do not pin it).
