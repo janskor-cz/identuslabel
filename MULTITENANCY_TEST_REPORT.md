@@ -235,8 +235,8 @@ environment:
   DEFAULT_WALLET_ENABLED: 'false'  # No default wallet
 
   # Secure Configuration
-  ADMIN_TOKEN: "N9TEJXrZlIX4Qg8R1RSlJwC820QZKwXb"
-  API_KEY_SALT: "3c5734ee9ec393fdadd72d6f53f95d1b0ae6599055a73914fe1b31a83898e6dc"
+  ADMIN_TOKEN: "${MULTITENANCY_ADMIN_TOKEN}"
+  API_KEY_SALT: "${API_KEY_SALT}"
 
   # Secrets Storage
   SECRET_STORAGE_BACKEND: postgres

@@ -823,10 +823,17 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
       }
 
       // Create and store the DIDPair connection
-      // Use verified identity name if available, otherwise fall back to request label
+      // Priority: verified identity name (from an attached/verified credential) > the invitee's
+      // self-declared label (requestDetails.label — this IS genuinely invitee-authored: the SDK's
+      // HandshakeRequest.fromOutOfBand() sets it from the `alias` argument passed to
+      // agent.acceptInvitation() on the invitee's own device, see HandleOOBInvitation.ts) > a
+      // neutral placeholder. Self-declared names are unverified and can be overwritten later if a
+      // verified VP arrives (see connections.tsx's VP-driven name upgrade).
       const connectionName = (senderIdentity && senderIdentity.hasIdentity && senderIdentity.fullName)
         ? senderIdentity.fullName
-        : requestDetails.label;
+        : (requestDetails.label && requestDetails.label !== 'Unknown')
+          ? requestDetails.label
+          : 'Unknown Contact';
 
       console.log(`💾 Storing connection with name: "${connectionName}"`);
 
@@ -1322,11 +1329,15 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
                 <strong>Request:</strong>
               </p>
               <p className="text-sm text-slate-300">
-                "{requestDetails.label}" wants to connect with you.
+                {requestDetails.label && requestDetails.label !== 'Unknown'
+                  ? <>"<strong>{requestDetails.label}</strong>" wants to connect with you.</>
+                  : 'Someone accepted your invitation and wants to connect.'
+                }
               </p>
-              {requestDetails.goal && (
-                <p className="text-xs text-slate-400 mt-1">
-                  Goal: {requestDetails.goal}
+              {requestDetails.label && requestDetails.label !== 'Unknown' && (
+                <p className="text-xs text-slate-500 mt-1">
+                  ⚠️ Self-declared by the invitee — not cryptographically verified. Anyone can type
+                  any name here; treat it as a hint, not proof of identity.
                 </p>
               )}
             </>
@@ -1652,7 +1663,13 @@ export const ConnectionRequest: React.FC<ConnectionRequestProps> = ({
 
             <div className="mb-4">
               <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">
-                Are you sure you want to reject this connection request from <strong>{requestDetails.label}</strong>?
+                Are you sure you want to reject this connection request
+                {senderIdentity?.hasIdentity
+                  ? <> from <strong>{senderIdentity.fullName}</strong></>
+                  : (requestDetails.label && requestDetails.label !== 'Unknown')
+                    ? <> from <strong>{requestDetails.label}</strong> (self-declared, unverified)</>
+                    : null
+                }?
               </p>
               <p className="text-xs text-gray-600 dark:text-gray-400 mb-3">
                 This action will permanently remove the request and prevent it from reappearing.

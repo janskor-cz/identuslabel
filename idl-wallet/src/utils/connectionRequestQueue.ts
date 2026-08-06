@@ -229,6 +229,50 @@ export class ConnectionRequestQueueManager {
   }
 
   /**
+   * Attach a credential to an already-queued request — used when a vc-proof-sharing/1.0/proof
+   * message arrives AFTER the request was first queued (no fixed timeout on how late this can be;
+   * see connections.tsx's message-processing effect, which keeps matching indefinitely).
+   */
+  async updateAttachedCredential(requestId: string, attachedCredential: any): Promise<void> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['connection_requests'], 'readwrite');
+      const store = transaction.objectStore('connection_requests');
+
+      const getRequest = store.get(requestId);
+
+      getRequest.onsuccess = () => {
+        const requestItem = getRequest.result;
+        if (!requestItem) {
+          reject(new Error('Request not found'));
+          return;
+        }
+
+        requestItem.attachedCredential = attachedCredential;
+
+        const putRequest = store.put(requestItem);
+
+        putRequest.onsuccess = () => {
+          resolve();
+        };
+
+        putRequest.onerror = () => {
+          console.error('🔴 [CONNECTION QUEUE] Failed to update attached credential:', putRequest.error);
+          reject(putRequest.error);
+        };
+      };
+
+      getRequest.onerror = () => {
+        console.error('🔴 [CONNECTION QUEUE] Failed to get request for credential update:', getRequest.error);
+        reject(getRequest.error);
+      };
+    });
+  }
+
+  /**
    * Remove a connection request from the queue
    */
   async removeRequest(requestId: string): Promise<void> {
@@ -459,6 +503,14 @@ export const connectionRequestQueue = {
   async removeRequest(walletId: string, requestId: string): Promise<void> {
     const manager = await ConnectionRequestQueueSingleton.getInstance(walletId);
     return manager.removeRequest(requestId);
+  },
+
+  /**
+   * Attach a credential to an already-queued request (a late-arriving vc-proof-sharing/1.0/proof)
+   */
+  async updateAttachedCredential(walletId: string, requestId: string, attachedCredential: any): Promise<void> {
+    const manager = await ConnectionRequestQueueSingleton.getInstance(walletId);
+    return manager.updateAttachedCredential(requestId, attachedCredential);
   },
 
   /**

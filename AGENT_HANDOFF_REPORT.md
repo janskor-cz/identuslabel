@@ -230,7 +230,7 @@ curl -s https://identuslabel.cz/document-service/health
 curl -s https://identuslabel.cz/company-admin/.well-known/jwks.json
 
 # Multitenancy agent wallets
-curl -s http://91.99.4.54:8200/wallets -H "x-admin-api-key: N9TEJXrZlIX4Qg8R1RSlJwC820QZKwXb" \
+curl -s http://91.99.4.54:8200/wallets -H "x-admin-api-key: ${MULTITENANCY_ADMIN_TOKEN}" \
   | python3 -c "import json,sys; [print(w['id'][:8], w['name']) for w in json.load(sys.stdin).get('contents',[])]"
 
 # Run tests
@@ -244,6 +244,6 @@ node test-alice-vp-access.js
 ## Multitenancy Agent Admin
 
 - **URL**: `http://91.99.4.54:8200`
-- **Admin key**: `N9TEJXrZlIX4Qg8R1RSlJwC820QZKwXb` (header: `x-admin-api-key`)
+- **Admin key**: `${MULTITENANCY_ADMIN_TOKEN}` (header: `x-admin-api-key`)
 - **DIDComm endpoint** (all tenants): `https://identuslabel.cz/multitenancy/didcomm` → proxied to `http://91.99.4.54:8290/didcomm` via Caddy
 

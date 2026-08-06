@@ -10,6 +10,93 @@ import SDK from "@hyperledger/identus-edge-agent-sdk";
 import { extractCredentialSubject } from './vcValidation';
 import { getCredentialsForConnection } from './connectionCredentialMatcher';
 
+const VC_PROOF_SHARING_PIURI = 'https://identuslabel.cz/protocols/vc-proof-sharing/1.0/proof';
+
+const isRawJws = (s: any): s is string =>
+  typeof s === 'string' && s.startsWith('eyJ') && s.split('.').length === 3;
+
+/**
+ * Extract a full name from a vc-proof-sharing/1.0/proof message's embedded vcProof — same two
+ * shapes createVCProofAttachment produces (raw JWT + disclosedFields, or a plain credentialSubject
+ * object), mirroring vcValidation.ts's parseInviterIdentity without needing that function's async
+ * signature verification — a display-name hint only, not a trust decision.
+ */
+function extractNameFromVCProof(vcProof: any): string | null {
+  try {
+    let credSubject = extractCredentialSubject(vcProof);
+
+    if (Object.keys(credSubject || {}).length === 0 && isRawJws(vcProof?.jwt)) {
+      const b64 = vcProof.jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      const payload = JSON.parse(atob(b64));
+      const fullSubject = payload.vc?.credentialSubject || payload.credentialSubject || {};
+      const disclosedFields: string[] | undefined = vcProof.disclosedFields;
+      if (disclosedFields && disclosedFields.length > 0) {
+        const filtered: any = {};
+        disclosedFields.forEach((field: string) => {
+          if (fullSubject[field] !== undefined) filtered[field] = fullSubject[field];
+        });
+        credSubject = filtered;
+      } else {
+        credSubject = fullSubject;
+      }
+    }
+
+    const firstName = credSubject?.firstName?.trim() || '';
+    const lastName = credSubject?.lastName?.trim() || '';
+    if (firstName && lastName) return `${firstName} ${lastName}`;
+    if (firstName) return firstName;
+    if (lastName) return lastName;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract a display name from a live-verified credentialSubject snapshot
+ * (ConnectionMetadata.verifiedCredentialSubject — see that field's doc comment).
+ */
+export function getNameFromVerifiedSubject(subject?: Record<string, any> | null): string | null {
+  if (!subject) return null;
+  const firstName = (subject.firstName || '').trim?.() || '';
+  const lastName = (subject.lastName || '').trim?.() || '';
+  if (firstName && lastName) return `${firstName} ${lastName}`;
+  if (firstName) return firstName;
+  if (lastName) return lastName;
+  if (subject.organizationName) return subject.organizationName;
+  if (subject.companyName) return subject.companyName;
+  return null;
+}
+
+/**
+ * Find a verified name from a live vc-proof-sharing/1.0/proof message sent by `connectionDID` —
+ * no time window: whenever this message arrives (immediately or much later, see connections.tsx's
+ * indefinite watch for late VP replies), it takes priority over a self-declared alias.
+ */
+export function getVerifiedNameFromVCProofSharing(
+  connectionDID: string,
+  messages: SDK.Domain.Message[] = []
+): string | null {
+  try {
+    if (!connectionDID || !messages?.length) return null;
+
+    const vcMsg = messages.find((m: any) =>
+      m.piuri === VC_PROOF_SHARING_PIURI &&
+      m.from?.toString() === connectionDID &&
+      m.direction === SDK.Domain.MessageDirection.RECEIVED
+    );
+    if (!vcMsg) return null;
+
+    const body = typeof vcMsg.body === 'string' ? JSON.parse(vcMsg.body) : vcMsg.body;
+    const vcProof = body?.vcProof;
+    if (!vcProof) return null;
+
+    return extractNameFromVCProof(vcProof);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Check if a credential is a RealPerson VC
  */
@@ -155,6 +242,14 @@ export function getConnectionNameWithFallback(
 
   if (vcName !== 'Unknown Connection') {
     return vcName;
+  }
+
+  // Live-verified name from the other party's own present-proof round trip (see
+  // liveIdentityVerification.ts / performLiveIdentityVerificationAndMaybeRespond) — takes priority
+  // over a self-declared connection alias whenever it arrives, no matter how late.
+  const verifiedName = getVerifiedNameFromVCProofSharing(connectionDID, messages);
+  if (verifiedName) {
+    return verifiedName;
   }
 
   if (fallbackName && fallbackName.trim() !== '') {

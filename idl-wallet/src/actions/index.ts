@@ -27,6 +27,7 @@ import { getCredentialType } from '../utils/credentialTypeDetector';
 // SecureDashboardBridge agent setter for Pluto fallback
 import { setSecureDashboardAgent } from '../utils/SecureDashboardBridge';
 import { setDocumentStorageWalletId } from '../utils/documentStorage';
+import { setPrefixedStorageWalletId, getItem, setItem } from '../utils/prefixedStorage';
 
 // Track pending VC requests to prevent duplicates
 const pendingVCRequests: Map<string, Promise<{ vc: any, connectionDID: string }>> = new Map();
@@ -328,6 +329,39 @@ export const acceptCredentialOffer = createAsyncThunk<
 })
 
 
+// handleMessages is registered as the SDK's own MESSAGE listener (see startAgent below) — the
+// SDK/mediator decide what counts as "new" each poll, and in practice the same message id can
+// come back as "new" across multiple polls (observed repeatedly for other message types too,
+// which is why the generic dedup step later in this function exists). The credential-issuance
+// block runs BEFORE that generic dedup and had no guard of its own: every redelivery of an old
+// issue-credential message called agent.processIssuedCredentialMessage() again, and each call
+// inserted another credential row into Pluto — unbounded growth (tens of thousands of duplicate
+// rows in a single session) that made every getAllCredentials()-based operation (AUTO-SEND,
+// credential list rendering) slow enough to blow past CA's own proof-request timeouts. This set
+// persists which issue-credential message ids we've already stored, independent of Pluto/Redux
+// state, so a redelivery of an already-processed one is a no-op.
+const PROCESSED_ISSUE_CREDENTIAL_IDS_KEY = 'processed-issue-credential-message-ids';
+
+function getProcessedIssueCredentialIds(): Set<string> {
+    try {
+        const stored = getItem(PROCESSED_ISSUE_CREDENTIAL_IDS_KEY);
+        return new Set(Array.isArray(stored) ? stored : []);
+    } catch {
+        return new Set();
+    }
+}
+
+function markIssueCredentialProcessed(id: string): void {
+    try {
+        const ids = getProcessedIssueCredentialIds();
+        ids.add(id);
+        // Cap growth — keep the most recent 500, plenty for any realistic backlog.
+        setItem(PROCESSED_ISSUE_CREDENTIAL_IDS_KEY, Array.from(ids).slice(-500));
+    } catch (err) {
+        console.warn('⚠️ [handleMessages] Could not persist processed issue-credential id:', err);
+    }
+}
+
 /**
  * Enhanced handleMessages with decryption support
  * Processes incoming messages, decrypting encrypted ones if user has clearance
@@ -387,9 +421,16 @@ async function handleMessages(
         message.piuri === "https://didcomm.atalaprism.io/issue-credential/3.0/issue-credential"
     );
     if (issuedCredentials.length) {
+        const processedIssueCredentialIds = getProcessedIssueCredentialIds();
         for (const issuedCredential of issuedCredentials) {
+            if (processedIssueCredentialIds.has(issuedCredential.id)) {
+                console.log('⏭️ [handleMessages] Skipping already-processed issue-credential message (redelivered):', issuedCredential.id);
+                continue;
+            }
+
             const issueCredential = IssueCredential.fromMessage(issuedCredential);
             const credential = await agent.processIssuedCredentialMessage(issueCredential);
+            markIssueCredentialProcessed(issuedCredential.id);
 
             // ✅ FIX: Credentials are SDK class instances (_JWTCredential, etc.)
             // Redux can handle them as-is since they're already stored in Pluto DB
@@ -677,6 +718,16 @@ async function handleMessages(
                                     if (firstClaim.clearanceLevel) return true;
                                 }
                             }
+                            // For RealPerson, match credentials with firstName + lastName + uniqueId
+                            // (same pattern used to classify the incoming request above)
+                            if (schemaId === 'RealPerson') {
+                                const cs = (cred as any).credentialSubject;
+                                if (cs?.firstName !== undefined && cs?.lastName !== undefined && cs?.uniqueId !== undefined) return true;
+                                if (cred.claims && cred.claims.length > 0) {
+                                    const c = cred.claims[0];
+                                    if (c.firstName !== undefined && c.lastName !== undefined && c.uniqueId !== undefined) return true;
+                                }
+                            }
                             // For EmployeeRole, match credentials with prismDid + email + role + department
                             if (schemaId === 'EmployeeRole') {
                                 const cs = (cred as any).credentialSubject;
@@ -831,6 +882,97 @@ export const stopAgent = createAsyncThunk<
 })
 
 
+// One-time cleanup for the credential-duplication bug fixed above (see
+// PROCESSED_ISSUE_CREDENTIAL_IDS_KEY comment) — wallets that ran before that fix landed can have
+// thousands of duplicate rows already sitting in Pluto from repeated redelivery of the same
+// issue-credential message. deleteCredential() looks credentials up by `.id` and removes one
+// matching row per call (see SDK's Pluto.deleteCredential), so calling it once per extra
+// duplicate in a same-`.id` group leaves exactly one row behind. Guarded to run only once per
+// wallet via a persisted flag — this scans every credential, so it's not something to repeat on
+// every agent start once the backlog is already clean.
+const CREDENTIAL_DEDUP_DONE_KEY = 'credential-dedup-cleanup-v1-done';
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function cleanupDuplicateCredentials(agent: SDK.Agent): Promise<void> {
+    if (getItem(CREDENTIAL_DEDUP_DONE_KEY)) {
+        return;
+    }
+
+    // Root-cause fix over the previous (throttled-but-still-concurrent) attempt: the actual
+    // conflict was the wallet's own message-polling insert racing this loop's deletes on the
+    // same DB. Slowing the loop down only reduced how often they collided — it was still slow
+    // AND still capable of failing. Stopping polling for the duration removes the other side of
+    // the race entirely, so deletes can run at full speed with no artificial delay. Always
+    // restarted in `finally`, including on error, so a cleanup failure can't leave the wallet
+    // unable to receive messages (e.g. mid CA-login attempt).
+    agent.stopFetchingMessages();
+    console.log('⏸️ [CredentialCleanup] Paused message polling for the duration of cleanup');
+
+    try {
+        const all = await agent.pluto.getAllCredentials();
+        console.log(`🧹 [CredentialCleanup] Scanning ${all.length} stored credentials for duplicates...`);
+
+        const groups = new Map<string, typeof all>();
+        for (const cred of all) {
+            const key = (cred as any).id;
+            if (!key) continue;
+            const existing = groups.get(key);
+            if (existing) existing.push(cred);
+            else groups.set(key, [cred]);
+        }
+
+        let deleted = 0;
+        let failed = 0;
+        let duplicateGroups = 0;
+        const PROGRESS_LOG_EVERY = 500;
+        // Still yield to the event loop periodically so the tab doesn't lock up while this
+        // churns through thousands of rows — but with no concurrent writer left to fight over
+        // transactions with, this no longer needs to be a meaningful delay.
+        const YIELD_EVERY = 50;
+        let sinceYield = 0;
+
+        for (const group of groups.values()) {
+            if (group.length <= 1) continue;
+            duplicateGroups++;
+            // Keep the first, delete the rest.
+            for (let i = 1; i < group.length; i++) {
+                try {
+                    await agent.pluto.deleteCredential(group[i]);
+                    deleted++;
+                } catch (delErr) {
+                    failed++;
+                    console.warn('⚠️ [CredentialCleanup] Failed to delete a duplicate row (kept in place):', delErr);
+                }
+
+                if (deleted > 0 && deleted % PROGRESS_LOG_EVERY === 0) {
+                    console.log(`🧹 [CredentialCleanup] Progress: ${deleted} removed so far...`);
+                }
+
+                sinceYield++;
+                if (sinceYield >= YIELD_EVERY) {
+                    sinceYield = 0;
+                    await sleep(0);
+                }
+            }
+        }
+
+        console.log(`✅ [CredentialCleanup] Done. ${duplicateGroups} duplicate group(s) found, ${deleted} duplicate row(s) removed, ${failed} failed, ${all.length - deleted} credential(s) remain.`);
+        // Only mark done if nothing failed — a partial run should retry the remainder next
+        // agent start rather than silently leaving stragglers behind forever.
+        if (failed === 0) {
+            setItem(CREDENTIAL_DEDUP_DONE_KEY, true);
+        } else {
+            console.warn(`⚠️ [CredentialCleanup] ${failed} row(s) left for next agent start (not marked complete).`);
+        }
+    } catch (err) {
+        console.error('❌ [CredentialCleanup] Cleanup failed (will retry on next agent start):', err);
+    } finally {
+        agent.startFetchingMessages(5);
+        console.log('▶️ [CredentialCleanup] Resumed message polling');
+    }
+}
+
 export const startAgent = createAsyncThunk<
     { agent: SDK.Agent, selfDID: SDK.Domain.DID },
     { agent: SDK.Agent }
@@ -855,6 +997,10 @@ export const startAgent = createAsyncThunk<
             setSecureDashboardAgent(agent);
             console.log('✅ [startAgent] SecureDashboardBridge agent set for Pluto fallback');
 
+            // One-time duplicate-credential cleanup (see cleanupDuplicateCredentials doc
+            // comment) — fire-and-forget so a large backlog doesn't delay wallet startup.
+            void cleanupDuplicateCredentials(agent);
+
         } catch (startError: any) {
             // ✅ Gracefully handle DIDComm secret errors (non-fatal)
             // These occur when encrypted messages arrive before peer DID keys are persisted
@@ -875,6 +1021,7 @@ export const startAgent = createAsyncThunk<
                 console.log('✅ [startAgent] SecureDashboardBridge agent set for Pluto fallback (after DIDComm error recovery)');
                 await agent.startFetchingMessages(5); // SDK takes seconds
                 console.log('✅ [startAgent] Message polling started (after DIDComm error recovery)');
+                void cleanupDuplicateCredentials(agent);
             } else {
                 // Re-throw other unexpected errors
                 throw startError;
@@ -1886,7 +2033,7 @@ export const sendMessage = createAsyncThunk<
  * (see packages/service-access-didcomm/PROTOCOL.md)
  */
 export const sendProtocolAccessRequest = createAsyncThunk<
-    void,
+    string,
     { agent: SDK.Agent; connection: SDK.Domain.DIDPair; target: string }
 >('sendProtocolAccessRequest', async ({ agent, connection, target }, api) => {
     const requestId = `ar-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1915,6 +2062,7 @@ export const sendProtocolAccessRequest = createAsyncThunk<
     } catch (_) { /* non-fatal */ }
 
     api.dispatch(reduxActions.messageSuccess([finalMessage]));
+    return requestId;
 });
 
 // ── Document Service DIDComm Protocol Thunks ────────────────────────────────
@@ -2424,6 +2572,10 @@ export const connectDatabase = createAsyncThunk<
             const walletId = options.username.toLowerCase();
             api.dispatch(reduxActions.setWalletId(walletId));
             setDocumentStorageWalletId(walletId);
+            // Scopes everything routed through prefixedStorage.ts (security clearance keys,
+            // CA/company TOFU pins, connection metadata, wallet folders, ...) to this user too —
+            // previously hardcoded to one shared prefix regardless of which profile was active.
+            setPrefixedStorageWalletId(walletId);
         }
 
         const apollo = new SDK.Apollo();
@@ -2434,28 +2586,47 @@ export const connectDatabase = createAsyncThunk<
         });
 
         const db = new SDK.Pluto(store, apollo);
-        await db.start();
-
-        // ✅ DEFENSIVE ERROR HANDLING: Gracefully handle corrupted messages
-        // If message deserialization fails (e.g., UnsupportedAttachmentType), continue initialization
-        let messages: SDK.Domain.Message[] = [];
         try {
-            messages = await db.getAllMessages();
-        } catch (messageError: any) {
-            console.error('⚠️ [connectDatabase] Failed to load messages (possible corruption):', messageError.message);
-            // Continue initialization - wallet can still function without messages
+            await db.start();
+
+            // ✅ DEFENSIVE ERROR HANDLING: Gracefully handle corrupted messages
+            // If message deserialization fails (e.g., UnsupportedAttachmentType), continue initialization
+            let messages: SDK.Domain.Message[] = [];
+            try {
+                messages = await db.getAllMessages();
+            } catch (messageError: any) {
+                console.error('⚠️ [connectDatabase] Failed to load messages (possible corruption):', messageError.message);
+                // Continue initialization - wallet can still function without messages
+            }
+
+            const connections = await db.getAllDidPairs()
+            const credentials = await db.getAllCredentials();
+
+            api.dispatch(
+                reduxActions.dbPreload(
+                    { messages, connections, credentials }
+                )
+            );
+
+            return api.fulfillWithValue({ db });
+        } catch (innerErr) {
+            // RxDB's createRxDatabase() registers itself (in-process, independent of
+            // multiInstance) under `dbName` as soon as db.start() succeeds — if anything AFTER
+            // that point throws (as opposed to db.start() itself failing), the database is
+            // still alive and registered even though this whole attempt is about to be reported
+            // as failed. A retry — e.g. the user clicking "Connect" again after a transient
+            // error — would then call `new SDK.Store(...)` + `db.start()` again for the same
+            // name and get RxDB error DB8 ("database already exists"), permanently, since
+            // nothing ever destroyed the orphaned instance. Clean it up here so a retry starts
+            // genuinely fresh instead of being stuck failing forever.
+            try {
+                await db.stop();
+                console.warn('⚠️ [connectDatabase] Destroyed partially-initialized database after failure, retry should now work cleanly');
+            } catch (cleanupErr) {
+                console.warn('⚠️ [connectDatabase] Could not clean up partially-initialized database:', cleanupErr);
+            }
+            throw innerErr;
         }
-
-        const connections = await db.getAllDidPairs()
-        const credentials = await db.getAllCredentials();
-
-        api.dispatch(
-            reduxActions.dbPreload(
-                { messages, connections, credentials }
-            )
-        );
-
-        return api.fulfillWithValue({ db });
     } catch (err) {
         console.error('❌ [connectDatabase] Database connection failed:', err);
         return api.rejectWithValue(err as Error);

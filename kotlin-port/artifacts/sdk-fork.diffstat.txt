@@ -1,0 +1,21 @@
+ src/castor/Castor.ts                               |  14 ++
+ src/domain/buildingBlocks/Pluto.ts                 |   5 +
+ src/domain/models/Message.ts                       |  61 +++++---
+ src/domain/models/errors/Mercury.ts                |  16 +++
+ .../connectionsManager/ConnectionsManager.ts       |  41 +++++-
+ src/edge-agent/didcomm/Agent.ts                    |  22 ++-
+ src/edge-agent/didcomm/CreatePresentation.ts       |   8 +-
+ src/edge-agent/didcomm/HandleOOBInvitation.ts      |   4 +-
+ src/edge-agent/didcomm/HandleOfferCredential.ts    | 153 ++++++++++++++-------
+ src/edge-agent/mediator/BasicMediatorHandler.ts    |  14 +-
+ .../protocols/connection/HandshakeRequest.ts       |  11 +-
+ .../protocols/issueCredential/OfferCredential.ts   |  21 ++-
+ src/edge-agent/protocols/pickup/PickupRunner.ts    |  27 +++-
+ src/edge-agent/protocols/types.ts                  |   1 +
+ src/edge-agent/types/index.ts                      |   3 +-
+ src/mercury/didcomm/Wrapper.ts                     |  41 ++++--
+ src/pluto/Pluto.ts                                 |  26 ++++
+ src/pluto/repositories/DIDRepository.ts            |  34 ++++-
+ src/pluto/repositories/builders/BaseRepository.ts  |   4 +
+ src/pluto/rxdb/Store.ts                            |   2 +-
+ 20 files changed, 396 insertions(+), 112 deletions(-)

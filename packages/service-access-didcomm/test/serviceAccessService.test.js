@@ -78,6 +78,10 @@ async function run() {
   const proofStates = new Map(); // proofId → { state, vpJwt }
   let nextVpJwt = null; // set by the test right before each handleIncomingMessage call
   let nextProofState = 'PresentationVerified'; // override to simulate e.g. a Cloud Agent schema-mismatch rejection
+  // When set, consumed in order (one entry per successive POST /present-proof/presentations),
+  // overriding nextProofState — lets a test script "attempt 1 fails, attempt 2 succeeds" for
+  // exercising the schemaIdFallbacks retry without a real Cloud Agent schema check.
+  let proofStateSequence = null;
 
   const server = http.createServer((req, res) => {
     let body = '';
@@ -105,7 +109,8 @@ async function run() {
         const proofId = `proof-${proofCounter}`;
         // Simulate the wallet having already approved by the time the first poll lands —
         // this test exercises the verify→grant core, not the pending/poll-timing behavior.
-        proofStates.set(proofId, { state: nextProofState, vpJwt: nextVpJwt });
+        const state = (proofStateSequence && proofStateSequence.length > 0) ? proofStateSequence.shift() : nextProofState;
+        proofStates.set(proofId, { state, vpJwt: nextVpJwt });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ presentationId: proofId }));
         return;
@@ -151,6 +156,14 @@ async function run() {
       portal: {
         label: 'Portal', icon: '🏛️', mode: 'redirect', redirectPath: '/dashboard',
         proofSpec: { proofs: [{ schemaId: 'EmployeeRole-v1', trustIssuers: [] }], goalCode: 'g', goal: 'Please prove', claims: {}, domain: 'test' },
+        trustedIssuerVcType: 'EmployeeRole'
+      },
+      portalWithFallback: {
+        label: 'Portal (multi-schema)', icon: '🏛️', mode: 'redirect', redirectPath: '/dashboard',
+        proofSpec: {
+          proofs: [{ schemaId: 'EmployeeRole-v2', schemaIdFallbacks: ['EmployeeRole-v1'], trustIssuers: [] }],
+          goalCode: 'g', goal: 'Please prove', claims: {}, domain: 'test'
+        },
         trustedIssuerVcType: 'EmployeeRole'
       },
       docAccess: {
@@ -243,6 +256,23 @@ async function run() {
   assert.ok(parsed3b.type.endsWith('/error'));
   assert.strictEqual(parsed3b.body.error, 'PROOF_REJECTED');
   nextProofState = 'PresentationVerified';
+
+  // --- Test 3c: schemaIdFallbacks — first attempt's schema rejected (Cloud Agent
+  // PresentationVerificationFailed), automatic retry with the next candidate schemaId succeeds
+  // → the holder should get a grant, not an error, and never gets asked to approve twice. ---
+  sentMessages.length = 0;
+  nextVpJwt = vpJwt;
+  const proofCountBefore3c = proofCounter;
+  proofStateSequence = ['PresentationVerificationFailed', 'PresentationVerified'];
+  await svc.handleIncomingMessage('did:peer:holder', JSON.stringify({
+    type: 'https://identuslabel.cz/protocols/service-access/1.0/request',
+    id: 'req-3c', body: { capability: 'portalWithFallback' }
+  }));
+  const msg3c = await waitFor(() => sentMessages.find(m => JSON.parse(m.content).thid === 'req-3c'));
+  const parsed3c = JSON.parse(msg3c.content);
+  assert.ok(parsed3c.type.endsWith('/grant'), 'a schema mismatch on the first candidate must retry with the fallback, not error out');
+  assert.strictEqual(proofCounter, proofCountBefore3c + 2, 'expected exactly two proof requests: primary schema (rejected) + fallback schema (accepted)');
+  assert.deepStrictEqual(proofStateSequence, [], 'both scripted states must have been consumed');
 
   // --- Test 4: unknown capability → UNKNOWN_CAPABILITY error, no proof request made ---
   sentMessages.length = 0;

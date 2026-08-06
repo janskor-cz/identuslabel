@@ -274,8 +274,7 @@ class ServiceAccessService {
     this._pending.delete(pending._id);
 
     if (TERMINAL_REJECTED_STATES.has(state)) {
-      console.warn(`[ServiceAccessService] Proof ${pending._id} did not succeed (state="${state}") for capability="${pending.capabilityKey}"`);
-      await this._sendError(pending.connectionId, pending.requestId, 'PROOF_REJECTED', `Proof request did not succeed (${state}).`);
+      await this._retryOrReject(pending, pending._id, state);
       return true;
     }
 
@@ -384,10 +383,33 @@ class ServiceAccessService {
     // wallet-side schema hint. Preserved here unchanged.
     const domain = capability.proofSpec.domain || 'ca.identus.org';
 
+    // The Cloud Agent's ProofRequestAux only accepts ONE schemaId per proof entry (verified
+    // against its OpenAPI spec — no OR/array support), so a capability that must accept a
+    // credential issued under more than one schema version (e.g. RealPerson v3.0.0 vs v4.0.0 —
+    // see certification-authority/server.js's 'portal'/'login' capabilities) can't express that
+    // as a single request. Instead each proof entry may declare `schemaIdFallbacks: [...]`; on a
+    // PresentationVerificationFailed we retry with the next candidate schemaId in place of the
+    // first, up to maxAttempts, before giving up. See _createProofRequest/_retryOrReject.
+    const maxAttempts = 1 + Math.max(0, ...capability.proofSpec.proofs.map(p => (p.schemaIdFallbacks || []).length));
+
+    const pending = { connectionId, requestId, capabilityKey, requestBody, senderRef, startedAt: Date.now(),
+      expectedChallenge: isBound ? challenge : null, capability, challenge, domain, attemptIndex: 0, maxAttempts };
+
+    await this._createProofRequest(pending);
+  }
+
+  /** (Re)creates the Cloud Agent proof request for `pending` at its current `attemptIndex`,
+   *  registers it in `this._pending`, and starts polling if that's the configured adapter. Used
+   *  both for the initial request and for schema-fallback retries (see `maxAttempts` above). */
+  async _createProofRequest(pending) {
+    const { connectionId, requestId, capabilityKey, capability, challenge, domain, attemptIndex, maxAttempts } = pending;
+
     const trustedIssuers = this.cfg.trustRegistry.getTrustedIssuers(capability.trustedIssuerVcType);
-    const proofs = capability.proofSpec.proofs.map(p =>
-      (p.trustIssuers && p.trustIssuers.length > 0) ? p : { ...p, trustIssuers: trustedIssuers }
-    );
+    const proofs = capability.proofSpec.proofs.map(p => {
+      const schemaId = attemptIndex === 0 ? p.schemaId : ((p.schemaIdFallbacks || [])[attemptIndex - 1] ?? p.schemaId);
+      const trustIssuers = (p.trustIssuers && p.trustIssuers.length > 0) ? p.trustIssuers : trustedIssuers;
+      return { schemaId, trustIssuers };
+    });
 
     const proofPayload = {
       connectionId, proofs,
@@ -419,13 +441,27 @@ class ServiceAccessService {
     }
 
     const proofId = proofData.presentationId || proofData.id;
-    console.log(`[ServiceAccessService] Proof request created: ${proofId} (capability="${capabilityKey}", conn=${connectionId.slice(0, 12)}...)`);
+    console.log(`[ServiceAccessService] Proof request created: ${proofId} (capability="${capabilityKey}", conn=${connectionId.slice(0, 12)}..., attempt=${attemptIndex + 1}/${maxAttempts})`);
 
-    const pending = { connectionId, requestId, capabilityKey, requestBody, senderRef, startedAt: Date.now(),
-      expectedChallenge: isBound ? challenge : null };
     this._pending.set(proofId, pending);
 
     if (this.verifiedEventAdapter === 'polling') this._startPolling(proofId);
+  }
+
+  /** Called when a pending proof reaches a terminal rejected state. Retries with the next
+   *  candidate schemaId if this was a schema mismatch and candidates remain; otherwise sends the
+   *  terminal service-access/1.0/error. Returns true if a retry was started (caller should not
+   *  also send an error). */
+  async _retryOrReject(pending, proofIdForLog, state) {
+    if (state === 'PresentationVerificationFailed' && pending.attemptIndex + 1 < pending.maxAttempts) {
+      console.warn(`[ServiceAccessService] Proof ${proofIdForLog} schema mismatch on attempt ${pending.attemptIndex + 1}/${pending.maxAttempts} for capability="${pending.capabilityKey}" — retrying with next candidate schema`);
+      pending.attemptIndex += 1;
+      await this._createProofRequest(pending);
+      return true;
+    }
+    console.warn(`[ServiceAccessService] Proof ${proofIdForLog} did not succeed (state="${state}") for capability="${pending.capabilityKey}"`);
+    await this._sendError(pending.connectionId, pending.requestId, 'PROOF_REJECTED', `Proof request did not succeed (${state}).`).catch(() => {});
+    return false;
   }
 
   // ── Private: polling adapter ──────────────────────────────────────────────
@@ -476,9 +512,7 @@ class ServiceAccessService {
         } else if (TERMINAL_REJECTED_STATES.has(state)) {
           clearInterval(timerId);
           this._pending.delete(proofId);
-          console.warn(`[ServiceAccessService] Proof ${proofId} did not succeed (state="${state}") for capability="${pending.capabilityKey}"`);
-          await this._sendError(pending.connectionId, pending.requestId, 'PROOF_REJECTED',
-            `Proof request did not succeed (${state}).`).catch(() => {});
+          await this._retryOrReject(pending, proofId, state);
         }
       } catch (e) {
         console.warn(`[ServiceAccessService] Poll error for ${proofId.slice(0, 12)}:`, e.message);

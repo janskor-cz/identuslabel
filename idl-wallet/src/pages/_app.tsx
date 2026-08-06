@@ -28,7 +28,7 @@ import { testEncryptionRoundtrip, testEncryptionWithStoredKeys } from '@/utils/m
 import { initSecureDashboardBridge, cleanupSecureDashboardBridge } from '@/utils/SecureDashboardBridge';
 import { initConsoleLogger, cleanupConsoleLogger } from '@/utils/ConsoleLogger';
 import { getConnectionMetadata, saveConnectionMetadata } from '@/utils/connectionMetadata';
-import { parseServiceAccessGrant, isTrustedGrantSender } from '@/utils/serviceAccessGrant';
+import { parseServiceAccessGrant, isTrustedGrantSender, parseServiceAccessError } from '@/utils/serviceAccessGrant';
 import { CA_CAPABILITIES } from '@/config/serviceTrust';
 // Import cleanup utilities to auto-export to browser console
 import '@/utils/clearWalletData';
@@ -109,8 +109,15 @@ function GlobalCAEnforcer() {
 // derived flag.
 function GlobalGrantWatcher() {
     const app = useMountedApp();
-    const { openCAPortal } = useCAPortal();
+    const { openCAPortal, pendingAccessRequest, setPendingAccessRequest } = useCAPortal();
     const seenGrantIds = useRef<Set<string>>(new Set());
+    const seenErrorIds = useRef<Set<string>>(new Set());
+    // pendingAccessRequest changes on every render of the owning tree while a request is in
+    // flight; read the current value inside the effect via a ref so the effect doesn't need to
+    // re-run (and doesn't need pendingAccessRequest in its dep array) just because that state
+    // changed elsewhere.
+    const pendingAccessRequestRef = useRef(pendingAccessRequest);
+    pendingAccessRequestRef.current = pendingAccessRequest;
 
     useEffect(() => {
         if (!app.messages?.length) return;
@@ -125,7 +132,38 @@ function GlobalGrantWatcher() {
                 bodyPreview: typeof message.body === 'string' ? message.body.slice(0, 200) : JSON.stringify(message.body).slice(0, 200),
                 parsed: parsed ? { capability: parsed.capability, mode: parsed.mode } : null
             });
-            if (!parsed) continue;
+
+            if (!parsed) {
+                // Not a grant — check whether it's the service's failure counterpart. Without
+                // this, a service-access/1.0/error (e.g. schema mismatch, untrusted issuer,
+                // expired request) was silently dropped and the "Waiting for VC proof
+                // request…" status modal spun forever with no indication anything went wrong.
+                const parsedError = parseServiceAccessError(message);
+                if (!parsedError) continue;
+
+                const errorId = `${message.id}:${parsedError.thid ?? ''}`;
+                if (seenErrorIds.current.has(errorId)) continue;
+                seenErrorIds.current.add(errorId);
+
+                const msgId = message.id;
+                if (app.db.instance) {
+                    app.db.instance.deleteMessage(msgId).catch((err) => {
+                        console.error('[GlobalGrantWatcher] Failed to delete processed error message:', msgId, err);
+                    });
+                }
+                app.dispatch(reduxActions.messageRemoved(msgId));
+
+                const current = pendingAccessRequestRef.current;
+                if (current && parsedError.thid && current.requestId === parsedError.thid) {
+                    console.warn('[GlobalGrantWatcher] Access request failed', parsedError);
+                    setPendingAccessRequest({ ...current, error: { code: parsedError.code, message: parsedError.message } });
+                } else {
+                    console.warn('[GlobalGrantWatcher] Ignoring service-access error with no matching pending request', {
+                        thid: parsedError.thid, pendingRequestId: current?.requestId
+                    });
+                }
+                continue;
+            }
 
             const grantId = parsed.id;
             if (seenGrantIds.current.has(grantId)) continue;
@@ -175,7 +213,7 @@ function GlobalGrantWatcher() {
 
             cleanupGrantMessage();
         }
-    }, [app.messages, app.connections, openCAPortal]);
+    }, [app.messages, app.connections, openCAPortal, setPendingAccessRequest]);
 
     return null;
 }

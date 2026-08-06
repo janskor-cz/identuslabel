@@ -88,7 +88,7 @@ async function createEmployeeWallet(employeeData, company = null, preloadedRealP
 
   try {
     // STEP 1: Create wallet
-    console.log('  → Step 1/12: Creating wallet...');
+    console.log('  → Step 1/14: Creating wallet...');
     const walletResponse = await fetch(`${EMPLOYEE_CLOUD_AGENT_URL}/wallets`, {
       method: 'POST',
       headers: {
@@ -111,7 +111,7 @@ async function createEmployeeWallet(employeeData, company = null, preloadedRealP
     console.log(`  ✅ Wallet created: ${partialData.walletId}`);
 
     // STEP 2: Create entity for wallet
-    console.log('  → Step 2/12: Creating entity...');
+    console.log('  → Step 2/14: Creating entity...');
     const entityResponse = await fetch(`${EMPLOYEE_CLOUD_AGENT_URL}/iam/entities`, {
       method: 'POST',
       headers: {
@@ -134,7 +134,7 @@ async function createEmployeeWallet(employeeData, company = null, preloadedRealP
     console.log(`  ✅ Entity created: ${partialData.entityId}`);
 
     // STEP 3: Generate and register API key
-    console.log('  → Step 3/12: Registering API key...');
+    console.log('  → Step 3/14: Registering API key...');
     partialData.apiKey = generateApiKey();
 
     const apiKeyResponse = await fetch(`${EMPLOYEE_CLOUD_AGENT_URL}/iam/apikey-authentication`, {
@@ -159,7 +159,7 @@ async function createEmployeeWallet(employeeData, company = null, preloadedRealP
     console.log(`  ✅ API key registered (fingerprint: sha256:${keyFp}...)`);
 
     // STEP 4: Create PRISM DID using employee's registered API key
-    console.log('  → Step 4/12: Creating PRISM DID...');
+    console.log('  → Step 4/14: Creating PRISM DID...');
     const didResponse = await fetch(`${EMPLOYEE_CLOUD_AGENT_URL}/did-registrar/dids`, {
       method: 'POST',
       headers: {
@@ -187,11 +187,11 @@ async function createEmployeeWallet(employeeData, company = null, preloadedRealP
     console.log(`  ✅ PRISM DID created: ${partialData.prismDid.substring(0, 40)}...`);
 
     // STEP 5: Publish PRISM DID to blockchain
-    console.log('  → Step 5/12: Publishing PRISM DID to blockchain...');
+    console.log('  → Step 5/14: Publishing PRISM DID to blockchain...');
     await publishPrismDid(partialData.prismDid, partialData.apiKey);
 
     // STEP 6: Wait for DID publication to complete
-    console.log('  → Step 6/12: Waiting for DID publication...');
+    console.log('  → Step 6/14: Waiting for DID publication...');
     partialData.canonicalDid = await waitForPublicationComplete(partialData.prismDid, partialData.apiKey);
     console.log(`  ✅ DID published: ${partialData.canonicalDid}`);
 
@@ -206,32 +206,32 @@ async function createEmployeeWallet(employeeData, company = null, preloadedRealP
     console.log(`  ✅ Enterprise webhook registered for new wallet`);
 
     // STEP 7: Create employer-side invitation (from the employee's actual employer's wallet)
-    console.log(`  → Step 7/12: Creating ${employerCompany.name} invitation...`);
+    console.log(`  → Step 7/14: Creating ${employerCompany.name} invitation...`);
     const { invitationUrl, connectionId: techCorpConnectionId } = await createTechCorpInvitation(name, email, employerCompany);
     partialData.techCorpConnectionId = techCorpConnectionId;
 
     // STEP 8: Accept invitation as employee
-    console.log('  → Step 8/12: Employee accepting employer invitation...');
+    console.log('  → Step 8/14: Employee accepting employer invitation...');
     partialData.employeeConnectionId = await acceptInvitationAsEmployee(invitationUrl, partialData.apiKey);
 
     // STEP 9: Wait for connection to establish (employee side)
-    console.log('  → Step 9/12: Waiting for employee connection...');
+    console.log('  → Step 9/14: Waiting for employee connection...');
     await waitForConnectionComplete(partialData.employeeConnectionId, partialData.apiKey);
 
     // STEP 10: Wait for connection to establish (employer side)
-    console.log('  → Step 10/12: Waiting for employer-side connection...');
+    console.log('  → Step 10/14: Waiting for employer-side connection...');
     await waitForConnectionComplete(partialData.techCorpConnectionId, employerCompany.apiKey, TECHCORP_CLOUD_AGENT_URL);
 
     // STEP 11: Use pre-loaded RealPerson claims (provided externally) or skip
     let realPersonClaims = preloadedRealPersonClaims || null;
     if (realPersonClaims) {
-      console.log(`  ✅ Step 11/13: Using pre-loaded RealPerson claims: uniqueId=${realPersonClaims.uniqueId}, lastName=${realPersonClaims.lastName}`);
+      console.log(`  ✅ Step 11/14: Using pre-loaded RealPerson claims: uniqueId=${realPersonClaims.uniqueId}, lastName=${realPersonClaims.lastName}`);
     } else {
-      console.log('  ℹ️ Step 11/13: No RealPerson claims provided — identity fields will be omitted from EmployeeRole VC');
+      console.log('  ℹ️ Step 11/14: No RealPerson claims provided — identity fields will be omitted from EmployeeRole VC');
     }
 
     // STEP 12: Issue EmployeeRole VC to employee
-    console.log('  → Step 12/13: Issuing EmployeeRole VC...');
+    console.log('  → Step 12/14: Issuing EmployeeRole VC...');
 
     // Prepare credential subject for EmployeeRole VC
     const employeeId = email.split('@')[0]; // Extract "alice" from "alice@techcorp.com"
@@ -792,8 +792,18 @@ async function waitForConnectionComplete(
   connectionId,
   apiKey,
   cloudAgentUrl = EMPLOYEE_CLOUD_AGENT_URL,
-  maxAttempts = 15,
-  intervalMs = 1000
+  // 15s was too short and failed in practice (2026-07-30: 15/15 attempts all still
+  // "ConnectionRequestSent", then a full rollback of an otherwise-successful onboarding).
+  // This is an agent-to-agent DIDComm handshake on the multitenancy Cloud Agent, and it runs
+  // immediately after step 5-6 publishes a PRISM DID — which is itself allowed 90s. On this
+  // 4-CPU host the agent is frequently still busy when the poll starts, so the handshake simply
+  // had not completed yet; nothing was actually broken.
+  //
+  // 60s keeps the failure mode (a genuinely stuck handshake still errors and rolls back) while
+  // no longer failing purely on contention. Poll interval widened to 2s to cut the request rate
+  // on the same agent we are waiting for.
+  maxAttempts = 30,
+  intervalMs = 2000
 ) {
   console.log(`[EmployeeWalletMgr] Waiting for connection ${connectionId} (max ${maxAttempts * intervalMs / 1000}s)...`);
 

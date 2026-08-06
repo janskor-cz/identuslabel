@@ -25,6 +25,13 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://identuslabel.cz/
 // Cloud Agent configuration for Certification Authority (Local Simple Agent)
 const CLOUD_AGENT_URL = process.env.CLOUD_AGENT_URL || 'https://identuslabel.cz/cloud-agent';
 const API_KEY = process.env.CLOUD_AGENT_API_KEY || 'admin';
+
+// company-admin-portal internal endpoint used to cascade a personal SecurityClearance
+// revocation to any enterprise-side SecurityClearanceGrant minted off of it (see
+// POST /api/credentials/revoke/:recordId). Unset by default — cascade is skipped, not
+// fatal, if these aren't configured (e.g. in a deployment without company-admin-portal).
+const COMPANY_ADMIN_SYNC_URL = process.env.COMPANY_ADMIN_SYNC_URL || '';
+const COMPANY_ADMIN_SYNC_KEY = process.env.COMPANY_ADMIN_SYNC_KEY || '';
 const WALLET_ID = 'certification-authority-wallet';
 const ENTITY_ID = 'certification-authority-entity';
 const ORG_NAME = 'Certification Authority';
@@ -37,6 +44,10 @@ const SOFT_DELETED_FILE = path.join(__dirname, 'data', 'soft-deleted-connections
 
 // Persistent storage for photo DIDs (uniqueId → { photoDID, iagonFileId, proxyUrl })
 const PHOTO_DIDS_FILE = path.join(__dirname, 'data', 'photo-dids.json');
+
+// Persistent storage for in-person verification codes (recordId → { code, connectionId, ... })
+// — see pollPendingApprovalCodes() / POST /api/credentials/approve/:recordId
+const VERIFICATION_CODES_FILE = path.join(__dirname, 'data', 'credential-verification-codes.json');
 
 // Persistent storage for DIDComm chat messages (scoped by connectionId)
 const CHAT_MESSAGES_FILE = path.join(__dirname, 'data', 'chat-messages.json');
@@ -329,6 +340,29 @@ try {
   console.error('❌ [PHOTO-DID] Failed to load default avatar placeholder:', e.message);
 }
 
+// ── In-person verification code storage (recordId → { code, connectionId, createdAt,
+// expiresAt, attempts }) — generated once a holder accepts a credential offer (protocolState
+// RequestReceived), sent to them as a plain DIDComm chat message, and checked by the admin's
+// Approve & Issue action before the credential is actually issued. ──
+const VERIFICATION_CODE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const VERIFICATION_CODE_MAX_ATTEMPTS = 5;
+let verificationCodes = {};
+try {
+  verificationCodes = JSON.parse(fs.readFileSync(VERIFICATION_CODES_FILE, 'utf8'));
+  console.log(`🔐 [VERIFICATION-CODES] Loaded ${Object.keys(verificationCodes).length} verification code entries`);
+} catch (e) {
+  verificationCodes = {};
+  console.log('🔐 [VERIFICATION-CODES] Starting with empty verification code store');
+}
+
+function saveVerificationCodes() {
+  try {
+    fs.writeFileSync(VERIFICATION_CODES_FILE, JSON.stringify(verificationCodes, null, 2), 'utf8');
+  } catch (e) {
+    console.error('❌ [VERIFICATION-CODES] Error saving verification codes:', e.message);
+  }
+}
+
 function savePhotoDIDs() {
   try {
     fs.writeFileSync(PHOTO_DIDS_FILE, JSON.stringify(photoDIDs, null, 2), 'utf8');
@@ -344,8 +378,15 @@ function savePhotoDIDs() {
  * @returns {Array} published non-photo DIDs
  */
 function filterIssuingDIDs(allDIDs) {
+  // `.filter(Boolean)` is load-bearing: photoDIDs also holds the shared placeholder-image
+  // entry (DEFAULT_AVATAR_PHOTO_KEY), which is a bare Iagon file with no DID of its own.
+  // Without the guard, `.split()` on its null photoDID throws here — and this function gates
+  // issuingDID selection, so a throw would take down credential issuance entirely.
   const photoDIDShortForms = new Set(
-    Object.values(photoDIDs).map(e => e.photoDID.split(':').slice(0, 3).join(':'))
+    Object.values(photoDIDs)
+      .map(e => e?.photoDID)
+      .filter(Boolean)
+      .map(did => did.split(':').slice(0, 3).join(':'))
   );
   return (allDIDs || []).filter(d =>
     d.status === 'PUBLISHED' && !photoDIDShortForms.has(d.did)
@@ -446,6 +487,47 @@ async function uploadPhotoToIagon(jpegBuffer, filename) {
 }
 
 /**
+ * Iagon file id of the shared placeholder avatar, uploaded at most once for this deployment.
+ *
+ * Every issuance without a supplied photo used to re-upload the SAME byte-identical avatar.
+ * Iagon's upload path routinely takes tens of seconds (measured 2026-07-31: 27.8s for a
+ * 15-byte file), so that redundant upload is exactly what pushed RealPerson issuance past
+ * uploadPhotoToIagon's 60s timeout — which then silently dropped the `photo` claim. The
+ * DIDComm issuance capability never supplies a photo, so it hit this on every single request.
+ *
+ * Only the FILE is shared, never the DID. Each user still gets their own PRISM DID pointing
+ * at this URL, so /api/photos/update/:uniqueId can later upload a real photo and repoint that
+ * one user's DID (it always creates a fresh iagonFileId) without touching anybody else's.
+ *
+ * Kept inside `photoDIDs` rather than a side file because /photo-proxy/:iagonFileId only
+ * serves ids it can find there; a placeholder stored anywhere else would 404 for every user.
+ */
+const DEFAULT_AVATAR_PHOTO_KEY = '__default_avatar__';
+
+async function getDefaultAvatarIagonFileId() {
+  const cached = photoDIDs[DEFAULT_AVATAR_PHOTO_KEY];
+  if (cached && cached.iagonFileId) return cached.iagonFileId;
+
+  if (!DEFAULT_AVATAR_DATA_URI) {
+    // Set to null when the placeholder file failed to load at boot (see the loader's catch).
+    // Photo failures are fatal to issuance now, so say why rather than throwing a bare
+    // "Cannot read properties of null" from .replace() below.
+    throw new Error('Default avatar placeholder was not loaded at startup — cannot create a placeholder photo DID');
+  }
+  const base64 = DEFAULT_AVATAR_DATA_URI.replace(/^data:image\/\w+;base64,/, '');
+  const iagonFileId = await uploadPhotoToIagon(Buffer.from(base64, 'base64'), 'photo-default-avatar.jpg');
+  photoDIDs[DEFAULT_AVATAR_PHOTO_KEY] = {
+    photoDID: null,            // a bare file, not a DID — see filterIssuingDIDs' filter(Boolean)
+    iagonFileId,
+    proxyUrl: `${PUBLIC_BASE_URL}/photo-proxy/${iagonFileId}`,
+    createdAt: new Date().toISOString()
+  };
+  savePhotoDIDs();
+  console.log(`📸 [PHOTO-DID] Uploaded shared placeholder avatar once: ${iagonFileId}`);
+  return iagonFileId;
+}
+
+/**
  * Create a brand-new photo PRISM DID for a uniqueId that doesn't have one yet:
  * upload the photo to Iagon, create a PRISM DID with a `LinkedPhoto` service endpoint,
  * fire-and-forget publish it to the blockchain, and persist the `photoDIDs[uniqueId]` mapping.
@@ -459,11 +541,15 @@ async function uploadPhotoToIagon(jpegBuffer, filename) {
  * @param {string} photoDataUri - base64 data URI (e.g. "data:image/jpeg;base64,...")
  * @returns {Promise<{photoDID: string, iagonFileId: string, proxyUrl: string}>}
  */
-async function createPhotoDID(uniqueId, photoDataUri) {
-  // 1. Upload photo to Iagon (raw JPEG bytes, no encryption)
-  const base64 = photoDataUri.replace(/^data:image\/\w+;base64,/, '');
-  const buffer = Buffer.from(base64, 'base64');
-  const iagonFileId = await uploadPhotoToIagon(buffer, `photo-${uniqueId}-${Date.now()}.jpg`);
+async function createPhotoDID(uniqueId, photoDataUri, { isPlaceholder = false } = {}) {
+  // 1. Get the Iagon file backing this DID's #photo endpoint.
+  //    Placeholder issuances all point at ONE shared upload — see getDefaultAvatarIagonFileId.
+  const iagonFileId = isPlaceholder
+    ? await getDefaultAvatarIagonFileId()
+    : await uploadPhotoToIagon(
+        Buffer.from(photoDataUri.replace(/^data:image\/\w+;base64,/, ''), 'base64'),
+        `photo-${uniqueId}-${Date.now()}.jpg`
+      );
   const proxyUrl = `${PUBLIC_BASE_URL}/photo-proxy/${iagonFileId}`;
 
   // 2. Create PRISM DID with #photo service endpoint
@@ -2976,9 +3062,15 @@ async function issueRealPersonCredential({ connectionId, credentialData, selecte
       throw new Error('No DID selected and no DID found for Certification Authority. Please select a DID or create and publish one first.');
     }
     
+    // The ONLY RealPerson schema version this deployment issues. Enforced below for BOTH the
+    // caller-selected and the auto-selected path — the CA portal's schema dropdown
+    // (public/realperson.html) still lets an operator pick any registered RealPerson version, and
+    // a client-side choice must not be able to mint a credential the wallets will later refuse.
+    const REALPERSON_SCHEMA_VERSION = '4.0.0';
+
     // Use selected schema or fall back to automatic selection
     let realPersonSchema = null;
-    
+
     if (selectedSchemaGuid) {
       // Find the selected schema
       const schemaResponse = await fetch(`${CLOUD_AGENT_URL}/schema-registry/schemas`, {
@@ -3010,18 +3102,46 @@ async function issueRealPersonCredential({ connectionId, credentialData, selecte
       }
       
       const schemaData = await schemaResponse.json();
-      // Find all RealPerson schemas; prefer v4.0.0 when photo is present, otherwise v3.0.0
+      // ALWAYS RealPerson v4.0.0 — the only version this deployment issues.
+      //
+      // This used to be `photo ? '4.0.0' : '3.0.0'`, with a further silent fallback chain down to
+      // v3.0.0 and then "whatever schema is last in the list". That drift is what broke
+      // wallet-to-wallet RealPerson invitations: v3.0.0 has no `photo` property at all, so a
+      // holder who was issued without uploading a photo got a permanently photo-less VC, and the
+      // wallet — which pins v4.0.0 as TRUSTED_REALPERSON_SCHEMA_ID and enforces it in
+      // liveIdentityVerification.ts — rejected the resulting presentation as "schema not trusted".
+      // Version choice must not depend on what the operator happened to upload at issuance time.
+      //
+      // Issuing v4.0.0 unconditionally is safe with or without a photo: `photo` is NOT in v4.0.0's
+      // `required` list (checked against the live schema registry), and the photo-DID block below
+      // already mints a placeholder photo DID for every holder, so in practice the claim is
+      // populated either way. No fallback to an older version — a missing v4.0.0 is a deployment
+      // problem to surface loudly, not to paper over by issuing a credential every wallet on this
+      // deployment will refuse.
       const realPersonSchemas = schemaData.contents.filter(schema => schema.name === 'RealPerson');
-      const preferredVersion = photo ? '4.0.0' : '3.0.0';
-      realPersonSchema = realPersonSchemas.find(schema => schema.version === preferredVersion)
-                      || realPersonSchemas.find(schema => schema.version === '3.0.0')
-                      || realPersonSchemas[realPersonSchemas.length - 1];
-      
+      realPersonSchema = realPersonSchemas.find(schema => schema.version === REALPERSON_SCHEMA_VERSION);
+
       if (!realPersonSchema) {
-        throw new Error('RealPerson schema not found. Please create the schema first.');
+        throw new Error(
+          `RealPerson schema v${REALPERSON_SCHEMA_VERSION} not found in the schema registry ` +
+          `(found: ${realPersonSchemas.map(s => `v${s.version}`).join(', ') || 'none'}). ` +
+          `Create/publish it before issuing — older versions are no longer accepted by the wallet.`
+        );
       }
     }
-    
+
+    // Final gate for BOTH paths above (see REALPERSON_SCHEMA_VERSION's comment): an explicitly
+    // requested older version is rejected outright rather than quietly downgraded, so the failure
+    // lands on the operator at issuance time instead of on the holder months later, at the moment
+    // some verifier refuses their credential.
+    if (realPersonSchema.version !== REALPERSON_SCHEMA_VERSION) {
+      throw new Error(
+        `RealPerson credentials are issued as v${REALPERSON_SCHEMA_VERSION} only; ` +
+        `v${realPersonSchema.version} was requested (guid ${realPersonSchema.guid}). ` +
+        `Select RealPerson v${REALPERSON_SCHEMA_VERSION} in the schema dropdown.`
+      );
+    }
+
     console.log(`📋 Using RealPerson schema v${realPersonSchema.version}: ${realPersonSchema.guid}`);
 
     // Generate auto-populated metadata
@@ -3043,13 +3163,27 @@ async function issueRealPersonCredential({ connectionId, credentialData, selecte
         photoDIDRef = photoDIDs[uniqueId].photoDID;
         console.log(`📸 Reusing existing photo DID for ${uniqueId}: ${photoDIDRef.substring(0, 60)}...`);
       } else {
-        const created = await createPhotoDID(uniqueId, photo || DEFAULT_AVATAR_DATA_URI);
+        const created = await createPhotoDID(uniqueId, photo || DEFAULT_AVATAR_DATA_URI, {
+          isPlaceholder: !photo
+        });
         photoDIDRef = created.photoDID;
         console.log(`📸 [PHOTO-DID] Created for ${uniqueId}${photo ? '' : ' (placeholder — no photo provided)'}: ${photoDIDRef.substring(0, 60)}...`);
       }
     } catch (photoErr) {
-      console.error('❌ [PHOTO-DID] Photo DID creation failed (issuing VC without photo claim):', photoErr.message);
-      photoDIDRef = null;
+      // Deliberately fatal. This used to swallow the error and issue the VC with no `photo`
+      // claim, which breaks the invariant documented above ("every RealPersonIdentity VC
+      // carries a resolvable `photo` claim from day one") in a way that cannot be repaired
+      // afterwards: /api/photos/update/:uniqueId can repoint an existing photo DID, but a
+      // credential issued with no `photo` claim at all needs full re-issuance to gain one.
+      // A visibly failed issuance the operator can retry beats a silently photo-less
+      // credential that looks complete. (Observed 2026-07-31: two RealPerson v4 VCs issued
+      // this way, both unusable for the photo-in-connection-record flow.)
+      console.error('❌ [PHOTO-DID] Photo DID creation FAILED — aborting issuance:', photoErr.message);
+      throw new Error(
+        `Cannot issue RealPerson credential: photo DID creation failed (${photoErr.message}). ` +
+        `RealPerson v4 requires a resolvable photo claim. If this is an Iagon upload timeout, ` +
+        `retry once storage is responsive.`
+      );
     }
 
     const enrichedClaims = {
@@ -3233,6 +3367,18 @@ app.get('/api/credentials/revocable', async (req, res) => {
           record.credentialType = subj.credentialType || null;
           record.holderLastName = subj.lastName || null;
           record.holderFirstName = subj.firstName || null;
+          // SecurityClearance credentials use a differently-named holder-identifier claim
+          // (holderUniqueId/holderName) instead of RealPerson's uniqueId/firstName+lastName.
+          record.holderUniqueId = subj.holderUniqueId || null;
+          record.holderName = subj.holderName || null;
+          // Cloud Agent's /issue-credentials/records response has no top-level subjectId/schemaId
+          // fields, so these must come from the decoded JWT payload (same pattern as the
+          // ProverResponder's CertificationAuthorityIdentity lookup above) — otherwise the
+          // Revocation Management UI shows "Unknown" for both.
+          record.subjectId = decodedPayload.sub || null;
+          // credentialSchema is a W3C VC array ([{ id, type }]), not a single object.
+          const credSchema = decodedPayload.vc.credentialSchema;
+          record.schemaId = (Array.isArray(credSchema) ? credSchema[0]?.id : credSchema?.id) || null;
         }
 
         return hasCredentialStatus;
@@ -3258,7 +3404,9 @@ app.get('/api/credentials/revocable', async (req, res) => {
       uniqueId: record.uniqueId || null,
       credentialType: record.credentialType || null,
       holderFirstName: record.holderFirstName || null,
-      holderLastName: record.holderLastName || null
+      holderLastName: record.holderLastName || null,
+      holderUniqueId: record.holderUniqueId || null,
+      holderName: record.holderName || null
     }));
 
     res.json({
@@ -7689,6 +7837,41 @@ app.get('/api/didcomm-messages', (req, res) => {
   }
 });
 
+// Send a plain-text DIDComm BasicMessage from CA to a wallet connection via the Cloud Agent,
+// and mirror it into chatMessageStore so it shows up in the CA's own chat history view too.
+// Shared by POST /api/send-didcomm-message (manual admin chat) and pollPendingApprovalCodes()
+// (automated in-person verification codes) — both need the exact same delivery + local-mirror
+// behavior, so this is factored out rather than duplicated.
+async function sendPlainChatMessage(connectionId, content) {
+  const agentResp = await fetch(`${CLOUD_AGENT_URL}/connections/${connectionId}/basic-messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
+    body: JSON.stringify({ content })
+  });
+  if (!agentResp.ok) {
+    const errText = await agentResp.text().catch(() => '');
+    throw new Error(`Cloud Agent sendBasicMessage failed (${agentResp.status}): ${errText.slice(0, 200)}`);
+  }
+  const agentResult = await agentResp.json();
+  const messageId = agentResult.id || `ca-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+
+  console.log(`📤 [DIDComm] Sent BasicMessage via Cloud Agent to connection ${connectionId}, msgId=${messageId}`);
+
+  const msgData = {
+    id: messageId,
+    timestamp: new Date().toISOString(),
+    direction: 'sent',
+    content,
+    sender: 'Certification Authority',
+    connectionId
+  };
+  if (!chatMessageStore[connectionId]) chatMessageStore[connectionId] = [];
+  chatMessageStore[connectionId].push(msgData);
+  saveChatMessages(chatMessageStore);
+
+  return messageId;
+}
+
 // Send DIDComm BasicMessage from CA to wallet via mediator
 app.post('/api/send-didcomm-message', async (req, res) => {
   try {
@@ -7697,33 +7880,7 @@ app.post('/api/send-didcomm-message', async (req, res) => {
       return res.status(400).json({ error: 'connectionId and content are required' });
     }
 
-    // Delegate to Cloud Agent's built-in DIDComm stack via new sendBasicMessage endpoint
-    const agentResp = await fetch(`${CLOUD_AGENT_URL}/connections/${connectionId}/basic-messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'apikey': API_KEY },
-      body: JSON.stringify({ content })
-    });
-    if (!agentResp.ok) {
-      const errText = await agentResp.text().catch(() => '');
-      return res.status(agentResp.status).json({ error: `Cloud Agent sendBasicMessage failed: ${errText.slice(0, 200)}` });
-    }
-    const agentResult = await agentResp.json();
-    const messageId = agentResult.id || `ca-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-
-    console.log(`📤 [DIDComm] Sent BasicMessage via Cloud Agent to connection ${connectionId}, msgId=${messageId}`);
-
-    const msgData = {
-      id: messageId,
-      timestamp: new Date().toISOString(),
-      direction: 'sent',
-      content,
-      sender: 'Certification Authority',
-      connectionId
-    };
-    if (!chatMessageStore[connectionId]) chatMessageStore[connectionId] = [];
-    chatMessageStore[connectionId].push(msgData);
-    saveChatMessages(chatMessageStore);
-
+    const messageId = await sendPlainChatMessage(connectionId, content);
     console.log(`✅ [DIDComm] Message ${messageId} delivered`);
     res.json({ success: true, messageId, status: 'sent' });
   } catch (error) {
@@ -7875,11 +8032,55 @@ app.post('/api/credentials/revoke/:recordId', async (req, res) => {
     // a cached clearanceData.verified flag, so a revocation made here is picked up automatically
     // on next check without this endpoint needing to know which session(s) it affects.
 
+    // Cascade: a revoked SecurityClearance VC should also pull the enterprise-side
+    // SecurityClearanceGrant that company-admin-portal minted off of it — otherwise an
+    // employee keeps sensitive-document access through that separate, agent-custodied copy
+    // even after their personal clearance is gone. Best-effort: the personal revocation above
+    // already succeeded and is authoritative, so a cascade failure is logged, not thrown.
+    let enterpriseSync = null;
+    if (COMPANY_ADMIN_SYNC_URL && COMPANY_ADMIN_SYNC_KEY) {
+      try {
+        const recordResp = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records/${recordId}`, {
+          headers: { 'apikey': API_KEY }
+        });
+        if (recordResp.ok) {
+          const record = await recordResp.json();
+          if (record.credential) {
+            const jwtString = Buffer.from(record.credential, 'base64').toString('utf-8');
+            const parts = jwtString.split('.');
+            if (parts.length >= 2) {
+              const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf-8'));
+              const credentialType = payload.vc?.credentialSubject?.credentialType;
+              const personalDID = payload.sub;
+
+              if (credentialType === 'SecurityClearance' && personalDID) {
+                console.log(`🔗 [REVOCATION] SecurityClearance revoked — cascading to enterprise grant for ${personalDID.substring(0, 30)}...`);
+                const syncResp = await fetch(COMPANY_ADMIN_SYNC_URL, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', 'x-admin-key': COMPANY_ADMIN_SYNC_KEY },
+                  body: JSON.stringify({ personalDID })
+                });
+                if (syncResp.ok) {
+                  enterpriseSync = await syncResp.json();
+                  console.log(`✅ [REVOCATION] Enterprise clearance cascade result:`, enterpriseSync.report || enterpriseSync);
+                } else {
+                  console.warn(`⚠️ [REVOCATION] Enterprise clearance cascade returned HTTP ${syncResp.status}`);
+                }
+              }
+            }
+          }
+        }
+      } catch (cascadeErr) {
+        console.warn('⚠️ [REVOCATION] Enterprise clearance cascade failed (non-fatal):', cascadeErr.message);
+      }
+    }
+
     res.json({
       success: true,
       message: 'Credential revoked successfully',
       recordId: recordId,
-      data: data
+      data: data,
+      enterpriseSync
     });
 
   } catch (error) {
@@ -7977,12 +8178,12 @@ app.get('/api/credentials/details/:recordId', async (req, res) => {
 app.post('/api/credentials/approve/:recordId', async (req, res) => {
   try {
     const { recordId } = req.params;
-    const { approve = true, notes = '' } = req.body;
-    
+    const { approve = true, notes = '', verificationCode = '' } = req.body;
+
     if (!approve) {
       // Log the rejection locally (Cloud Agent v2.0.0 doesn't have cancel endpoint)
       console.log(`❌ Admin rejected credential ${recordId}: ${notes || 'No reason provided'}`);
-      
+
       // Store rejection in local tracking
       if (!global.rejectedCredentials) {
         global.rejectedCredentials = new Map();
@@ -7992,7 +8193,14 @@ app.post('/api/credentials/approve/:recordId', async (req, res) => {
         reason: notes || 'Rejected by administrator',
         recordId: recordId
       });
-      
+
+      // A rejected request is dead — drop its code so it doesn't linger in the store or get
+      // reused if the same recordId ever resurfaces.
+      if (verificationCodes[recordId]) {
+        delete verificationCodes[recordId];
+        saveVerificationCodes();
+      }
+
       return res.json({
         success: true,
         message: 'Credential request rejected successfully',
@@ -8001,7 +8209,49 @@ app.post('/api/credentials/approve/:recordId', async (req, res) => {
         note: 'Credential marked as rejected locally. It will not appear in pending requests.'
       });
     }
-    
+
+    // In-person verification: the holder was sent a 6-digit code over DIDComm chat when they
+    // accepted the offer (see pollPendingApprovalCodes). Staff must read it back from the holder
+    // and type it in here before the credential is actually issued — this is the check that the
+    // person approving really is the person present in front of them.
+    const codeEntry = verificationCodes[recordId];
+    if (!codeEntry) {
+      return res.status(409).json({
+        success: false,
+        error: 'No verification code has been generated for this request yet. Wait a few seconds and try again.'
+      });
+    }
+    if (Date.now() > codeEntry.expiresAt) {
+      delete verificationCodes[recordId];
+      saveVerificationCodes();
+      return res.status(410).json({
+        success: false,
+        error: 'The verification code expired. A new one will be sent to the holder automatically — ask them to check their wallet again shortly.'
+      });
+    }
+    if (!verificationCode || String(verificationCode).trim() !== codeEntry.code) {
+      codeEntry.attempts += 1;
+      if (codeEntry.attempts >= VERIFICATION_CODE_MAX_ATTEMPTS) {
+        // Force-expire so the poller issues a fresh code on its next tick instead of leaving
+        // staff locked out until the original TTL runs out.
+        codeEntry.expiresAt = Date.now();
+        saveVerificationCodes();
+        return res.status(429).json({
+          success: false,
+          error: 'Too many incorrect attempts. A new code will be sent to the holder shortly — ask them to check their wallet again.'
+        });
+      }
+      saveVerificationCodes();
+      return res.status(400).json({
+        success: false,
+        error: `Incorrect verification code (${VERIFICATION_CODE_MAX_ATTEMPTS - codeEntry.attempts} attempt(s) remaining).`
+      });
+    }
+
+    // Code matched — consume it before issuing, so it can never be reused.
+    delete verificationCodes[recordId];
+    saveVerificationCodes();
+
     // Issue the credential by completing the flow
     const response = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records/${recordId}/issue-credential`, {
       method: 'POST',
@@ -8010,21 +8260,21 @@ app.post('/api/credentials/approve/:recordId', async (req, res) => {
       },
       body: JSON.stringify({})
     });
-    
+
     if (!response.ok) {
       const errorData = await response.text();
       throw new Error(`Cloud Agent error: ${response.status} - ${errorData}`);
     }
-    
+
     const data = await response.json();
-    
+
     res.json({
       success: true,
       message: 'Credential approved and issued successfully',
       recordId: recordId,
       data: data
     });
-    
+
   } catch (error) {
     console.error('Error approving credential:', error);
     res.status(500).json({
@@ -8134,13 +8384,21 @@ const didCommCmdService = new ServiceAccessService({
       trustedIssuerVcType: 'RealPerson',
       proofSpec: {
         proofs: [{
-          // RealPerson v4.0.0 (the photo-carrying version) — the Cloud Agent enforces this
-          // schemaId as a POST-HOC check against whatever VC the wallet actually presents
-          // (verified live: a v3.0.0-requested schemaId against a v4.0.0-issued credential
-          // produced status PresentationVerificationFailed, matching the Identus error-
-          // handling ADR's documented "V6 Schema Mismatch" scenario). v4.0.0 is what
-          // /api/credentials/issue-realperson actually issues whenever a photo is supplied.
-          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/4755a426-b80b-3f6a-b9ea-ca202bd7ce16',
+          // The Cloud Agent enforces schemaId as a POST-HOC check against whatever VC the wallet
+          // actually presents, and its ProofRequestAux only accepts a single schemaId (no
+          // OR/array — see its OpenAPI spec), so which version goes first here is a real cost:
+          // each mismatch is a full extra credential-approval round-trip in the wallet. Order
+          // chosen by actually decoding every issued RealPerson credential's `vc.credentialSchema`
+          // on this Cloud Agent (2026-07-28): v3.0.0 (no-photo) is the majority — 58 of 95 issued
+          // — vs. 23 on v4.0.0 (photo) and 14 on the legacy v1.0.0. Putting v4.0.0 first (as this
+          // used to) meant the *common* case took 2 submits; v1.0.0 wasn't covered at all and
+          // failed outright after 2. `schemaIdFallbacks` is retried in order by
+          // ServiceAccessService on exactly that failure — see its header comment.
+          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/e3ed8a7b-5866-3032-a06c-4c3ce7b7c73f', // RealPerson v3.0.0 (no-photo) — most common
+          schemaIdFallbacks: [
+            'https://identuslabel.cz/cloud-agent/schema-registry/schemas/4755a426-b80b-3f6a-b9ea-ca202bd7ce16', // v4.0.0 (photo)
+            'https://identuslabel.cz/cloud-agent/schema-registry/schemas/d8b618f0-bb9f-32db-9c80-ba6505eada1f'  // v1.0.0 (legacy)
+          ],
           trustIssuers: [] // filled in dynamically at request time from the trust registry
         }],
         goalCode: 'schema:RealPerson',
@@ -8155,7 +8413,12 @@ const didCommCmdService = new ServiceAccessService({
       trustedIssuerVcType: 'RealPerson',
       proofSpec: {
         proofs: [{
-          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/4755a426-b80b-3f6a-b9ea-ca202bd7ce16',
+          // See the 'portal' capability above for why v3.0.0 goes first and both fallbacks exist.
+          schemaId: 'https://identuslabel.cz/cloud-agent/schema-registry/schemas/e3ed8a7b-5866-3032-a06c-4c3ce7b7c73f',
+          schemaIdFallbacks: [
+            'https://identuslabel.cz/cloud-agent/schema-registry/schemas/4755a426-b80b-3f6a-b9ea-ca202bd7ce16',
+            'https://identuslabel.cz/cloud-agent/schema-registry/schemas/d8b618f0-bb9f-32db-9c80-ba6505eada1f'
+          ],
           trustIssuers: []
         }],
         goalCode: 'schema:RealPerson',
@@ -8209,7 +8472,7 @@ const credentialIssuanceService = new CredentialIssuanceService({
       fields: [
         { key: 'firstName',   label: 'First name',    type: 'string', required: true },
         { key: 'lastName',    label: 'Last name',     type: 'string', required: true },
-        { key: 'gender',      label: 'Gender',        type: 'string', required: true },
+        { key: 'gender',      label: 'Gender',        type: 'select', required: true, options: ['Male', 'Female', 'Other'] },
         { key: 'dateOfBirth', label: 'Date of birth', type: 'date',   required: true },
       ],
       issue: ({ connectionId, values }) => issueRealPersonCredential({
@@ -8324,7 +8587,10 @@ async function resolveCaIdentityRecord() {
           const jwtString = Buffer.from(r.credential, 'base64').toString('utf-8');
           const payload = JSON.parse(Buffer.from(jwtString.split('.')[1], 'base64').toString('utf-8'));
           if (payload?.vc?.credentialSubject?.credentialType === 'CertificationAuthorityIdentity') {
-            _cachedCaIdentity = { recordId: r.recordId, schemaId: payload.vc.credentialSchema?.id || null };
+            // credentialSchema is a W3C VC array ([{ id, type }]), not a single object.
+            const credSchema = payload.vc.credentialSchema;
+            const resolvedSchemaId = (Array.isArray(credSchema) ? credSchema[0]?.id : credSchema?.id) || null;
+            _cachedCaIdentity = { recordId: r.recordId, schemaId: resolvedSchemaId };
             console.log(`[ProverResponder] Live search found CertificationAuthorityIdentity record: ${r.recordId}`);
             return _cachedCaIdentity;
           }
@@ -8452,6 +8718,89 @@ async function pollInboundProofRequests() {
 
 pollInboundProofRequests();
 setInterval(pollInboundProofRequests, PROVER_RESPONDER_POLL_MS).unref();
+
+/**
+ * Poll for Issuer-role credential records that just entered RequestReceived (the holder has
+ * accepted our offer and is now waiting on our manual issue-credential step) and don't yet have
+ * a live verification code. Generates a 6-digit code, sends it to the holder as a plain DIDComm
+ * chat message, and stores it so POST /api/credentials/approve/:recordId can require CA staff to
+ * type back the code the holder read off their own wallet — an in-person liveness/identity check
+ * before the credential is actually issued. Never throws — mirrors pollInboundProofRequests.
+ */
+async function pollPendingApprovalCodes() {
+  try {
+    let allRecords = [];
+    let offset = 0;
+    const pageSize = 100;
+    while (true) {
+      const resp = await fetch(`${CLOUD_AGENT_URL}/issue-credentials/records?limit=${pageSize}&offset=${offset}`, {
+        headers: { apikey: API_KEY }
+      });
+      if (!resp.ok) {
+        console.warn(`[VerificationCode] Poll list request failed (${resp.status})`);
+        try { await resp.body?.cancel?.(); } catch (_) {}
+        break;
+      }
+      const data = await resp.json();
+      const page = data.contents || [];
+      allRecords = allRecords.concat(page);
+      if (page.length < pageSize) break;
+      offset += pageSize;
+    }
+
+    const now = Date.now();
+    let dirty = false;
+    for (const record of allRecords) {
+      if (record.role !== 'Issuer' || record.protocolState !== 'RequestReceived') continue;
+      if (global.rejectedCredentials?.has(record.recordId)) continue;
+
+      // The Cloud Agent's /issue-credentials/records response doesn't populate connectionId on
+      // Issuer-side records (same gap as GET /api/credentials/pending above) — resolve it via
+      // the uniqueId → connectionId mapping recorded at offer time instead (RealPerson claims
+      // key it as `uniqueId`, SecurityClearance as `holderUniqueId`).
+      const holderKey = record.claims?.uniqueId || record.claims?.holderUniqueId;
+      const connectionId = record.connectionId || global.userConnectionMappings.get(holderKey)?.connectionId;
+      if (!connectionId) continue;
+
+      const existing = verificationCodes[record.recordId];
+      // Only suppress re-notification once delivery has actually succeeded — a code that was
+      // generated but whose DIDComm send failed (e.g. a transient Cloud Agent 500 like
+      // PrematureChannelClosureException) previously left `delivered` unset yet still satisfied
+      // `expiresAt > now`, so the holder silently never got a code for up to the full 30-minute
+      // TTL with no retry. Undelivered codes are now retried on every poll tick (10s) instead.
+      if (existing && existing.expiresAt > now && existing.delivered) continue;
+
+      const code = existing?.delivered === false ? existing.code : String(crypto.randomInt(100000, 1000000));
+      verificationCodes[record.recordId] = {
+        code,
+        connectionId,
+        createdAt: existing?.createdAt || new Date(now).toISOString(),
+        expiresAt: now + VERIFICATION_CODE_TTL_MS,
+        attempts: existing?.attempts || 0,
+        delivered: false
+      };
+      dirty = true;
+
+      try {
+        await sendPlainChatMessage(connectionId,
+          `Your Certification Authority verification code is: ${code}\n\n` +
+          `Read this code out to CA staff to complete issuance of your credential. ` +
+          `It expires in ${Math.round(VERIFICATION_CODE_TTL_MS / 60000)} minutes.`);
+        verificationCodes[record.recordId].delivered = true;
+        saveVerificationCodes();
+        console.log(`🔐 [VerificationCode] Sent code for record ${record.recordId} (conn ${connectionId.slice(0, 16)}...)`);
+      } catch (e) {
+        console.error(`❌ [VerificationCode] Failed to deliver code for record ${record.recordId} — will retry next poll:`, e.message);
+      }
+    }
+    if (dirty) saveVerificationCodes();
+  } catch (e) {
+    console.error('[VerificationCode] Poll error:', e.message);
+  }
+}
+
+pollPendingApprovalCodes();
+setInterval(pollPendingApprovalCodes, PROVER_RESPONDER_POLL_MS).unref();
 
 // One-time access token redemption endpoint.
 // dashboard.html reads the session from ?session=<id> URL param and fetches content

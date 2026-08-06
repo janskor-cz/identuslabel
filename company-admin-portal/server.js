@@ -491,6 +491,28 @@ function requireCompany(req, res, next) {
 }
 
 /**
+ * Middleware for server-to-server calls (e.g. certification-authority cascading a personal
+ * VC revocation) that have no browser session to authenticate with. Mirrors
+ * identus-document-service's requireAdminKey: Authorization: Bearer <key> or x-admin-key header,
+ * checked against CA_SYNC_ADMIN_KEY. Fails closed (503) if the key isn't configured.
+ */
+function requireInternalKey(req, res, next) {
+  if (!process.env.CA_SYNC_ADMIN_KEY) {
+    return res.status(503).json({
+      success: false,
+      error: 'CA_SYNC_ADMIN_KEY environment variable is not set'
+    });
+  }
+  const bearer = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
+  const xKey = req.headers['x-admin-key'] || '';
+  const token = bearer || xKey;
+  if (!token || token !== process.env.CA_SYNC_ADMIN_KEY) {
+    return res.status(401).json({ success: false, error: 'Valid internal API key required' });
+  }
+  next();
+}
+
+/**
  * Helper function to make Cloud Agent API calls (Multitenancy Cloud Agent - port 8200)
  */
 async function cloudAgentRequest(apiKey, endpoint, options = {}) {
@@ -579,7 +601,7 @@ async function resolveLinkedPhotoDID(photoDID) {
   try {
     const resp = await fetch(
       `${ENTERPRISE_CLOUD_AGENT_URL}/dids/${encodeURIComponent(photoDID)}`,
-      { headers: { 'apikey': process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu' } }
+      { headers: { 'apikey': process.env.ENTERPRISE_ADMIN_TOKEN } }
     );
     if (!resp.ok) return null;
     const doc = await resp.json();
@@ -2702,7 +2724,19 @@ async function verifyAndExtractRealPersonClaims(vpJwt, expectedChallenge) {
   const holderSigValid = await verifyES256KSignature(outerDecoded, holderDID, realPersonIssuerResolver, 'authentication');
   if (!holderSigValid) throw new Error('Outer VP JWT signature verification failed (holder binding)');
 
-  const vp = { verifiableCredential: outerDecoded.payload?.vp?.verifiableCredential || [] };
+  // Defense in depth: pass the raw outer VP-JWT so the shared library ALSO enforces holder
+  // binding (outer signature against the iss DID's `authentication` key + subject-vs-presenter),
+  // rather than relying solely on the two checks this function performs above.
+  //
+  // Those checks are correct and are what verifyPresentation.js's header comment refers to when it
+  // says this caller "already performs the outer-signature + subject check itself" — so this is
+  // NOT closing a hole. It makes the guarantee structural instead of dependent on this function
+  // continuing to do it, and it silences the "No rawVpJwt supplied — holder-binding was NOT
+  // performed" warning, which reads like a vulnerability in the logs when it is not one.
+  const vp = {
+    verifiableCredential: outerDecoded.payload?.vp?.verifiableCredential || [],
+    rawVpJwt: vpJwt,
+  };
   const vpResult = await verifyPresentationCredentials(vp, realPersonIssuerResolver);
   if (!vpResult.success) throw new Error(`RealPersonIdentity VC verification failed: ${vpResult.error} — ${vpResult.message}`);
 
@@ -4095,6 +4129,11 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
     // Process Security Clearance credential if provided (optional)
     let clearanceLevel = null;
     let hasClearanceVC = false;
+    // Personal CA DID (JWT `sub` of the presented SecurityClearance VC) — carried through to
+    // the SecurityClearanceGrant issuance below so /api/internal/clearance-revoked and
+    // /api/company/sync-clearance can link the two credentials directly instead of relying on
+    // the fragile DID-email-name fallback.
+    let caPersonalDID = null;
 
     if (securityClearanceCred) {
       console.log(`[EmployeeAuth] Processing Security Clearance credential from presentation`);
@@ -4114,6 +4153,7 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
           // Extract clearance level
           clearanceLevel = securityClearanceCred.claims.clearanceLevel;
           hasClearanceVC = true;
+          caPersonalDID = securityClearanceCred.payload?.sub || null;
 
           console.log(`[EmployeeAuth] ✅ Valid Security Clearance found in presentation`);
           console.log(`   Clearance Level: ${clearanceLevel}`);
@@ -4248,6 +4288,13 @@ app.post('/api/employee-portal/auth/verify', async (req, res) => {
               issuerDID: employerCompany.did,
               grantedAt,
               validUntil,
+              // NOT sending caPersonalDID here — the registered SecurityClearanceGrant schema
+              // (f33eedc7-aa47-3e05-bc80-cf5388d00562) has additionalProperties:false and
+              // doesn't define this field, so the Cloud Agent 422s the whole credential-offer
+              // and NO grant gets issued at all. caPersonalDID is still captured above for
+              // possible future use (e.g. a DB-based link instead of a VC claim), just not put
+              // in the VC. Matching in syncClearanceGrants falls back to the DID-email-name
+              // heuristic below, as it did before this field was attempted.
             },
             automaticIssuance: true,
             awaitConfirmation: false
@@ -6478,7 +6525,10 @@ app.get('/api/admin/access-logs', requireCompany, async (req, res) => {
  * holder's personal CA SecurityClearance VC has been revoked. If so, revokes the
  * enterprise grant via the TechCorp Cloud Agent.
  */
-app.post('/api/company/sync-clearance', requireCompany, async (req, res) => {
+// Core reconciliation: revoke any enterprise SecurityClearanceGrant whose linked personal CA
+// SecurityClearance VC has been revoked. Pass onlyPersonalDID to scope this to a single holder
+// (used by the CA revocation cascade below) instead of scanning every grant in the tenant.
+async function syncClearanceGrants(onlyPersonalDID = null) {
   const StatusListService = require('./lib/StatusListService');
   const report = { synced: 0, alreadyRevoked: 0, revoked: 0, personalNotFound: 0, noStatusList: 0, noStatusListDetails: [], errors: [] };
 
@@ -6582,6 +6632,12 @@ app.post('/api/company/sync-clearance', requireCompany, async (req, res) => {
         } catch (_) {}
       }
 
+      // When scoped to a single holder (CA cascade call), skip every other grant entirely —
+      // don't touch report counters for grants outside the requested holder.
+      if (onlyPersonalDID && lookupDID !== onlyPersonalDID && holderDID !== onlyPersonalDID) {
+        continue;
+      }
+
       // Decode enterprise grant JWT to check if already revoked at enterprise level
       let enterpriseCs = null;
       try {
@@ -6656,11 +6712,32 @@ app.post('/api/company/sync-clearance', requireCompany, async (req, res) => {
       }
     }
 
-    res.json({ success: true, report });
+    return report;
   } catch (err) {
     console.error('[SyncClearance] Fatal error:', err.message);
-    res.status(500).json({ success: false, error: err.message, report });
+    report.errors.push({ error: `Fatal: ${err.message}` });
+    return report;
   }
+}
+
+// Admin-triggered: reconcile every enterprise clearance grant in the tenant.
+app.post('/api/company/sync-clearance', requireCompany, async (req, res) => {
+  const report = await syncClearanceGrants();
+  res.json({ success: true, report });
+});
+
+// Server-to-server: certification-authority calls this immediately after revoking a personal
+// SecurityClearance VC, so the matching enterprise-side grant (and the sensitive-document
+// access it unlocks) is pulled within the same request instead of waiting for an admin to
+// notice and run the full reconciliation manually.
+app.post('/api/internal/clearance-revoked', requireInternalKey, async (req, res) => {
+  const { personalDID } = req.body || {};
+  if (!personalDID) {
+    return res.status(400).json({ success: false, error: 'personalDID is required' });
+  }
+  console.log(`[SyncClearance] Cascade request from CA for personalDID=${personalDID.substring(0, 30)}...`);
+  const report = await syncClearanceGrants(personalDID);
+  res.json({ success: true, report });
 });
 
 // ============================================================================
@@ -8820,6 +8897,9 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
             issuerDID: employerCompany.did,
             grantedAt,
             validUntil,
+            // NOT sending caPersonalDID — see the matching comment in the login-flow issuance
+            // site above: the registered schema has additionalProperties:false and rejects it
+            // with a 422, so no grant was being issued at all while this was here.
           },
           automaticIssuance: true,
           awaitConfirmation: false
@@ -11631,7 +11711,10 @@ app.listen(PORT, async () => {
   // We use a deterministic key per entity (so restarts stay idempotent) and register in the background.
   console.log('🔧 Registering enterprise agent webhooks for all employee wallets (background)...');
   const enterpriseWebhookUrl = `${COMPANY_PUBLIC_BASE_URL}/api/enterprise-messages-webhook`;
-  const ENTERPRISE_ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu';
+  // No hardcoded fallback: this is the enterprise agent's full admin token, and this file is
+  // tracked in a public repository. It comes from company-admin-portal/.env only.
+  const ENTERPRISE_ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN;
+  if (!ENTERPRISE_ADMIN_TOKEN) throw new Error('ENTERPRISE_ADMIN_TOKEN is not set');
   (async () => {
     try {
       let offset = 0; const limit = 100; let registered = 0; let skipped = 0;

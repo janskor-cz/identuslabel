@@ -77,6 +77,20 @@ export interface ConnectionMetadata {
   // readers should apply a staleness cutoff against `identityVerifiedAt` (see connections.tsx's
   // PREVIEW_PHOTO_TTL_MS) rather than trusting it indefinitely.
   verifiedCredentialSubject?: Record<string, any>;
+  // An UNVERIFIED, best-effort label for "who is on the other end of this connection", captured
+  // once at accept time on the INVITEE's side from the pre-connection invitation preview (the
+  // inviter's own attached VC name, or their company/CA name) — see OOB.tsx's
+  // onConnectionHandleClick, where it is computed SEPARATELY from connectionLabel/`alias`.
+  //
+  // 🔒 Why this is a distinct field from the DIDPair's own `.name`: `.name` is the value passed to
+  // agent.acceptInvitation()'s alias argument, which the SDK sends over the wire as OUR OWN
+  // self-declared name (see HandleOOBInvitation.ts / HandshakeRequest.fromOutOfBand) — appropriate
+  // for what the INVITER should see, but wrong for what should show in OUR OWN Connections list,
+  // where we want to see who THEY are, not our own name reflected back. This field fills that gap
+  // until/unless a stronger source is available. Priority for local display, highest first: (1) a
+  // live vc-proof-sharing name, (2) `verifiedCredentialSubject` above (cryptographically live-
+  // verified, post-connection), (3) this field (pre-connection preview, unverified), (4) `.name`.
+  counterpartyDisplayName?: string;
 }
 
 /**

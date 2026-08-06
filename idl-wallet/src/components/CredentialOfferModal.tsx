@@ -3,6 +3,34 @@ import { useMountedApp, useAppSelector } from '@/reducers/store';
 import SDK from '@hyperledger/identus-edge-agent-sdk';
 import { DIDSelectionModal } from './DIDSelectionModal';
 import { getCredentialLayout } from './CredentialCardTypeLayouts';
+import { getItem, setItem } from '@/utils/prefixedStorage';
+
+// A message we've already accepted-and-failed (or explicitly rejected) locally, whose issuer
+// record is stale/dead, keeps getting redelivered by the mediator — deleting it from Pluto only
+// stops it until the next inbox poll re-fetches the exact same message id and the modal pops
+// back up. This persists "don't show this one again" independently of Pluto/Redux state, which
+// the redelivery can't touch.
+const DISMISSED_OFFERS_KEY = 'dismissed-credential-offer-ids';
+
+function getDismissedOfferIds(): Set<string> {
+    try {
+        const stored = getItem(DISMISSED_OFFERS_KEY);
+        return new Set(Array.isArray(stored) ? stored : []);
+    } catch {
+        return new Set();
+    }
+}
+
+function dismissOfferId(id: string): void {
+    try {
+        const ids = getDismissedOfferIds();
+        ids.add(id);
+        // Cap growth — keep the most recent 200, plenty for any realistic backlog.
+        setItem(DISMISSED_OFFERS_KEY, Array.from(ids).slice(-200));
+    } catch (err) {
+        console.warn('⚠️ [CREDENTIAL OFFER] Could not persist dismissed offer id:', err);
+    }
+}
 
 /**
  * CredentialOfferModal Component
@@ -67,6 +95,10 @@ export const CredentialOfferModal: React.FC = () => {
             }
         })
         .filter((offer): offer is CredentialOfferData => offer !== null && offer.credentialPreview !== undefined)
+        // Drop anything we've already tried-and-failed or explicitly rejected — see
+        // DISMISSED_OFFERS_KEY above. Without this, a mediator redelivery of the exact same
+        // (dead) message id re-adds it to app.messages and the modal reappears indefinitely.
+        .filter(offer => !getDismissedOfferIds().has(offer.id))
         // Newest first: this modal only ever surfaces pendingOffers[0] (one at a time, no way to
         // skip to a specific one), so an old offer nobody got around to accepting/rejecting would
         // otherwise permanently block every offer issued after it — including, concretely, a
@@ -142,11 +174,15 @@ export const CredentialOfferModal: React.FC = () => {
                 console.log('🆕 [CREDENTIAL OFFER] Creating new DID');
             }
 
+            // .unwrap() is required here — a dispatched thunk's promise resolves normally even
+            // when the thunk itself rejected (via rejectWithValue), so without it this await
+            // never throws and the code below always logs/behaves as if it succeeded, no matter
+            // what actually happened server-side.
             await app.acceptCredentialOffer({
                 agent: app.agent.instance,
                 message: offerToAccept.message,
                 selectedDID: selectedDID || undefined
-            });
+            }).unwrap();
 
             console.log('✅ [CREDENTIAL OFFER] Offer accepted successfully');
             setPendingOffer(null);
@@ -156,7 +192,11 @@ export const CredentialOfferModal: React.FC = () => {
             console.error('❌ [CREDENTIAL OFFER] Failed to accept offer:', err);
             setError(err instanceof Error ? err.message : 'Failed to accept credential offer');
 
-            // Delete the failed offer message so modal doesn't reappear
+            // Never show this one again — the thunk already deleted it from Pluto on failure,
+            // but a dead/orphaned issuer record means the mediator can keep redelivering the
+            // exact same message id, which would otherwise resurrect this modal indefinitely.
+            dismissOfferId(offerToAccept.id);
+
             try {
                 await app.agent.instance.pluto.deleteMessage(offerToAccept.id);
                 console.log('✅ [CREDENTIAL OFFER] Deleted failed offer message:', offerToAccept.id);
@@ -189,9 +229,12 @@ export const CredentialOfferModal: React.FC = () => {
             await app.rejectCredentialOffer({
                 message: currentOffer.message,
                 pluto: app.agent.instance.pluto
-            });
+            }).unwrap();
 
             console.log('✅ [CREDENTIAL OFFER] Offer rejected successfully');
+            // Same redelivery risk as the accept-failure path above — an explicitly rejected
+            // offer that gets redelivered by the mediator shouldn't pop back up either.
+            dismissOfferId(currentOffer.id);
 
             // Modal auto-closes because Redux state update removes message
         } catch (err) {

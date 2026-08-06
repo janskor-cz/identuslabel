@@ -20,7 +20,11 @@ const { COMPANIES } = require('./lib/companies');
 
 const MULTITENANCY_URL = 'http://91.99.4.54:8200';
 const ENTERPRISE_URL   = 'http://91.99.4.54:8300';
-const ENTERPRISE_ADMIN = process.env.ENTERPRISE_ADMIN_TOKEN || '3HPcLUoT9h9QMYiUk2Hs4vMAgLrq8ufu';
+const ENTERPRISE_ADMIN = process.env.ENTERPRISE_ADMIN_TOKEN;
+if (!ENTERPRISE_ADMIN) {
+  console.error('ENTERPRISE_ADMIN_TOKEN is required (see company-admin-portal/.env) — never hardcode it here.');
+  process.exit(1);
+}
 const DB_PASS          = process.env.ENTERPRISE_DB_PASSWORD;
 
 const ACME = COMPANIES.acme;

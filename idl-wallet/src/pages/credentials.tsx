@@ -345,6 +345,14 @@ export default function App() {
 
         try {
             await app.refreshCredentials();
+            // Also re-fetch the enterprise (Cloud-Agent-custodied) credential list — this button
+            // previously only refreshed the personal/IndexedDB side, so a newly-issued or
+            // newly-revoked enterprise grant (e.g. after re-verifying clearance, or after a CA
+            // revocation cascades) never showed up here without a full page reload.
+            const { refreshEnterpriseCredentials } = await import('@/actions/enterpriseAgentActions');
+            await app.dispatch(refreshEnterpriseCredentials()).unwrap().catch((err: any) => {
+                console.warn('⚠️ Enterprise credential refresh failed (non-fatal):', err);
+            });
             console.log('✅ Manual credential refresh completed');
         } catch (error) {
             console.error('❌ Manual credential refresh failed:', error);

@@ -1,0 +1,850 @@
+diff --git a/src/castor/Castor.ts b/src/castor/Castor.ts
+index cd093af4..51093be3 100644
+--- a/src/castor/Castor.ts
++++ b/src/castor/Castor.ts
+@@ -230,6 +230,7 @@ export default class Castor implements CastorInterface {
+    * @param {?(Service[] | undefined)} [services]
+    * @param {?(PublicKey[] | undefined)} [authenticationKeys]
+    * @param {?(PublicKey[] | undefined)} [issuanceKeys]
++   * @param {?(PublicKey[] | undefined)} [keyAgreementKeys] - X25519 keys for encryption/key agreement
+    * @returns {Promise<DID>}
+    */
+   async createPrismDID(
+@@ -237,6 +238,7 @@ export default class Castor implements CastorInterface {
+     services?: Service[] | undefined,
+     authenticationKeys: (PublicKey | KeyPair)[] = [],
+     issuanceKeys: (PublicKey | KeyPair)[] = [],
++    keyAgreementKeys: (PublicKey | KeyPair)[] = [],
+   ): Promise<DID> {
+     const didPublicKeys: Protos.io.iohk.atala.prism.protos.PublicKey[] = [];
+     const masterPublicKey = "publicKey" in key ? key.publicKey : key;
+@@ -272,6 +274,18 @@ export default class Castor implements CastorInterface {
+       }
+     }
+ 
++    if (keyAgreementKeys.length) {
++      for (const [index, keyAgreementKey] of keyAgreementKeys.entries()) {
++        const pk = "publicKey" in keyAgreementKey ? keyAgreementKey.publicKey : keyAgreementKey
++        const prismDIDPublicKey = new PrismDIDPublicKey(
++          getUsageId(Usage.KEY_AGREEMENT_KEY, index),
++          Usage.KEY_AGREEMENT_KEY,
++          pk,
++        )
++        didPublicKeys.push(prismDIDPublicKey.toProto())
++      }
++    }
++
+     const didCreationData =
+       new Protos.io.iohk.atala.prism.protos.CreateDIDOperation.DIDCreationData({
+         public_keys: didPublicKeys,
+diff --git a/src/domain/buildingBlocks/Pluto.ts b/src/domain/buildingBlocks/Pluto.ts
+index b4a39b3c..d59a42cc 100644
+--- a/src/domain/buildingBlocks/Pluto.ts
++++ b/src/domain/buildingBlocks/Pluto.ts
+@@ -176,6 +176,11 @@ export interface Pluto {
+    */
+   revokeCredential(credential: Credential): Promise<void>;
+ 
++  /**
++   * Delete a Credential from storage permanently
++   */
++  deleteCredential(credential: Credential): Promise<void>;
++
+   /**
+    * Delete a previously stored messages
+    */
+diff --git a/src/domain/models/Message.ts b/src/domain/models/Message.ts
+index a123449e..a9067a24 100644
+--- a/src/domain/models/Message.ts
++++ b/src/domain/models/Message.ts
+@@ -101,28 +101,45 @@ export class Message implements Pluto.Storable {
+       throw new AgentError.InvalidMessageError("undefined or wrong direction");
+     }
+ 
+-    const attachments: AttachmentDescriptor[] = messageObj.attachments
+-      .filter((attachment: any) => {
+-        if (
+-          this.isBase64Attachment(attachment.data) ||
+-          this.isJsonAttachment(attachment.data)
+-        ) {
+-          return true;
+-        }
+-        throw new AgentError.UnsupportedAttachmentType();
+-      })
+-      .map((attachment: any) => {
+-        return new AttachmentDescriptor(
+-          attachment.data,
+-          attachment.mediaType,
+-          attachment.id,
+-          attachment.filename,
+-          attachment.format,
+-          attachment.lastModTime,
+-          attachment.byteCount,
+-          attachment.description
+-        );
+-      });
++    // ✅ FIX: Gracefully filter invalid attachments instead of throwing
++    // Handle empty attachments array early (standard for connection responses)
++    const attachments: AttachmentDescriptor[] = !messageObj.attachments || messageObj.attachments.length === 0
++      ? []
++      : messageObj.attachments
++          .filter((attachment: any) => {
++            // Skip attachments with missing data
++            if (!attachment || !attachment.data) {
++              console.warn('⚠️ [Message.fromJson] Skipping attachment with missing data:', attachment?.id || 'unknown');
++              return false;
++            }
++
++            // Accept valid Base64 or JSON attachments
++            if (
++              this.isBase64Attachment(attachment.data) ||
++              this.isJsonAttachment(attachment.data)
++            ) {
++              return true;
++            }
++
++            // Filter out unsupported attachments instead of throwing
++            console.warn('⚠️ [Message.fromJson] Skipping unsupported attachment type:', {
++              id: attachment.id,
++              dataKeys: Object.keys(attachment.data || {})
++            });
++            return false;
++          })
++          .map((attachment: any) => {
++            return new AttachmentDescriptor(
++              attachment.data,
++              attachment.mediaType,
++              attachment.id,
++              attachment.filename,
++              attachment.format,
++              attachment.lastModTime,
++              attachment.byteCount,
++              attachment.description
++            );
++          });
+ 
+     const id = messageObj.id || undefined;
+     const piuri = messageObj.piuri || messageObj.type;
+diff --git a/src/domain/models/errors/Mercury.ts b/src/domain/models/errors/Mercury.ts
+index ee5c6afb..2b7f41fe 100644
+--- a/src/domain/models/errors/Mercury.ts
++++ b/src/domain/models/errors/Mercury.ts
+@@ -80,3 +80,19 @@ export class UrlSessionError extends Error {
+     this.error = error;
+   }
+ }
++
++/**
++ * DIDCommDecryptionError
++ *
++ * Thrown when DIDComm message decryption fails due to missing recipient secrets/keys.
++ * This is a NON-FATAL error that occurs during connection establishment when encrypted
++ * messages arrive before peer DID keys are persisted to storage.
++ *
++ * The SDK will retry decryption on the next message poll when keys become available.
++ */
++export class DIDCommDecryptionError extends Error {
++  constructor(message?: string) {
++    super(message || "DIDComm message decryption deferred - recipient keys not yet available");
++    this.name = "DIDCommDecryptionError";
++  }
++}
+diff --git a/src/edge-agent/connectionsManager/ConnectionsManager.ts b/src/edge-agent/connectionsManager/ConnectionsManager.ts
+index 398a7d09..57d2bb94 100644
+--- a/src/edge-agent/connectionsManager/ConnectionsManager.ts
++++ b/src/edge-agent/connectionsManager/ConnectionsManager.ts
+@@ -193,7 +193,23 @@ export class ConnectionsManager implements ConnectionsManagerClass {
+     }
+ 
+     const storeDIDPairTask = new CancellableTask<DIDPair>(async () => {
+-      await this.pluto.storeDIDPair(paired.host, paired.receiver, paired.name);
++      try {
++        await this.pluto.storeDIDPair(paired.host, paired.receiver, paired.name);
++        console.log(`✅ [ConnectionsManager] DID pair stored successfully: ${paired.name || 'unnamed'}`);
++      } catch (error: any) {
++        // Gracefully handle RxDB CONFLICT errors (status 409)
++        if (error.status === 409 || error.code === 'CONFLICT' || error.message?.includes('CONFLICT')) {
++          console.log(`⚠️ [ConnectionsManager] CONFLICT on storeDIDPair - connection may already exist: ${paired.name || 'unnamed'}`);
++          console.log(`✅ [ConnectionsManager] Continuing with connection establishment despite conflict`);
++          // Continue - don't throw. DIDRepository.save() already handled the conflict at lower level.
++        } else {
++          // Re-throw non-conflict errors
++          console.error(`❌ [ConnectionsManager] Unexpected error in storeDIDPair:`, error);
++          throw error;
++        }
++      }
++
++      // Always emit CONNECTION event so UI updates, even if there was a CONFLICT
+       this.events.emit(ListenerKey.CONNECTION, paired);
+       return paired;
+     });
+@@ -274,6 +290,27 @@ export class ConnectionsManager implements ConnectionsManagerClass {
+       uri.startsWith("wss://")
+     )
+     );
++
++    // 🔧 FIX #10: Get CA connection DID to filter message polling
++    // Only poll for messages from CA connection, not orphaned peer DIDs
++    const getCAConnectionDID = async (): Promise<string | undefined> => {
++      try {
++        const allPairs = await this.pluto.getAllDidPairs();
++        // Find CA connection (connection named "Certification Authority")
++        const caPair = allPairs.find((pair: DIDPair) => pair.name === "Certification Authority");
++        if (caPair) {
++          console.log(`✅ [ConnectionsManager] Polling for CA connection only: ${caPair.host.toString()}`);
++          return caPair.host.toString();
++        }
++        // Fallback: If no CA connection found, don't filter (legacy behavior)
++        console.warn('⚠️ [ConnectionsManager] No CA connection found, polling for all DIDs');
++        return undefined;
++      } catch (error) {
++        console.error('❌ [ConnectionsManager] Error getting CA connection DID:', error);
++        return undefined;
++      }
++    };
++
+     if (hasWebsocket && this.withWebsocketsExperiment) {
+       this.cancellable = new CancellableTask(async (signal) => {
+         this.mediationHandler.listenUnreadMessages(
+@@ -285,6 +322,8 @@ export class ConnectionsManager implements ConnectionsManagerClass {
+     } else {
+       const timeInterval = Math.max(iterationPeriod, 5) * 1000;
+       this.cancellable = new CancellableTask(async () => {
++        // 🔧 FIX #11: Poll ALL connections, not just CA
++        // Previous FIX #10 broke TechCorp proof requests by filtering to CA only
+         const unreadMessages = await this.mediationHandler.pickupUnreadMessages(10);
+         await this.processMessages(unreadMessages);
+       }, timeInterval);
+diff --git a/src/edge-agent/didcomm/Agent.ts b/src/edge-agent/didcomm/Agent.ts
+index fafe465f..bc8f4b14 100644
+--- a/src/edge-agent/didcomm/Agent.ts
++++ b/src/edge-agent/didcomm/Agent.ts
+@@ -147,6 +147,16 @@ export default class DIDCommAgent extends Startable.Controller {
+       if (e instanceof Domain.AgentError.NoMediatorAvailableError) {
+         const hostDID = await this.createNewPeerDID([], false);
+         await this.connectionManager.registerMediator(hostDID);
++
++        // ✅ FIX: Reload mediator from database after registration
++        await this.connectionManager.mediationHandler.bootRegisteredMediator();
++
++        // ✅ VERIFY: Check mediator is now loaded
++        if (!this.connectionManager.mediationHandler.mediator) {
++          throw new Domain.AgentError.MediationRequestFailedError(
++            "Mediator registration succeeded but reload from database failed"
++          );
++        }
+       }
+       else {
+         throw e;
+@@ -449,12 +459,20 @@ export default class DIDCommAgent extends Startable.Controller {
+    *
+    * @async
+    * @param {OfferCredential} offer
++   * @param {Object} options - Optional configuration
++   * @param {Domain.DID} options.subjectDID - Optional existing PRISM DID to use as credential subject instead of creating new one
++   * @param {string} options.alias - Optional alias for newly created PRISM DID
+    * @returns {Promise<RequestCredential>}
+    */
+   async prepareRequestCredentialWithIssuer(
+-    offer: OfferCredential
++    offer: OfferCredential,
++    options?: { subjectDID?: Domain.DID; alias?: string }
+   ): Promise<RequestCredential> {
+-    const task = new HandleOfferCredential({ offer });
++    const task = new HandleOfferCredential({
++      offer,
++      subjectDID: options?.subjectDID,
++      alias: options?.alias
++    });
+     return this.runTask(task);
+   }
+ 
+diff --git a/src/edge-agent/didcomm/CreatePresentation.ts b/src/edge-agent/didcomm/CreatePresentation.ts
+index adc8d7f0..5fe7444e 100644
+--- a/src/edge-agent/didcomm/CreatePresentation.ts
++++ b/src/edge-agent/didcomm/CreatePresentation.ts
+@@ -118,7 +118,8 @@ export class CreatePresentation extends Task<Presentation, Args> {
+           throw new Error("Credential is not Provable");
+         }
+         const privateKeys = await ctx.Pluto.getDIDPrivateKeysByDID(Domain.DID.fromString(credential.subject));
+-        const privateKey = privateKeys.at(0);
++        // Cloud Agent requires EdDSA (Ed25519) signatures for presentation verification
++        const privateKey = privateKeys.find((key) => key.curve === Domain.Curve.ED25519) || privateKeys.at(0);
+         if (!privateKey) {
+           throw new Error("Undefined privatekey from credential subject.");
+         }
+@@ -142,7 +143,8 @@ export class CreatePresentation extends Task<Presentation, Args> {
+           ['subject', 'sub']
+         )
+         const privateKeys = await ctx.Pluto.getDIDPrivateKeysByDID(Domain.DID.fromString(sub));
+-        const privateKey = privateKeys.at(0);
++        // Cloud Agent requires EdDSA (Ed25519) signatures for presentation verification
++        const privateKey = privateKeys.find((key) => key.curve === Domain.Curve.ED25519) || privateKeys.at(0);
+         if (!privateKey) {
+           throw new Error("Undefined privatekey from credential subject.");
+         }
+@@ -218,6 +220,8 @@ export class CreatePresentation extends Task<Presentation, Args> {
+       }
+       const subjectDID = Domain.DID.from(credential.subject);
+       const prismPrivateKeys = await ctx.Pluto.getDIDPrivateKeysByDID(subjectDID);
++      // JWT credentials use SECP256K1 keys (ES256K algorithm) - matches HandleOfferCredential.ts
++      // SECP256K1 keys are created at lines 105-109 in HandleOfferCredential.ts for JWT credentials
+       const prismPrivateKey = prismPrivateKeys.find((key) => key.curve === Domain.Curve.SECP256K1);
+       if (prismPrivateKey === undefined) {
+         throw new Domain.AgentError.CannotFindDIDPrivateKey();
+diff --git a/src/edge-agent/didcomm/HandleOOBInvitation.ts b/src/edge-agent/didcomm/HandleOOBInvitation.ts
+index d3dc912c..f4264d4b 100644
+--- a/src/edge-agent/didcomm/HandleOOBInvitation.ts
++++ b/src/edge-agent/didcomm/HandleOOBInvitation.ts
+@@ -30,9 +30,9 @@ export class HandleOOBInvitation extends Task<void, Args> {
+         throw new Domain.AgentError.NoMediatorAvailableError();
+       }
+ 
+-      const request = HandshakeRequest.fromOutOfBand(this.args.invitation, peerDID);
+-      await ctx.ConnectionManager.sendMessage(request.makeMessage());
+       const alias = this.args.alias ?? "OOBConn";
++      const request = HandshakeRequest.fromOutOfBand(this.args.invitation, peerDID, alias);
++      await ctx.ConnectionManager.sendMessage(request.makeMessage());
+       const pair = new Domain.DIDPair(peerDID, request.to, alias);
+       await ctx.ConnectionManager.addConnection(pair);
+     }
+diff --git a/src/edge-agent/didcomm/HandleOfferCredential.ts b/src/edge-agent/didcomm/HandleOfferCredential.ts
+index 7f30c5ee..f98051c0 100644
+--- a/src/edge-agent/didcomm/HandleOfferCredential.ts
++++ b/src/edge-agent/didcomm/HandleOfferCredential.ts
+@@ -13,6 +13,8 @@ import { DIDCommContext } from "./Context";
+ 
+ interface Args {
+   offer: OfferCredential;
++  subjectDID?: Domain.DID;  // Optional: use existing PRISM DID instead of creating new one
++  alias?: string;  // Optional: alias for newly created PRISM DID
+ }
+ 
+ export class HandleOfferCredential extends Task<RequestCredential, Args> {
+@@ -66,33 +68,57 @@ export class HandleOfferCredential extends Task<RequestCredential, Args> {
+       await ctx.Pluto.storeCredentialMetadata(metadata);
+     }
+     else if (credentialType === Domain.CredentialType.JWT) {
+-      const getIndexTask = new PrismKeyPathIndexTask({});
+-      const index = await ctx.run(getIndexTask);
+-
+-      const masterSk = await ctx.Apollo.createPrivateKey({
+-        [Domain.KeyProperties.curve]: Domain.Curve.SECP256K1,
+-        [Domain.KeyProperties.index]: index,
+-        [Domain.KeyProperties.type]: Domain.KeyTypes.EC,
+-        [Domain.KeyProperties.seed]: Buffer.from(ctx.Seed.value).toString("hex"),
+-      });
+-
+-      const authSk = await ctx.Apollo.createPrivateKey({
+-        [Domain.KeyProperties.curve]: Domain.Curve.SECP256K1,
+-        [Domain.KeyProperties.index]: index + 1,
+-        [Domain.KeyProperties.type]: Domain.KeyTypes.EC,
+-        [Domain.KeyProperties.seed]: Buffer.from(ctx.Seed.value).toString("hex"),
+-      });
+-
+-
+-      const did = await ctx.Castor.createPrismDID(
+-        masterSk.publicKey(),
+-        [],
+-        [
+-          authSk.publicKey()
+-        ]
+-      );
+-
+-      await ctx.Pluto.storeDID(did, [masterSk, authSk]);
++      let did: Domain.DID;
++      let authSk: Domain.PrivateKey;
++
++      // Check if existing PRISM DID was provided
++      if (this.args.subjectDID) {
++        // Use existing DID - retrieve its keys from Pluto
++        did = this.args.subjectDID;
++        const storedKeys = await ctx.Pluto.getDIDPrivateKeysByDID(did);
++
++        if (!storedKeys || storedKeys.length === 0) {
++          throw new Error(`No private keys found for existing DID: ${did.toString()}`);
++        }
++
++        // Find the master key (SECP256K1) for credential request signing
++        // Cloud Agent expects ES256K (SECP256K1) signatures, matching original SDK behavior
++        console.log(`🔑 [HandleOfferCredential] Looking for SECP256K1 key. Available keys:`, storedKeys.map(k => ({ curve: k.curve, type: k.type })));
++        authSk = storedKeys.find(key => key.curve === Domain.Curve.SECP256K1) || storedKeys[storedKeys.length - 1];
++        console.log(`🔑 [HandleOfferCredential] Selected key curve: ${authSk?.curve}`);
++
++        if (!authSk) {
++          throw new Error(`No suitable authentication key found for DID: ${did.toString()}`);
++        }
++      } else {
++        // Original behavior - create new DID
++        const getIndexTask = new PrismKeyPathIndexTask({});
++        const index = await ctx.run(getIndexTask);
++
++        const masterSk = await ctx.Apollo.createPrivateKey({
++          [Domain.KeyProperties.curve]: Domain.Curve.SECP256K1,
++          [Domain.KeyProperties.index]: index,
++          [Domain.KeyProperties.type]: Domain.KeyTypes.EC,
++          [Domain.KeyProperties.seed]: Buffer.from(ctx.Seed.value).toString("hex"),
++        });
++
++        authSk = await ctx.Apollo.createPrivateKey({
++          [Domain.KeyProperties.curve]: Domain.Curve.SECP256K1,
++          [Domain.KeyProperties.index]: index + 1,
++          [Domain.KeyProperties.type]: Domain.KeyTypes.EC,
++          [Domain.KeyProperties.seed]: Buffer.from(ctx.Seed.value).toString("hex"),
++        });
++
++        did = await ctx.Castor.createPrismDID(
++          masterSk.publicKey(),
++          [],
++          [
++            authSk.publicKey()
++          ]
++        );
++
++        await ctx.Pluto.storeDID(did, [masterSk, authSk], this.args.alias);
++      }
+ 
+       credRequestBuffer = await ctx.Pollux.processCredentialOffer<Domain.CredentialType.JWT>(payload, {
+         did: did,
+@@ -105,32 +131,55 @@ export class HandleOfferCredential extends Task<RequestCredential, Args> {
+ 
+     }
+     else if (credentialType === Domain.CredentialType.SDJWT) {
+-      const getIndexTask = new PrismKeyPathIndexTask({});
+-      const index = await ctx.run(getIndexTask);
+-
+-      const masterSk = await ctx.Apollo.createPrivateKey({
+-        [Domain.KeyProperties.curve]: Domain.Curve.SECP256K1,
+-        [Domain.KeyProperties.index]: index,
+-        [Domain.KeyProperties.type]: Domain.KeyTypes.EC,
+-        [Domain.KeyProperties.seed]: Buffer.from(ctx.Seed.value).toString("hex"),
+-      });
+-
+-      const authSk = await ctx.Apollo.createPrivateKey({
+-        [Domain.KeyProperties.curve]: Domain.Curve.ED25519,
+-        [Domain.KeyProperties.index]: index + 1,
+-        [Domain.KeyProperties.type]: Domain.KeyTypes.EC,
+-        [Domain.KeyProperties.seed]: Buffer.from(ctx.Seed.value).toString("hex"),
+-      });
+-
+-      const did = await ctx.Castor.createPrismDID(
+-        masterSk.publicKey(),
+-        [],
+-        [
+-          authSk.publicKey()
+-        ]
+-      );
++      let did: Domain.DID;
++      let authSk: Domain.PrivateKey;
++
++      // Check if existing PRISM DID was provided
++      if (this.args.subjectDID) {
++        // Use existing DID - retrieve its keys from Pluto
++        did = this.args.subjectDID;
++        const storedKeys = await ctx.Pluto.getDIDPrivateKeysByDID(did);
++
++        if (!storedKeys || storedKeys.length === 0) {
++          throw new Error(`No private keys found for existing DID: ${did.toString()}`);
++        }
++
++        // For SDJWT, prefer ED25519 key, otherwise fall back to any available key
++        authSk = storedKeys.find(key => key.curve === Domain.Curve.ED25519) || storedKeys[storedKeys.length - 1];
++
++        if (!authSk) {
++          throw new Error(`No suitable authentication key found for DID: ${did.toString()}`);
++        }
++      } else {
++        // Original behavior - create new DID
++        const getIndexTask = new PrismKeyPathIndexTask({});
++        const index = await ctx.run(getIndexTask);
++
++        const masterSk = await ctx.Apollo.createPrivateKey({
++          [Domain.KeyProperties.curve]: Domain.Curve.SECP256K1,
++          [Domain.KeyProperties.index]: index,
++          [Domain.KeyProperties.type]: Domain.KeyTypes.EC,
++          [Domain.KeyProperties.seed]: Buffer.from(ctx.Seed.value).toString("hex"),
++        });
++
++        authSk = await ctx.Apollo.createPrivateKey({
++          [Domain.KeyProperties.curve]: Domain.Curve.ED25519,
++          [Domain.KeyProperties.index]: index + 1,
++          [Domain.KeyProperties.type]: Domain.KeyTypes.EC,
++          [Domain.KeyProperties.seed]: Buffer.from(ctx.Seed.value).toString("hex"),
++        });
++
++        did = await ctx.Castor.createPrismDID(
++          masterSk.publicKey(),
++          [],
++          [
++            authSk.publicKey()
++          ]
++        );
++
++        await ctx.Pluto.storeDID(did, [masterSk, authSk], this.args.alias);
++      }
+ 
+-      await ctx.Pluto.storeDID(did, [masterSk, authSk]);
+       credRequestBuffer = await ctx.Pollux.processCredentialOffer<Domain.CredentialType.SDJWT>(payload, {
+         did: did,
+         sdJWT: true,
+diff --git a/src/edge-agent/mediator/BasicMediatorHandler.ts b/src/edge-agent/mediator/BasicMediatorHandler.ts
+index 7e43c2b0..c35e3db0 100644
+--- a/src/edge-agent/mediator/BasicMediatorHandler.ts
++++ b/src/edge-agent/mediator/BasicMediatorHandler.ts
+@@ -161,16 +161,26 @@ export class BasicMediatorHandler implements MediatorHandler {
+    *
+    * @async
+    * @param {number} limit
++   * @param {string} [recipientDID] - Optional: Filter messages by specific recipient DID. If omitted, fetches for ALL registered DIDs.
+    * @returns {Promise<Array<{ attachmentId: string; message: Message }>>}
+    */
+   async pickupUnreadMessages(
+-    limit: number
++    limit: number,
++    recipientDID?: string
+   ): Promise<Array<{ attachmentId: string; message: Message; }>> {
+     if (!this.mediator) {
+       throw new AgentError.NoMediatorAvailableError();
+     }
++
++    // 🔧 FIX #10: Add optional recipientKey to filter messages by specific DID
++    // This prevents fetching messages from orphaned peer DIDs (failed connections)
++    // Only fetch messages for active connections (typically CA connection)
++    const requestBody = recipientDID
++      ? { limit: limit, recipientKey: recipientDID }  // Filter by specific DID
++      : { limit: limit };                              // Fetch for all DIDs (legacy behavior)
++
+     const request = new PickupRequest(
+-      { limit: limit },
++      requestBody,
+       this.mediator.hostDID,
+       this.mediator.mediatorDID
+     ).makeMessage();
+diff --git a/src/edge-agent/protocols/connection/HandshakeRequest.ts b/src/edge-agent/protocols/connection/HandshakeRequest.ts
+index 59b52e69..2ed4d86b 100644
+--- a/src/edge-agent/protocols/connection/HandshakeRequest.ts
++++ b/src/edge-agent/protocols/connection/HandshakeRequest.ts
+@@ -75,13 +75,20 @@ export class HandshakeRequest {
+ 
+   static fromOutOfBand(
+     inviteMessage: OutOfBandInvitation,
+-    from: DID
++    from: DID,
++    label?: string
+   ): HandshakeRequest {
+     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+     const toDID = DID.fromString(inviteMessage.from!);
+ 
++    // Create body with label field included
++    const requestBody: HandshakeRequestBody = {
++      ...inviteMessage.body,
++      label: label ?? "Unspecified"
++    };
++
+     return new HandshakeRequest(
+-      inviteMessage.body,
++      requestBody,
+       from,
+       toDID,
+       inviteMessage.id
+diff --git a/src/edge-agent/protocols/issueCredential/OfferCredential.ts b/src/edge-agent/protocols/issueCredential/OfferCredential.ts
+index 31261f02..a69182f2 100644
+--- a/src/edge-agent/protocols/issueCredential/OfferCredential.ts
++++ b/src/edge-agent/protocols/issueCredential/OfferCredential.ts
+@@ -2,7 +2,7 @@ import { uuid } from "@stablelib/uuid";
+ import { AgentError } from "../../../domain/models/Errors";
+ import { AttachmentDescriptor, DID, Message } from "../../../domain";
+ import { ProtocolType } from "../ProtocolTypes";
+-import { CredentialPreview, validateCredentialPreview } from "./CredentialPreview";
++import { CredentialPreview } from "./CredentialPreview";
+ import { isNil, isObject } from "../../../utils";
+ 
+ /**
+@@ -18,7 +18,8 @@ export interface OfferCredentialBody {
+   // an optional field that provides human readable information about this Credential Offer
+   comment?: string;
+   // a JSON-LD object that represents the credential data that Issuer is willing to issue
+-  credential_preview: CredentialPreview;
++  // Made optional to support Cloud Agent offers that may not include preview in body
++  credential_preview?: CredentialPreview;
+ }
+ 
+ export class OfferCredential {
+@@ -36,13 +37,9 @@ export class OfferCredential {
+   }
+ 
+   private validate() {
+-    if (validateCredentialPreview(this.body.credential_preview)) {
+-      return;
+-    }
+-
+-    throw new AgentError.InvalidOfferCredentialMessageError(
+-      "Invalid offer credential message error."
+-    );
++    // credential_preview is optional and may have various formats
++    // Cloud Agent may send offers without preview or with non-standard preview formats
++    // Actual credential data is in attachments, so no validation needed
+   }
+ 
+   makeMessage(): Message {
+@@ -68,8 +65,10 @@ export class OfferCredential {
+       );
+     }
+ 
+-    if (!isObject(msg.body) || !isObject(msg.body.credential_preview)) {
+-      throw new AgentError.InvalidOfferCredentialBodyError("Undefined credentialPreview");
++    // Only validate that body is an object
++    // credential_preview is optional - may be in attachments instead
++    if (!isObject(msg.body)) {
++      throw new AgentError.InvalidOfferCredentialBodyError("Invalid body");
+     }
+ 
+     return new OfferCredential(
+diff --git a/src/edge-agent/protocols/pickup/PickupRunner.ts b/src/edge-agent/protocols/pickup/PickupRunner.ts
+index defae0b8..03604e3d 100644
+--- a/src/edge-agent/protocols/pickup/PickupRunner.ts
++++ b/src/edge-agent/protocols/pickup/PickupRunner.ts
+@@ -1,6 +1,6 @@
+ import { AttachmentDescriptor, Message } from "../../../domain";
+ import { Mercury } from "../../../domain/buildingBlocks/Mercury";
+-import { AgentError } from "../../../domain/models/Errors";
++import { AgentError, MercuryError } from "../../../domain/models/Errors";
+ import { ProtocolType } from "../ProtocolTypes";
+ import { PickupAttachment } from "../types";
+ 
+@@ -58,7 +58,10 @@ export class PickupRunner {
+ 
+   async run(): Promise<Array<{ attachmentId: string; message: Message }>> {
+     if (this.message.type === "delivery") {
+-      return Promise.all(
++      // 🔧 FIX #9: Use Promise.allSettled to gracefully handle DIDComm decryption failures
++      // Some messages may fail to decrypt if peer DID keys aren't persisted yet
++      // This is normal during connection establishment - failed messages will be retried on next poll
++      const results = await Promise.allSettled(
+         this.message.message.attachments
+           .map(this.processAttachment)
+           .filter(this.filterNullAttachments)
+@@ -67,6 +70,26 @@ export class PickupRunner {
+             message: await this.mercury.unpackMessage(attachment.data),
+           }))
+       );
++
++      // Filter out failed decryptions and log warnings
++      const successfulMessages = results
++        .filter((result) => {
++          if (result.status === 'rejected') {
++            // Check if it's a DIDCommDecryptionError (expected, non-fatal)
++            if (result.reason instanceof MercuryError.DIDCommDecryptionError) {
++              console.warn('⚠️ [PickupRunner] Message decryption deferred - will retry on next poll');
++              console.warn(`⚠️ [PickupRunner] Reason: ${result.reason.message}`);
++            } else {
++              // Unexpected error - log as error
++              console.error('❌ [PickupRunner] Unexpected message unpacking failure:', result.reason);
++            }
++            return false;
++          }
++          return true;
++        })
++        .map((result) => (result as PromiseFulfilledResult<{ attachmentId: string; message: Message }>).value);
++
++      return successfulMessages;
+     } else if (this.message.type === "report") {
+       return [
+         {
+diff --git a/src/edge-agent/protocols/types.ts b/src/edge-agent/protocols/types.ts
+index 78b5d738..e01f2309 100644
+--- a/src/edge-agent/protocols/types.ts
++++ b/src/edge-agent/protocols/types.ts
+@@ -69,6 +69,7 @@ export interface HandshakeRequestBody {
+   goalCode?: string;
+   goal?: string;
+   accept?: string[];
++  label?: string;
+ }
+ 
+ export type OutOfBandInvitationBody = HandshakeRequestBody;
+diff --git a/src/edge-agent/types/index.ts b/src/edge-agent/types/index.ts
+index ca78eb2a..ad6b7b28 100644
+--- a/src/edge-agent/types/index.ts
++++ b/src/edge-agent/types/index.ts
+@@ -111,7 +111,8 @@ export abstract class MediatorHandler {
+   abstract updateKeyListWithDIDs(dids: DID[]): Promise<void>;
+ 
+   abstract pickupUnreadMessages(
+-    limit: number
++    limit: number,
++    recipientDID?: string
+   ): Promise<Array<{ attachmentId: string; message: Message; }>>;
+ 
+   abstract registerMessagesAsRead(ids: string[]): Promise<void>;
+diff --git a/src/mercury/didcomm/Wrapper.ts b/src/mercury/didcomm/Wrapper.ts
+index 58126f32..5425a038 100644
+--- a/src/mercury/didcomm/Wrapper.ts
++++ b/src/mercury/didcomm/Wrapper.ts
+@@ -101,15 +101,40 @@ export class DIDCommWrapper implements DIDCommProtocol {
+ 
+   async unpack(message: string): Promise<Domain.Message> {
+     const didcomm = await DIDCommWrapper.getDIDComm();
+-    const [didcommMsg] = await didcomm.Message.unpack(
+-      message,
+-      this.didResolver,
+-      this.secretsResolver,
+-      {
+-        expect_decrypt_by_all_keys: false,
+-        unwrap_re_wrapping_forward: false,
++
++    // 🔧 FIX #9: Gracefully handle DIDComm secret errors at WASM boundary
++    // DIDCommSecretNotFound errors occur when encrypted messages arrive before peer DID keys are persisted
++    // These are NON-FATAL errors during connection establishment - the SDK will retry decryption
++    let didcommMsg;
++    try {
++      [didcommMsg] = await didcomm.Message.unpack(
++        message,
++        this.didResolver,
++        this.secretsResolver,
++        {
++          expect_decrypt_by_all_keys: false,
++          unwrap_re_wrapping_forward: false,
++        }
++      );
++    } catch (error: any) {
++      // ✅ Gracefully handle missing recipient secrets (non-fatal)
++      // These occur when encrypted messages arrive before peer DID keys are persisted
++      if (error?.message?.includes('No recipient secrets found') ||
++          error?.message?.includes('SecretNotFound') ||
++          error?.message?.includes('DIDCommSecretNotFound')) {
++        console.warn('⚠️ [DIDCommWrapper] Cannot decrypt message - recipient keys not yet available');
++        console.warn('⚠️ [DIDCommWrapper] This is normal during connection establishment');
++        console.warn('⚠️ [DIDCommWrapper] Message will be skipped, will retry on next fetch');
++
++        // Throw custom error that can be filtered out in PickupRunner
++        throw new MercuryError.DIDCommDecryptionError(
++          `Message decryption deferred - recipient keys not available: ${error.message}`
++        );
+       }
+-    );
++
++      // Re-throw other unexpected errors
++      throw error;
++    }
+ 
+     const msgObj = didcommMsg.as_value();
+     const toString = msgObj.to?.at(0);
+diff --git a/src/pluto/Pluto.ts b/src/pluto/Pluto.ts
+index 91dac66a..21a2d37c 100644
+--- a/src/pluto/Pluto.ts
++++ b/src/pluto/Pluto.ts
+@@ -179,6 +179,16 @@ export class Pluto extends Startable.Controller implements Domain.Pluto {
+     await this.Repositories.Credentials.update(credentialModel);
+   }
+ 
++  async deleteCredential(credential: Domain.Credential): Promise<void> {
++    if (!credential || !credential.isStorable()) {
++      throw new Error("Credential not found or invalid");
++    }
++    const credentialModel = await this.Repositories.Credentials.findOne({ id: credential.id });
++    if (credentialModel) {
++      await this.Repositories.Credentials.delete(credentialModel.uuid);
++    }
++  }
++
+ 
+   /** Credential Metadata **/
+ 
+@@ -337,6 +347,22 @@ export class Pluto extends Startable.Controller implements Domain.Pluto {
+     await this.Repositories.DIDs.save(host);
+     await this.Repositories.DIDs.save(receiver);
+ 
++    // 🔧 FIX: Check if DIDPair already exists before inserting (prevent duplicates)
++    const existingLinks = await this.Repositories.DIDLinks.getModels({
++      selector: {
++        role: Models.DIDLink.role.pair,
++        hostId: host.uuid,
++        targetId: receiver.uuid
++      }
++    });
++
++    if (existingLinks.length > 0) {
++      console.log(`ℹ️ [Pluto] DIDPair already exists, skipping storage: ${alias}`);
++      console.log(`   Host: ${host.toString()}`);
++      console.log(`   Receiver: ${receiver.toString()}`);
++      return;
++    }
++
+     await this.Repositories.DIDLinks.insert({
+       alias,
+       role: Models.DIDLink.role.pair,
+diff --git a/src/pluto/repositories/DIDRepository.ts b/src/pluto/repositories/DIDRepository.ts
+index 7a75df75..9222e396 100644
+--- a/src/pluto/repositories/DIDRepository.ts
++++ b/src/pluto/repositories/DIDRepository.ts
+@@ -9,11 +9,37 @@ export class DIDRepository extends MapperRepository<Models.DID, Domain.DID> {
+   }
+ 
+   override async save(domain: Domain.DID, alias?: string) {
+-    const existing = await this.byUUID(domain.uuid);
++    try {
++      const existing = await this.byUUID(domain.uuid);
+ 
+-    if (!existing) {
+-      const model = this.toModel(domain, alias);
+-      await this.insert(model);
++      if (!existing) {
++        const model = this.toModel(domain, alias);
++        await this.insert(model);
++      } else {
++        // DID already exists - this is expected in certain flows (e.g., re-accepting invitations)
++        console.log(`ℹ️ [DIDRepository] DID already exists, skipping insert: ${domain.uuid.substring(0, 50)}...`);
++      }
++    } catch (error: any) {
++      // Gracefully handle RxDB CONFLICT errors (status 409) AND StoreInsertError (wrapper from BaseRepository)
++      const isConflictError = error.status === 409 ||
++                               error.code === 'CONFLICT' ||
++                               error.message?.includes('CONFLICT') ||
++                               error.constructor?.name === 'StoreInsertError';
++
++      if (isConflictError) {
++        // Verify DID actually exists in database
++        const existing = await this.byUUID(domain.uuid);
++        if (existing) {
++          console.log(`✅ [DIDRepository] Conflict handled gracefully - DID exists: ${domain.uuid.substring(0, 50)}...`);
++          return; // Idempotent operation - success
++        } else {
++          // Conflict but DID doesn't exist - unexpected, re-throw
++          console.error(`❌ [DIDRepository] CONFLICT error but DID not found: ${domain.uuid.substring(0, 50)}...`);
++          throw error;
++        }
++      }
++      // Re-throw non-conflict errors
++      throw error;
+     }
+   }
+ 
+diff --git a/src/pluto/repositories/builders/BaseRepository.ts b/src/pluto/repositories/builders/BaseRepository.ts
+index b3cb7769..18de81c7 100644
+--- a/src/pluto/repositories/builders/BaseRepository.ts
++++ b/src/pluto/repositories/builders/BaseRepository.ts
+@@ -37,6 +37,10 @@ export abstract class BaseRepository<T extends Model> {
+       return obj;
+     }
+     catch (e) {
++      // ✅ FIX: Preserve original error for debugging
++      console.error(`❌ [BaseRepository] Insert failed for collection "${this.name}":`, e);
++      console.error('❌ [BaseRepository] Error type:', (e as any)?.constructor?.name);
++      console.error('❌ [BaseRepository] Error message:', (e as any)?.message);
+       throw new Domain.PlutoError.StoreInsertError();
+     }
+   }
+diff --git a/src/pluto/rxdb/Store.ts b/src/pluto/rxdb/Store.ts
+index 33a835c3..27e2847a 100644
+--- a/src/pluto/rxdb/Store.ts
++++ b/src/pluto/rxdb/Store.ts
+@@ -94,7 +94,7 @@ export class RxdbStore implements Pluto.Store {
+ 
+   async insert(name: string, data: any) {
+     const table = this.getCollection(name);
+-    await table.insert(data);
++    await table.upsert(data);
+   }
+ 
+   /**

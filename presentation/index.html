@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%AA%AA%3C/text%3E%3C/svg%3E">
+<title>Identity You Can Verify — IDL Wallet</title>
+<style>
+  :root {
+    --ink: #12161d;
+    --paper: #eef1f4;
+    --surface: #ffffff;
+    --primary: #24365c;
+    --accent: #b8863b;
+    --line: #d7dce2;
+    --muted: #57647a;
+
+    --cl-0: #6b7684;
+    --cl-1: #3d7ab5;
+    --cl-2: #2f9e8f;
+    --cl-3: #c98a2e;
+    --cl-4: #b23b3b;
+
+    --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #eef1f4;
+      --paper: #12161d;
+      --surface: #181e28;
+      --primary: #a9bde0;
+      --accent: #d9a34f;
+      --line: #2a323d;
+      --muted: #9aa7bb;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #eef1f4;
+    --paper: #12161d;
+    --surface: #181e28;
+    --primary: #a9bde0;
+    --accent: #d9a34f;
+    --line: #2a323d;
+    --muted: #9aa7bb;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --ink: #12161d;
+    --paper: #eef1f4;
+    --surface: #ffffff;
+    --primary: #24365c;
+    --accent: #b8863b;
+    --line: #d7dce2;
+    --muted: #57647a;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+
+  html {
+    scroll-snap-type: y proximity;
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto !important; }
+    * { animation: none !important; transition: none !important; }
+  }
+
+  h1, h2, h3 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .kicker {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1rem;
+  }
+
+  a { color: inherit; }
+
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* ---------- progress rail ---------- */
+  .rail {
+    position: fixed;
+    top: 50%;
+    right: clamp(0.85rem, 2.4vw, 2rem);
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 0.48rem;
+    z-index: 20;
+  }
+  .rail a {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--line);
+    display: block;
+    text-indent: -9999px;
+    overflow: hidden;
+    transition: background 0.2s ease, transform 0.2s ease;
+  }
+  .rail a:hover,
+  .rail a:focus-visible {
+    background: var(--muted);
+    transform: scale(1.25);
+  }
+  .rail a.active {
+    background: var(--accent);
+    transform: scale(1.45);
+  }
+  .rail a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+  @media (max-width: 780px) {
+    .rail { display: none; }
+  }
+
+  /* ---------- slides ---------- */
+  .slide {
+    min-height: 100svh;
+    scroll-snap-align: start;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: clamp(2.5rem, 6vw, 5rem) clamp(1.5rem, 8vw, 7rem);
+    border-bottom: 1px solid var(--line);
+    position: relative;
+  }
+  .slide-inner { max-width: 920px; width: 100%; margin: 0 auto; }
+  .slide-inner.wide { max-width: 1080px; }
+
+  .slide-num {
+    position: absolute;
+    bottom: clamp(1.25rem, 3vw, 2.5rem);
+    left: clamp(1.5rem, 8vw, 7rem);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  h1.title {
+    font-size: clamp(2.4rem, 6vw, 4.2rem);
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+  }
+  h2.headline {
+    font-size: clamp(1.55rem, 2.9vw, 2.25rem);
+    line-height: 1.16;
+    max-width: 23ch;
+  }
+  .lede {
+    font-size: clamp(1.05rem, 1.6vw, 1.3rem);
+    color: var(--muted);
+    max-width: 62ch;
+    margin-top: 1.1rem;
+  }
+  p.body-text {
+    max-width: 68ch;
+    font-size: 1.02rem;
+    color: var(--ink);
+  }
+  p.body-text.muted { color: var(--muted); }
+
+  .meta-row {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    margin-top: 2.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .meta-row span { display: flex; align-items: center; gap: 0.4rem; }
+  .meta-row b { color: var(--ink); font-weight: 600; }
+
+  .standard-badge {
+    display: inline-block;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.3rem 0.8rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    margin-bottom: 1rem;
+  }
+
+  /* ---------- comparison cards ---------- */
+  .grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.25rem;
+    margin-top: 2.1rem;
+  }
+  .grid-3 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1.1rem;
+    margin-top: 2.1rem;
+  }
+  @media (max-width: 720px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1.4rem 1.5rem;
+  }
+  .card h3 {
+    font-size: 1.02rem;
+    font-family: var(--font-body);
+    font-weight: 700;
+    margin-bottom: 0.6rem;
+  }
+  .card ul { margin: 0; padding-left: 1.1rem; color: var(--muted); font-size: 0.94rem; }
+  .card ul li { margin-bottom: 0.55rem; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.92rem; }
+  .card.accent-border { border-color: var(--primary); border-width: 1px; border-left-width: 3px; }
+  .card.warn { border-left: 3px solid var(--cl-3); }
+  .card.warn .eyebrow { color: var(--cl-3); }
+  .card .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 0.5rem;
+  }
+
+  /* ---------- redaction (selective disclosure) ---------- */
+  .redact-list { list-style: none; padding-left: 0; }
+  .redact-list li { display: flex; align-items: center; height: 1.3em; }
+  .redact-bar {
+    display: inline-block;
+    height: 0.8em;
+    border-radius: 3px;
+    background: var(--ink);
+    opacity: 0.8;
+  }
+  .redact-list li.disclosed {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.98rem;
+  }
+
+  /* ---------- credential / subject chips ---------- */
+  .chip-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.9rem;
+    margin-top: 2.1rem;
+  }
+  @media (max-width: 900px) {
+    .chip-row { grid-template-columns: repeat(2, 1fr); }
+  }
+  .chip {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--primary);
+    border-radius: 6px;
+    padding: 1rem 1.1rem;
+  }
+  .chip b { display: block; font-size: 0.92rem; margin-bottom: 0.35rem; }
+  .chip span { font-size: 0.85rem; color: var(--muted); }
+
+  /* ---------- tables ---------- */
+  .table-wrap { overflow-x: auto; margin-top: 2.1rem; }
+  table.deck-table { border-collapse: collapse; width: 100%; min-width: 560px; }
+  table.deck-table th, table.deck-table td {
+    text-align: left;
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--line);
+  }
+  table.deck-table th {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  table.deck-table td.level { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  table.deck-table td.muted { color: var(--muted); }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    font-size: 0.92rem;
+  }
+  .badge::before {
+    content: "";
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    background: var(--dot);
+  }
+  .footnote { margin-top: 1.1rem; font-size: 0.85rem; color: var(--muted); max-width: 68ch; }
+
+  /* ---------- feature stats ---------- */
+  .stat-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1.5rem; }
+  .stat-card .num { font-family: var(--font-display); font-size: 1.75rem; color: var(--primary); display: block; margin-bottom: 0.5rem; }
+  .stat-card p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+
+  /* ---------- checklist ---------- */
+  .checklist { list-style: none; margin: 2rem 0 0; padding: 0; display: grid; gap: 0.85rem; }
+  .checklist li {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.9rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.85rem 1.05rem;
+    align-items: start;
+  }
+  .checklist .mark {
+    width: 22px; height: 22px; border-radius: 999px;
+    background: var(--primary); color: var(--surface);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.75rem; font-weight: 700; flex-shrink: 0;
+  }
+  .checklist b { display: block; font-size: 0.94rem; margin-bottom: 0.15rem; }
+  .checklist span { font-size: 0.87rem; color: var(--muted); }
+
+  /* ---------- json panel ---------- */
+  .json-panel {
+    background: #0d1117;
+    color: #d7dfea;
+    border-radius: 10px;
+    padding: 1.2rem 1.35rem;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.6;
+    overflow-x: auto;
+    margin-top: 1.1rem;
+  }
+  .json-panel .k { color: #7db8e8; }
+  .json-panel .s { color: #c9a86a; }
+  .json-panel .c { color: #6b7684; }
+  .json-label {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 1.6rem;
+  }
+  .json-label:first-of-type { margin-top: 2.1rem; }
+
+  /* ---------- callouts ---------- */
+  .callout {
+    border-radius: 10px;
+    padding: 1.05rem 1.25rem;
+    margin-top: 1.1rem;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    max-width: 70ch;
+  }
+  .callout-label {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 0.4rem;
+    display: block;
+    color: var(--muted);
+  }
+  .callout p { margin: 0; font-size: 0.92rem; color: var(--ink); }
+  .callout.warn { border-color: var(--cl-3); }
+  .callout.warn .callout-label { color: var(--cl-3); }
+  .callout.ok { border-color: var(--cl-2); }
+  .callout.ok .callout-label { color: var(--cl-2); }
+
+  /* ---------- mermaid host ---------- */
+  .diagram { margin-top: 2.1rem; overflow-x: auto; }
+  .diagram pre.mermaid { margin: 0; min-width: 480px; }
+  .diagram.narrow pre.mermaid { min-width: 360px; }
+
+  /* ---------- closing ---------- */
+  .takeaways { display: grid; gap: 1.4rem; margin-top: 2.3rem; }
+  .takeaway { display: grid; grid-template-columns: 3rem 1fr; gap: 1.1rem; align-items: baseline; }
+  .takeaway .n { font-family: var(--font-display); font-size: 1.6rem; color: var(--accent); }
+  .takeaway p { margin: 0; font-size: 1.05rem; }
+  .closing-foot {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+</style>
+</head>
+<body>
+
+<nav class="rail" aria-label="Slide navigation">
+  <a href="#s1" aria-label="Title"></a>
+  <a href="#s2" aria-label="TCP/IP has no identity layer"></a>
+  <a href="#s3" aria-label="Why X.509 doesn't fit people"></a>
+  <a href="#s4" aria-label="Federation relocates the problem"></a>
+  <a href="#s5" aria-label="A third option"></a>
+  <a href="#s6" aria-label="Decentralized Identifiers"></a>
+  <a href="#s7" aria-label="Verifiable Credentials"></a>
+  <a href="#s8" aria-label="Selective disclosure"></a>
+  <a href="#s9" aria-label="EUDI and zero-knowledge"></a>
+  <a href="#s10" aria-label="The Wallet"></a>
+  <a href="#s11" aria-label="Can a DID belong to anyone?"></a>
+  <a href="#s12" aria-label="Document Access Service"></a>
+  <a href="#s13" aria-label="The Access Flow"></a>
+  <a href="#s14" aria-label="Classification master keys"></a>
+  <a href="#s15" aria-label="Decentralized storage"></a>
+  <a href="#s16" aria-label="Delivering the key"></a>
+  <a href="#s17" aria-label="A deliberate trade-off"></a>
+  <a href="#s18" aria-label="What Verified Means"></a>
+  <a href="#s19" aria-label="Summary"></a>
+</nav>
+
+<main>
+
+  <section class="slide" id="s1">
+    <div class="slide-inner">
+      <p class="kicker">IDL Wallet · identuslabel.cz</p>
+      <h1 class="title">Identity you can verify.</h1>
+      <p class="lede">How decentralized identifiers and verifiable credentials govern who gets to open a classified document — without a login, a password, or a central database of who's allowed what.</p>
+      <div class="meta-row">
+        <span><b>Platform</b> IDL Wallet + Document Access Service</span>
+        <span><b>Prepared</b> 20 Jul 2026</span>
+        <span><b>Audience</b> Platform stakeholders</span>
+      </div>
+    </div>
+    <span class="slide-num">01 / 19</span>
+  </section>
+
+  <section class="slide" id="s2">
+    <div class="slide-inner">
+      <p class="kicker">01 — Identity Before DIDs</p>
+      <h2 class="headline">The internet was never built to know who you are.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">TCP/IP has four layers — Link, Internet, Transport, Application — and none of them carry a notion of a person. An IP address identifies a network interface, not a human being: it can be shared by a household, reassigned by a carrier, or spoofed outright. Every notion of "who is this" had to be bolted on afterward, one application at a time — cookies, passwords, certificates — with no common identity layer underneath any of it.</p>
+      <div class="diagram narrow">
+        <pre class="mermaid">
+flowchart TB
+    App["Application Layer<br/>HTTP, DNS, email…"]
+    Trans["Transport Layer<br/>TCP / UDP — port numbers"]
+    Net["Internet Layer<br/>IP — machine addresses"]
+    Link["Link Layer<br/>Ethernet, Wi-Fi — hardware addresses"]
+    Gap["No identity layer<br/>IP identifies a machine, not a person"]
+    App --> Trans --> Net --> Link
+    Net -.-> Gap
+    style Gap fill:#b23b3b,color:#ffffff,stroke:#b23b3b
+        </pre>
+      </div>
+      <div class="card" style="margin-top:1.5rem; max-width:68ch;">
+        <span class="eyebrow">A partial fix: ZTNA</span>
+        <p>Zero Trust Network Access tries to patch this at the network edge — instead of trusting anyone inside a perimeter, every request is checked against an identity-aware policy engine. It's a real improvement over old perimeter security, but almost every ZTNA product ties that identity check to its own vendor's proprietary control plane: swap providers, and the access policy has to be rebuilt from scratch.</p>
+      </div>
+    </div>
+    <span class="slide-num">02 / 19</span>
+  </section>
+
+  <section class="slide" id="s3">
+    <div class="slide-inner">
+      <p class="kicker">01 — Identity Before DIDs</p>
+      <h2 class="headline">Certificates were built to identify servers, not people.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">X.509 — the standard behind the padlock in a browser's address bar — is the closest thing the application layer has to an identity system. It works because there are relatively few web servers, each backed by an organization that can pay a Certificate Authority and renew a certificate on schedule. It assumes a small number of well-resourced subjects and a handful of root authorities everyone agrees to trust in advance. A person is neither of those things.</p>
+      <div class="grid-3">
+        <div class="card"><span class="eyebrow">Verification doesn't scale</span><p>A CA can vet a few thousand companies a year. It cannot physically verify billions of individuals the same way.</p></div>
+        <div class="card"><span class="eyebrow">Revocation doesn't scale</span><p>Certificate revocation lists grow without bound and must be checked online, on every single verification.</p></div>
+        <div class="card"><span class="eyebrow">All-or-nothing disclosure</span><p>A certificate hands over the whole identity. There's no way to prove just "I'm an employee" without the rest.</p></div>
+      </div>
+    </div>
+    <span class="slide-num">03 / 19</span>
+  </section>
+
+  <section class="slide" id="s4">
+    <div class="slide-inner">
+      <p class="kicker">01 — Identity Before DIDs</p>
+      <h2 class="headline">Federation just moves the same problem up one layer.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">"Sign in with Google" style federation (OAuth / OIDC) fixed password fatigue by letting one large identity provider vouch for you everywhere. But now that provider sees every login, and every relying service has to trust it completely.</p>
+      <div class="grid-3">
+        <div class="card"><span class="eyebrow">Chokepoint</span><p>If the identity provider goes down, nobody can sign in anywhere that depends on it — not just one service.</p></div>
+        <div class="card"><span class="eyebrow">Surveillance</span><p>The provider sees exactly which services you use and when, across every relying party at once.</p></div>
+        <div class="card"><span class="eyebrow">Lock-in</span><p>Lose that one account, or have it suspended, and access to everything tied to it disappears with it.</p></div>
+      </div>
+    </div>
+    <span class="slide-num">04 / 19</span>
+  </section>
+
+  <section class="slide" id="s5">
+    <div class="slide-inner wide">
+      <p class="kicker">02 — A Third Option</p>
+      <h2 class="headline">Self-sovereign identity: the person holds the proof, not a provider.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">Decentralized identifiers (DIDs) and verifiable credentials (VCs) remove the single trusted middle party entirely. There is no CA that has to scale to billions of people, and no federated provider standing between the person and the service they're proving something to.</p>
+      <div class="table-wrap">
+        <table class="deck-table">
+          <thead><tr><th>Model</th><th>Who holds the identity</th><th>Single point of failure</th><th>Selective disclosure</th></tr></thead>
+          <tbody>
+            <tr><td>Centralized accounts</td><td class="muted">Each service, separately</td><td class="muted">Every service's own database</td><td class="muted">No</td></tr>
+            <tr><td>Federated SSO / X.509</td><td class="muted">One identity provider or CA</td><td class="muted">Yes — the provider itself</td><td class="muted">No</td></tr>
+            <tr><td><b>Self-sovereign (DID + VC)</b></td><td><b>The person, in their wallet</b></td><td><b>No single party</b></td><td><b>Yes</b></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <span class="slide-num">05 / 19</span>
+  </section>
+
+  <section class="slide" id="s6">
+    <div class="slide-inner wide">
+      <p class="kicker">03 — Decentralized Identifiers (DIDs)</p>
+      <span class="standard-badge">W3C Standard · Decentralized Identifiers (DIDs) v1.0</span>
+      <h2 class="headline">An identity you control, defined by an open standard — not a vendor.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">DIDs are specified by the W3C — the same standards body behind HTML and CSS — so this isn't a proprietary format tied to one platform. A subject gets one permanent root DID, plus a fresh, unlinkable DID for every relationship it forms. The same pattern works for a person or an AI agent acting on their behalf, not only humans.</p>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart LR
+    P(["Person / AI Agent"])
+    P -->|"root identity, anchored on Cardano"| R["PRISM DID<br/>(permanent)"]
+    P -->|"connection to Certification Authority"| A["Peer DID A"]
+    P -->|"connection to Company Portal"| B["Peer DID B"]
+    P -->|"connection to Document Service"| C["Peer DID C"]
+    style R fill:#24365c,color:#ffffff,stroke:#24365c
+    style A fill:#b8863b,color:#ffffff,stroke:#b8863b
+    style B fill:#b8863b,color:#ffffff,stroke:#b8863b
+    style C fill:#b8863b,color:#ffffff,stroke:#b8863b
+        </pre>
+      </div>
+      <p class="footnote">Peer DIDs can't be correlated with each other — a document service and a training portal can't compare notes to work out they're talking to the same person, unless a credential says so. Documents follow the same root-identity pattern: a document's DID is permanent and independent of storage — it never changes even if the file is re-uploaded or moved to different storage.</p>
+    </div>
+    <span class="slide-num">06 / 19</span>
+  </section>
+
+  <section class="slide" id="s7">
+    <div class="slide-inner wide">
+      <p class="kicker">04 — Verifiable Credentials</p>
+      <h2 class="headline">A credential three parties can trust — without a private line between them.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">Here, the Certification Authority typically plays the issuer and services like the Document Service play the verifier — but the mechanism is the same for any issuer/verifier pair.</p>
+      <div class="diagram narrow">
+        <pre class="mermaid">
+flowchart TB
+    I(["Issuer"]) -->|"signs &amp; issues"| H(["Wallet"])
+    H -->|"presents proof"| V(["Verifier"])
+    I -.->|"publishes DID"| BC(["Public DID Registry"])
+    V -.->|"resolves DID"| BC
+    style BC fill:#24365c,color:#ffffff,stroke:#24365c
+    style H fill:#b8863b,color:#ffffff,stroke:#b8863b
+        </pre>
+      </div>
+      <p class="footnote">The issuer's public key isn't sent by the issuer at verification time — it's resolved from a public blockchain ledger, the same one that anchors PRISM DIDs. Anyone can read it independently; no request to the issuer's own servers is ever made, and no live line exists between verifier and issuer.</p>
+      <div class="callout ok">
+        <span class="callout-label">Deployment flexibility</span>
+        <p>Resolving the registry doesn't have to mean a public internet round-trip on every check. A resolver can sit at the network edge, be reached over an internal network, and — for a limited window — verify against a locally cached copy of the ledger even while fully offline.</p>
+      </div>
+      <div class="chip-row">
+        <div class="chip"><b>RealPersonIdentity</b><span>Proof of who the holder actually is, tied to a live check</span></div>
+        <div class="chip"><b>EmployeeRole</b><span>Employer, role, and department</span></div>
+        <div class="chip"><b>CISTraining</b><span>Completed security-awareness training, with expiry</span></div>
+        <div class="chip"><b>SecurityClearanceGrant</b><span>The clearance level the holder has been granted</span></div>
+      </div>
+    </div>
+    <span class="slide-num">07 / 19</span>
+  </section>
+
+  <section class="slide" id="s8">
+    <div class="slide-inner wide">
+      <p class="kicker">04 — Verifiable Credentials</p>
+      <h2 class="headline">Proving a fact, not handing over a file.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">A credential like SecurityClearanceGrant can carry many fields — name, date of birth, employer, clearance level, issue date. Presenting all of it would leak far more than a document check needs. Selective disclosure lets the holder present only the one field a specific request actually asks for; everything else is redacted before it ever leaves the wallet.</p>
+      <div class="grid-2">
+        <div class="card">
+          <span class="eyebrow">Held in the wallet</span>
+          <h3>Full credential</h3>
+          <ul>
+            <li>Full name</li>
+            <li>Date of birth</li>
+            <li>Employer &amp; department</li>
+            <li>Clearance level</li>
+            <li>Issue &amp; expiry date</li>
+          </ul>
+        </div>
+        <div class="card accent-border">
+          <span class="eyebrow">Selective disclosure</span>
+          <h3>Presented to the Document Service</h3>
+          <ul class="redact-list">
+            <li><span class="redact-bar" style="width:64%"></span><span class="sr-only">Redacted field</span></li>
+            <li><span class="redact-bar" style="width:46%"></span><span class="sr-only">Redacted field</span></li>
+            <li><span class="redact-bar" style="width:82%"></span><span class="sr-only">Redacted field</span></li>
+            <li class="disclosed">Clearance level: RESTRICTED</li>
+            <li><span class="redact-bar" style="width:58%"></span><span class="sr-only">Redacted field</span></li>
+          </ul>
+        </div>
+      </div>
+      <p class="footnote">This is enabled by the credential's format (SD-JWT) — each field is individually hashed and salted when issued, so the holder chooses, presentation by presentation, exactly which disclosures to include. Here, only the clearance level is disclosed; every other field never leaves the wallet in a readable form.</p>
+    </div>
+    <span class="slide-num">08 / 19</span>
+  </section>
+
+  <section class="slide" id="s9">
+    <div class="slide-inner wide">
+      <p class="kicker">04 — Verifiable Credentials</p>
+      <h2 class="headline">The same model behind Europe's digital identity wallet — with more privacy still possible.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">This isn't a bespoke format. The SD-JWT credential approach used here, on the W3C Verifiable Credentials data model, is the same direction the EU has standardized on for the European Digital Identity (EUDI) Wallet, mandated under eIDAS 2.0. And selective disclosure isn't the end of the road — the same data model supports going further.</p>
+      <div class="table-wrap">
+        <table class="deck-table">
+          <thead><tr><th>Disclosure method</th><th>What the verifier learns</th></tr></thead>
+          <tbody>
+            <tr><td class="muted">Full credential</td><td class="muted">Every field, in the clear</td></tr>
+            <tr><td><b>Selective disclosure</b> — used today</td><td><b>Only the fields requested, as raw values</b></td></tr>
+            <tr><td>Zero-knowledge proof — possible next step</td><td class="muted">Only whether a statement is true — e.g. "clearance ≥ RESTRICTED" — never the value itself</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="footnote">A zero-knowledge proof lets a holder prove a statement about a field without revealing the field's actual value at all. It's a strictly stronger privacy guarantee than selective disclosure, built on the same credential model — adopting it later wouldn't require issuers or verifiers to integrate differently.</p>
+    </div>
+    <span class="slide-num">09 / 19</span>
+  </section>
+
+  <section class="slide" id="s10">
+    <div class="slide-inner wide">
+      <p class="kicker">05 — The IDL Wallet</p>
+      <h2 class="headline">One app holds every credential and speaks the same protocol to every service.</h2>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TB
+    W(["IDL Wallet<br/>(holds DIDs + credentials)"])
+    M["Mediator<br/>(encrypted relay)"]
+    CA["Certification<br/>Authority"]
+    CP["Company<br/>Portal"]
+    DS["Document<br/>Service"]
+    W <-->|"DIDComm"| M
+    M <--> CA
+    M <--> CP
+    M <--> DS
+    style W fill:#b8863b,color:#ffffff,stroke:#b8863b
+        </pre>
+      </div>
+      <p class="footnote">DIDComm is the encrypted messaging layer every request, proof, and grant travels over — the wallet never hands a credential to a service directly; it only ever sends a signed proof of the specific facts that service asked for.</p>
+    </div>
+    <span class="slide-num">10 / 19</span>
+  </section>
+
+  <section class="slide" id="s11">
+    <div class="slide-inner wide">
+      <p class="kicker">06 — Can a DID Belong to Anyone?</p>
+      <h2 class="headline">Can a person hold their own DID? Can an AI agent? Can a document?</h2>
+      <p class="body-text" style="margin-top:1.15rem;">Nothing in the DID specification assumes the thing behind an identifier is a human being. The W3C standard deliberately calls it a "subject" — whoever controls the matching private key controls the DID and whatever it resolves to: a small, signed DID Document listing public keys and service endpoints. That's the entire mechanism. It doesn't care whether the key lives in a person's wallet, an AI agent's runtime, or a server minting an identifier on a document's behalf.</p>
+      <div class="grid-3">
+        <div class="card"><span class="eyebrow">Person</span><p>Holds a root PRISM DID plus a fresh Peer DID per relationship — the pattern from Slide 06, controlled through the IDL Wallet.</p></div>
+        <div class="card"><span class="eyebrow">AI agent</span><p>The same DID methods apply unchanged — an autonomous agent can hold, prove, and be verified by, its own identifier with no human in the loop.</p></div>
+        <div class="card accent-border"><span class="eyebrow">Document</span><p>A document gets its own permanent DID too — independent of file storage, so it survives being moved, re-uploaded, or re-encrypted. Covered next.</p></div>
+      </div>
+      <p class="footnote">This is why the same protocol that already carries proofs of a person's clearance is about to carry a document's identity in the next section — it isn't a special case bolted on for documents, it's the same open standard doing exactly what it was designed to do.</p>
+    </div>
+    <span class="slide-num">11 / 19</span>
+  </section>
+
+  <section class="slide" id="s12">
+    <div class="slide-inner wide">
+      <p class="kicker">07 — Document Access Service</p>
+      <h2 class="headline">No standing account. Every document is guarded at the moment it's opened.</h2>
+      <div class="grid-3">
+        <div class="stat-card"><span class="num">Stateless</span><p>No session and no login persists on the server between visits — there's nothing to expire, and nothing to steal after the fact.</p></div>
+        <div class="stat-card"><span class="num">Verified first open</span><p>The first time a document is opened, identity and clearance are checked in full — details on the trade-off for repeat opens ahead.</p></div>
+        <div class="stat-card"><span class="num">End-to-end</span><p>Each document's key is delivered through a per-holder one-time key exchange — the server never sends a key in the clear.</p></div>
+      </div>
+      <p class="body-text" style="margin-top:1.5rem;">This is a pure Zero Trust implementation — not the network-edge patch described on Slide 02, which still routes every check through one vendor's proprietary control plane. Nothing here is ever trusted implicitly: not the network path, not a session cookie, not even a document that was opened successfully a moment ago. Every grant is re-derived, fresh, from a signed proof presented at that exact moment against a DID-keyed trust registry the service itself owns.</p>
+      <div class="callout ok">
+        <span class="callout-label">Never trust, always verify</span>
+        <p>No IP allowlist, no long-lived session token, no notion of a "trusted network." Identity and authorization are checked from first principles on every request — the core Zero Trust principle, built on an open DID/VC standard instead of a single vendor's access-control product.</p>
+      </div>
+    </div>
+    <span class="slide-num">12 / 19</span>
+  </section>
+
+  <section class="slide" id="s13">
+    <div class="slide-inner wide">
+      <p class="kicker">08 — The Access Flow</p>
+      <h2 class="headline">What actually happens when someone opens a document for the first time.</h2>
+      <div class="diagram">
+        <pre class="mermaid">
+sequenceDiagram
+    participant Wallet
+    participant Service as Document Service
+    Wallet->>Service: request access (capability)
+    Service->>Wallet: proof request (which credentials to present)
+    Wallet->>Service: verifiable presentation
+    Service->>Service: verify signature + issuer trust
+    Service->>Service: verify proof matches this connection
+    Service->>Service: check clearance level is sufficient
+    Service->>Wallet: grant (encrypted document key)
+    Wallet->>Wallet: decrypt and display document
+        </pre>
+      </div>
+    </div>
+    <span class="slide-num">13 / 19</span>
+  </section>
+
+  <section class="slide" id="s14">
+    <div class="slide-inner wide">
+      <p class="kicker">09 — Protecting a Document</p>
+      <h2 class="headline">Three keys, three jobs — and the top one never touches the file.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">Every document gets its own encryption key — a Document Encryption Key, or DEK — the moment it's uploaded. That key used to sit next to the document itself, in the registry and the storage manifest, protected only by being hard to find. It's now wrapped by a master key tied to the document's clearance level, and that master key never leaves the server that issued it.</p>
+      <div class="diagram narrow">
+        <pre class="mermaid">
+flowchart TB
+    CMK["Classification Master Key<br/>(one per clearance level, server-side only)"]
+    DEK["Document Encryption Key<br/>(unique per document)"]
+    DOC["Document content<br/>(AES-256-GCM)"]
+    CMK -->|wraps| DEK
+    DEK -->|encrypts| DOC
+    style CMK fill:#24365c,color:#ffffff,stroke:#24365c
+    style DEK fill:#b8863b,color:#ffffff,stroke:#b8863b
+        </pre>
+      </div>
+      <div class="callout ok">
+        <span class="callout-label">Backward compatible</span>
+        <p>Documents encrypted before this scheme existed still open normally — the system recognizes an unwrapped key and falls back automatically.</p>
+      </div>
+    </div>
+    <span class="slide-num">14 / 19</span>
+  </section>
+
+  <section class="slide" id="s15">
+    <div class="slide-inner wide">
+      <p class="kicker">09 — Protecting a Document</p>
+      <h2 class="headline">No storage node ever holds a complete, readable document.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">The encrypted document lives on Iagon, a decentralized storage network, rather than on one company's server. Every node the network stores it across holds ciphertext only — reassembling it into something a person can actually read happens exclusively after it reaches the wallet that's allowed to decrypt it.</p>
+      <div class="diagram narrow">
+        <pre class="mermaid">
+flowchart LR
+    N1["Storage Node A<br/>ciphertext only"]
+    N2["Storage Node B<br/>ciphertext only"]
+    N3["Storage Node C<br/>ciphertext only"]
+    N1 --> W["Wallet<br/>(customer device)"]
+    N2 --> W
+    N3 --> W
+    W -->|"decrypt + reassemble, locally"| DOC["Complete, readable document<br/>exists only here"]
+    style W fill:#24365c,color:#ffffff,stroke:#24365c
+    style DOC fill:#b8863b,color:#ffffff,stroke:#b8863b
+        </pre>
+      </div>
+      <p class="footnote">The document service itself holds only a reference — a file ID — to where the network stores the ciphertext, never the data. Its identity (the DID), the index that finds it, and the bytes on disk stay three separate layers, so a storage provider can change, get breached, or shut down without ever touching the document's identity or access rules.</p>
+    </div>
+    <span class="slide-num">15 / 19</span>
+  </section>
+
+  <section class="slide" id="s16">
+    <div class="slide-inner wide">
+      <p class="kicker">09 — Protecting a Document</p>
+      <h2 class="headline">Getting the key to the right wallet without ever sending it in the clear.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">The server never decrypts the document itself. Unwrapping only recovers the DEK — a fixed 32 bytes — and that's the one thing that needs to reach the wallet. The ciphertext already sitting on Iagon is handed over completely unmodified; it gets decrypted exactly once, locally, after the DEK arrives.</p>
+      <div class="diagram">
+        <pre class="mermaid">
+sequenceDiagram
+    participant Wallet
+    participant Service as Document Service
+    Wallet->>Wallet: generate one-time keypair
+    Wallet->>Service: send proof + one-time public key
+    Service->>Service: unwrap DEK with master key (still just 32 bytes)
+    Service->>Service: encrypt DEK to wallet's one-time public key
+    Service->>Wallet: encrypted DEK + unmodified ciphertext reference
+    Wallet->>Wallet: decrypt DEK, then decrypt document — both locally
+        </pre>
+      </div>
+      <div class="callout ok">
+        <span class="callout-label">Why a DEK at all, then?</span>
+        <p>The document is already encrypted the moment it's uploaded — that doesn't depend on who eventually opens it. Because that encryption is already done, delivery only ever has to move the DEK, not the document: one fixed-size 32-byte key, re-encrypted per recipient with a single cheap operation, instead of re-encrypting a file that could be megabytes every time someone new is granted access.</p>
+      </div>
+      <p class="footnote">Each open generates a brand-new one-time keypair on both sides — a property called perfect forward secrecy. Even if a past session's key were somehow recovered later, it only ever unlocks that one document copy, never anything before or after it.</p>
+    </div>
+    <span class="slide-num">16 / 19</span>
+  </section>
+
+  <section class="slide" id="s17">
+    <div class="slide-inner wide">
+      <p class="kicker">09 — Protecting a Document</p>
+      <h2 class="headline">Not every open is a fresh proof — and that's a deliberate trade-off.</h2>
+      <p class="body-text" style="margin-top:1.15rem;">The first open of a document runs the full flow: present credentials, verify, decrypt. To avoid asking for that proof again every time the same already-downloaded copy is reopened, the wallet keeps its one-time private key on the device and decrypts locally from then on — no server round-trip.</p>
+      <div class="grid-2">
+        <div class="card accent-border">
+          <span class="eyebrow">What this buys</span>
+          <ul>
+            <li>Instant repeat access to a copy already opened once</li>
+            <li>Works without a network round-trip</li>
+            <li>No added load on the verification server</li>
+          </ul>
+        </div>
+        <div class="card warn">
+          <span class="eyebrow">What it costs today</span>
+          <ul>
+            <li>No server-side record of repeat, cached-key opens</li>
+            <li>The cached key has no expiry of its own</li>
+            <li>Revoking a person's clearance doesn't reach copies they've already cached</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout warn">
+        <span class="callout-label">Known limitation</span>
+        <p>This is tracked as a gap, not an oversight — closing it means adding a lightweight, revocation-aware check to cached-key opens without giving up the offline convenience.</p>
+      </div>
+    </div>
+    <span class="slide-num">17 / 19</span>
+  </section>
+
+  <section class="slide" id="s18">
+    <div class="slide-inner wide">
+      <p class="kicker">10 — What "Verified" Means</p>
+      <h2 class="headline">Four checks happen before a grant is ever issued.</h2>
+      <ul class="checklist">
+        <li><span class="mark">1</span><div><b>Signature is genuine</b><span>The presentation is cryptographically signed and untampered.</span></div></li>
+        <li><span class="mark">2</span><div><b>Issuer is trusted</b><span>The credential traces back to an issuer this service already recognizes — fail-closed if it doesn't.</span></div></li>
+        <li><span class="mark">3</span><div><b>Holder-bound</b><span>The proof belongs to the DID actually asking right now — not a cached label from an earlier session.</span></div></li>
+        <li><span class="mark">4</span><div><b>Clearance sufficient</b><span>The presented level meets or exceeds what this document requires.</span></div></li>
+      </ul>
+
+      <p class="json-label">Access request, sent by the wallet</p>
+      <div class="json-panel">{ <span class="c">// service-access/1.0</span><br>
+&nbsp;&nbsp;<span class="k">"type"</span>: <span class="s">"…/service-access/1.0/request"</span>,<br>
+&nbsp;&nbsp;<span class="k">"id"</span>: <span class="s">"ar-7f1c…"</span>,<br>
+&nbsp;&nbsp;<span class="k">"body"</span>: { <span class="k">"capability"</span>: <span class="s">"document-access"</span> }<br>
+}</div>
+
+      <p class="json-label">Grant, returned only after all four checks pass</p>
+      <div class="json-panel">{<br>
+&nbsp;&nbsp;<span class="k">"type"</span>: <span class="s">"…/service-access/1.0/grant"</span>,<br>
+&nbsp;&nbsp;<span class="k">"thid"</span>: <span class="s">"ar-7f1c…"</span>,<br>
+&nbsp;&nbsp;<span class="k">"body"</span>: {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="k">"capability"</span>: <span class="s">"document-access"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="k">"mode"</span>: <span class="s">"payload"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="k">"result"</span>: { <span class="c">/* encrypted document key */</span> }<br>
+&nbsp;&nbsp;}<br>
+}</div>
+    </div>
+    <span class="slide-num">18 / 19</span>
+  </section>
+
+  <section class="slide" id="s19">
+    <div class="slide-inner">
+      <p class="kicker">Summary</p>
+      <h2 class="headline" style="max-width:24ch;">The credential is the access control.</h2>
+      <div class="takeaways">
+        <div class="takeaway"><span class="n">01</span><p>The internet was never built with an identity layer; certificates and federated login both patched that gap by inserting a single trusted party. Self-sovereign identity removes that party.</p></div>
+        <div class="takeaway"><span class="n">02</span><p>DIDs and VCs are open, W3C-standard building blocks — usable by people, AI agents, services, and documents alike, and aligned with where EU digital identity (EUDI) is heading.</p></div>
+        <div class="takeaway"><span class="n">03</span><p>Every document open is verified, decrypted through a layered key hierarchy, stored only as ciphertext on decentralized storage, and delivered through a one-time key exchange — with one known, tracked trade-off on repeat opens.</p></div>
+      </div>
+      <div class="closing-foot">
+        <span>IDL Wallet · Document Access Service</span>
+        <span>identuslabel.cz</span>
+      </div>
+    </div>
+    <span class="slide-num">19 / 19</span>
+  </section>
+
+</main>
+
+<script>
+  (function () {
+    var dots = Array.prototype.slice.call(document.querySelectorAll('.rail a'));
+    var slides = dots.map(function (d) { return document.querySelector(d.getAttribute('href')); });
+    if (!('IntersectionObserver' in window)) return;
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        var idx = slides.indexOf(entry.target);
+        if (idx === -1) return;
+        if (entry.isIntersecting) {
+          dots.forEach(function (d) { d.classList.remove('active'); });
+          dots[idx].classList.add('active');
+        }
+      });
+    }, { threshold: 0.55 });
+    slides.forEach(function (s) { if (s) io.observe(s); });
+  })();
+</script>
+
+<script src="/presentation/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'default',
+    securityLevel: 'loose'
+  });
+</script>
+
+</body>
+</html>

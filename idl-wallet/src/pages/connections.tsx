@@ -16,7 +16,7 @@ import { filterConnectionMessages } from "@/utils/messageFilters";
 import { connectionRequestQueue, ConnectionRequestItem } from "@/utils/connectionRequestQueue";
 import { messageRejection } from "@/utils/rejectionManager";
 import { PendingRequestsModal } from "@/components/PendingRequestsModal";
-import { getConnectionNameWithFallback } from "@/utils/connectionNameResolver";
+import { getConnectionNameWithFallback, getVerifiedNameFromVCProofSharing, getNameFromVerifiedSubject } from "@/utils/connectionNameResolver";
 import { getCredentialsForConnection, getPhotoBearingCredentialsForConnection } from "@/utils/connectionCredentialMatcher";
 import { ConnectionCard } from "@/components/connections/ConnectionCard";
 import { CredentialIssuanceRequestor } from "@/components/CredentialIssuanceRequestor";
@@ -28,7 +28,6 @@ import { getCredentialType } from "@/utils/credentialTypeDetector";
 import { getPinnedCA } from "@/utils/prefixedStorage";
 import { useCAPortal } from "@/utils/CAPortalContext";
 import { EnterpriseAgentClient, ColleagueRecord, PendingColleagueInvitation } from "@/utils/EnterpriseAgentClient";
-import { getItem, setItem, removeItem, getKeysByPattern } from "@/utils/prefixedStorage";
 
 // Staleness cutoff for connectionMetadata.verifiedCredentialSubject (see that field's doc comment
 // in connectionMetadata.ts) — SSI-Agent security review flagged this as a point-in-time snapshot
@@ -662,53 +661,40 @@ export default function App() {
 
                 // Use for...of instead of forEach for proper async/await
                 for (const request of nonRejectedRequests) {
+                    const senderDID = request.from?.toString();
+
+                    // Check whether a vc-proof-sharing message has arrived from this sender —
+                    // no time limit on this: a live-verification round trip (see
+                    // performLiveIdentityVerificationAndMaybeRespond in OOB.tsx) can legitimately
+                    // take anywhere from seconds to minutes, since it requires the OTHER party to
+                    // approve a presentation request on their own device.
+                    const vcMsg = senderDID
+                        ? (app.messages as SDK.Domain.Message[]).find((m: SDK.Domain.Message) =>
+                            m.piuri === 'https://identuslabel.cz/protocols/vc-proof-sharing/1.0/proof' &&
+                            m.from?.toString() === senderDID &&
+                            m.direction === SDK.Domain.MessageDirection.RECEIVED
+                          )
+                        : undefined;
+
                     const existingRequest = persistentRequests.find(pr => pr.message.id === request.id);
+
                     if (!existingRequest) {
-                        const senderDID = request.from?.toString();
-
-                        // Check whether the vc-proof-sharing message already arrived from this sender
-                        const vcMsg = senderDID
-                            ? (app.messages as SDK.Domain.Message[]).find((m: SDK.Domain.Message) =>
-                                m.piuri === 'https://identuslabel.cz/protocols/vc-proof-sharing/1.0/proof' &&
-                                m.from?.toString() === senderDID &&
-                                m.direction === SDK.Domain.MessageDirection.RECEIVED
-                              )
-                            : undefined;
-
-                        if (vcMsg) {
-                            // VC proof arrived — queue with credential attached
-                            const vcProof = extractVCFromSharingMessage(vcMsg);
-                            console.log('✅ [VC PROOF DEFERRED] vc-proof-sharing found for sender:', senderDID?.substring(0, 50), '| vcProof keys:', vcProof ? Object.keys(vcProof) : null);
-                            await saveRequestToPersistentQueue(request, vcProof ?? undefined);
-                            removeItem(`vc-wait-${request.id}`);
-                        } else {
-                            // No vc-proof yet. Defer only if any active invitation requested VC proof.
-                            const invitationKeys = getKeysByPattern('invitation-');
-                            let hasActiveVCRequest = false;
-                            for (const key of invitationKeys) {
-                                const meta = getItem(key);
-                                if (meta?.includeVCRequest === true) {
-                                    hasActiveVCRequest = true;
-                                    break;
-                                }
-                            }
-
-                            if (hasActiveVCRequest) {
-                                // Defer — vc-proof-sharing will arrive shortly; re-check on next poll
-                                if (!getItem(`vc-wait-${request.id}`)) {
-                                    setItem(`vc-wait-${request.id}`, String(Date.now()));
-                                }
-                                const waitedMs = Date.now() - parseInt(getItem(`vc-wait-${request.id}`) || '0', 10);
-                                if (waitedMs > 30000) {
-                                    // 30 s timeout: surface without VC as graceful fallback
-                                    await saveRequestToPersistentQueue(request);
-                                    removeItem(`vc-wait-${request.id}`);
-                                }
-                                // else: effect re-runs when app.messages changes (next poll)
-                            } else {
-                                // No invitation required VC proof — queue immediately
-                                await saveRequestToPersistentQueue(request);
-                            }
+                        // New request — queue it immediately. The card already has something
+                        // meaningful to show without a VC proof (the invitee's self-declared
+                        // name from the connection request body — see ConnectionRequest.tsx), so
+                        // there is no reason to withhold it from the UI while waiting.
+                        const vcProof = vcMsg ? extractVCFromSharingMessage(vcMsg) : undefined;
+                        await saveRequestToPersistentQueue(request, vcProof ?? undefined);
+                    } else if (vcMsg && !existingRequest.attachedCredential) {
+                        // Already queued without a credential, and one has since arrived — a late
+                        // live-verification reply. Attach it now so the card upgrades from
+                        // self-declared to verified, indefinitely (no cutoff on how late this can
+                        // land, unlike the previous 30-second window).
+                        const vcProof = extractVCFromSharingMessage(vcMsg);
+                        if (vcProof) {
+                            console.log('✅ [VC PROOF LATE-ARRIVAL] Attaching late vc-proof-sharing to already-queued request:', senderDID?.substring(0, 50));
+                            await connectionRequestQueue.updateAttachedCredential(app.wallet.walletId, existingRequest.id, vcProof);
+                            await loadPersistentRequests();
                         }
                     }
                 }
@@ -971,15 +957,38 @@ export default function App() {
                                 // into its own component. Matches via the issue-credential message that
                                 // delivered each credential (from === receiverDID), not credential.subject
                                 // — see connectionCredentialMatcher.ts for why.
-                                const withNames = connections.map(connection => ({
-                                    connection,
-                                    displayName: connection.name || getConnectionNameWithFallback(
-                                        connection.receiver.toString(),
-                                        app.credentials,
-                                        undefined,
-                                        app.messages
-                                    ),
-                                }));
+                                const withNames = connections.map(connection => {
+                                    const receiverDID = connection.receiver.toString();
+                                    const hostDID = connection.host.toString();
+                                    const metadata = getConnectionMetadata(hostDID);
+                                    // Priority — see ConnectionMetadata.counterpartyDisplayName's doc comment
+                                    // for the full rationale:
+                                    // 1. A live-verified name from a vc-proof-sharing/1.0/proof message sent
+                                    //    directly BY this connection (correctly directional — it's that
+                                    //    party's own self-attested identity; see liveIdentityVerification.ts).
+                                    //    However late it arrives, it wins over everything below.
+                                    // 2. verifiedCredentialSubject — cryptographically live-verified,
+                                    //    post-connection snapshot of who the OTHER party is.
+                                    // 3. counterpartyDisplayName — unverified, pre-connection preview of who
+                                    //    the other party is (best-effort; set once at accept time).
+                                    // 4. connection.name — the stored DIDPair name. For CA/company connections
+                                    //    this IS the service's own advertised name (correct). For personal
+                                    //    wallet-to-wallet connections this is OUR OWN self-declared alias sent
+                                    //    to the other party — not who they are — so it only reaches this low a
+                                    //    priority once #1-3 (all of which describe the OTHER party) are absent.
+                                    // 5. getConnectionNameWithFallback's legacy VC-issued-credential match —
+                                    //    last resort only. NOTE: that resolver matches credentials ISSUED BY
+                                    //    this connection's DID and shows the credential SUBJECT's name — correct
+                                    //    for a peer disclosing their own identity, but wrong for an issuer
+                                    //    relationship (e.g. CA issuing YOU your own RealPersonIdentity VC would
+                                    //    show your own name, not the CA's) — never let it override #4.
+                                    const displayName = getVerifiedNameFromVCProofSharing(receiverDID, app.messages)
+                                        || getNameFromVerifiedSubject(metadata?.verifiedCredentialSubject)
+                                        || metadata?.counterpartyDisplayName
+                                        || connection.name
+                                        || getConnectionNameWithFallback(receiverDID, app.credentials, undefined, app.messages);
+                                    return { connection, displayName };
+                                });
                                 const filtered = filterLower
                                     ? withNames.filter(({ displayName }) => displayName.toLowerCase().includes(filterLower))
                                     : withNames;
