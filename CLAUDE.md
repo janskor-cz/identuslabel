@@ -179,6 +179,33 @@ cd /opt/project_identuslabel/idl-wallet-v2
 grep -o 'signWithDID([^)]*"AUTHENTICATION_KEY")' .next/static/chunks/pages/_app-*.js
 ```
 
+### Wallet v2 ↔ mediator: pickup only matches the account's primary `did`
+
+Confirmed 2026-09-19 against the mediator's Scala source (`identus-mediator/mediator/src/main/scala/
+org/hyperledger/identus/mediator/db/UserAccountRepo.scala`):
+
+- **Inbound delivery** finds the recipient account with `getDidAccountFromAlias` (matches `alias[]`).
+- **Pickup** (the wallet's ~5s poll) finds its own account with `getDidAccount`, which matches **only
+  the primary `did` field, never `alias`**.
+
+A wallet polling with a DID that is merely an alias of the right account therefore never retrieves
+its mail: it gets a `problem-report` every poll, queued messages sit at `state:false`, and the
+wallet's stale-message watchdog (`clear-stale-messages.ts`, >15s) deletes them unseen. This is what
+stopped CA `credential-issuance` replies reaching wallet-v2 and let ~2,500 problem-reports pile up.
+
+`idl-wallet-v2/src/pages/api/mediator/register-peer-did.ts` now accepts `livePollingDid` and promotes
+it to the account's primary `did` (old primary demoted to an alias). Callers (`startAgent` sweep,
+`OOB.tsx`, `CAConnectionEnforcementModal.tsx`) pass
+`agent.connections.mediator.asMediator().hostDID`. The public accessor is lowercase
+`agent.connections` — `agent.Connections` and `agent.mediationHandler` do not exist on the SDK 8.1.0
+`Agent`. Debug from the browser console with `getWalletAgent().connections.mediator.asMediator()`.
+
+Other v2 login-performance changes from the same session: `connectDatabase` purges stored mediator
+problem-reports and loads only the last 7 days of messages (plus pending offers/proof requests of any
+age); `createPeerDid` polls `agent.connections.mediator` instead of a nonexistent property (it used to
+burn 8s every start). `idl-wallet-v2/package.json` pins `@trust0/ridb` 1.5.47 / `ridb-core` 1.7.40 via
+`resolutions` (the SDK's caret ranges otherwise float to newer releases).
+
 ### Health Checks
 ```bash
 curl https://identuslabel.cz/_system/health              # Cloud Agent (8000)
@@ -307,6 +334,7 @@ Legacy mappings exist for backward compatibility: `TOP-SECRET` / `TOP_SECRET` / 
 3. **Cloud Agent PRISM DID validation**: Long-form PRISM DIDs disabled for credential requests (workaround active in `actions/index.ts`)
 4. **StatusList2021 delay**: Revocation takes 30min-hours (eventual consistency by design)
 5. **WebAssembly memory**: Refresh wallet if it slows down (WASM memory accumulation)
+6. **Browser IndexedDB failures look like wallet bugs**: a RIDB WASM panic (`invalid type: unit value, expected a string`) on login, with `indexedDB.databases()` / `deleteDatabase()` throwing `UnknownError: Internal error`, was a broken Chrome profile, not app data or the RIDB version (a fresh empty DB crashed identically; another browser worked). Fix is browser-side (`chrome://indexeddb-internals`, full clear, new profile). `connectDatabase` and `_app.tsx` now time-out/handle this instead of hanging.
 
 ## Code Patterns
 
