@@ -92,7 +92,7 @@ const FolderRegistry = require('./lib/FolderRegistry');
 const ReleasablePartnersRegistry = require('./lib/ReleasablePartnersRegistry');
 const EnterpriseDocumentManager = require('./lib/EnterpriseDocumentManager');
 const ReEncryptionService = require('./lib/ReEncryptionService');
-const { ServiceAccessService, createTrustRegistry, createIssuerResolver, verifyPresentationCredentials, decodeJWT, verifyES256KSignature } = require('service-access-didcomm');
+const { ServiceAccessService, createTrustRegistry, createIssuerResolver, verifyPresentationCredentials, verifySDJWTPresentationCredentials, decodeJWT, verifyES256KSignature, isSDJWT } = require('service-access-didcomm');
 
 // Task 1: Initialise Classification Master Key (CMK) store — server will not
 // start if any CMK env var is missing or has wrong length.
@@ -1759,6 +1759,7 @@ app.post('/api/company/connections/:connectionId/request-rp-proof', requireCompa
     // own nonce claim against it — see verifyAndExtractRealPersonClaims. Domain is per-company
     // for the same reason as the auto-proof loop's equivalent request.
     const challenge = crypto.randomBytes(32).toString('hex');
+    const domain = `realperson.${req.company.id}.identuslabel.cz`;
     const result = await cloudAgentRequest(
       req.company.apiKey,
       '/present-proof/presentations',
@@ -1769,11 +1770,24 @@ app.post('/api/company/connections/:connectionId/request-rp-proof', requireCompa
           proofs: [],
           options: {
             challenge,
-            domain: `realperson.${req.company.id}.identuslabel.cz`
+            domain
           },
           goalCode: 'present-vp',
           goal: 'Share your RealPersonIdentity credential for employee onboarding',
-          credentialFormat: 'JWT'
+          // RealPerson issuance has been SD-JWT-exclusive since 2026-08-07 — see
+          // verifyAndExtractRealPersonClaims's header comment.
+          credentialFormat: 'SDJWT',
+          // REQUIRED for credentialFormat: 'SDJWT' — the Cloud Agent's SD-JWT present-proof path
+          // 500s with error:Presentation:MissingSDJWTPresentationRequest ("presentation request is
+          // missing claims to be disclosed") without this, unlike JWT format's proofs:[] schema-
+          // less mode, which tolerates an empty/absent claims object fine. Same claim set the CA's
+          // own RealPerson SD-JWT proof requests declare (certification-authority/server.js).
+          // credentialType included so verifyAndExtractRealPersonClaims's own post-verification
+          // lookup (claims?.credentialType === 'RealPersonIdentity') can actually find it - it was
+          // previously absent from this request while being required by that check, a real
+          // mismatch confirmed live (idl-wallet-kotlin session, 2026-09-11): the wallet correctly
+          // discloses only what's requested, so an unrequested credentialType is never present.
+          claims: { firstName: {}, lastName: {}, uniqueId: {}, dateOfBirth: {}, gender: {}, credentialType: {} }
         })
       }
     );
@@ -1781,6 +1795,7 @@ app.post('/api/company/connections/:connectionId/request-rp-proof', requireCompa
     if (!presentationId) throw new Error('No presentationId in response: ' + JSON.stringify(result.data));
 
     stored.proofChallenge = challenge;
+    stored.proofDomain = domain;
     stored.presentationId = presentationId;
     global.pendingInvitations.set(connectionId, stored);
 
@@ -1824,7 +1839,7 @@ app.get('/api/company/connections/:connectionId/rp-proof-status/:presentationId'
       // Extract JWT VP from response — cryptographically verified (signature + trust registry +
       // holder binding + nonce), not just decoded. See verifyAndExtractRealPersonClaims.
       const vpJwt = Array.isArray(pres.data) ? pres.data[0] : (pres.data || pres.presentation || null);
-      const claims = await verifyAndExtractRealPersonClaims(vpJwt, stored.proofChallenge);
+      const claims = await verifyAndExtractRealPersonClaims(vpJwt, stored.proofChallenge, stored.proofDomain);
 
       const fullName = [claims.firstName, claims.lastName].filter(Boolean).join(' ');
       const existingEmails = getExistingEmailsForCompany(req.company.id);
@@ -2703,8 +2718,41 @@ const realPersonIssuerResolver = createIssuerResolver({ cloudAgentUrl: ENTERPRIS
  * Throws with a descriptive message on any failure; the auto-proof loop's existing catch block
  * already treats a thrown error during the 'issuing' state as a terminal 'failed' (no retry).
  */
-async function verifyAndExtractRealPersonClaims(vpJwt, expectedChallenge) {
+// RealPerson issuance has been SD-JWT-exclusive since 2026-08-07 (see certification-authority's
+// vcValidation.ts TRUSTED_REALPERSON_SCHEMA_ID comment) — any RealPersonIdentity VC presented to
+// onboarding today is SD-JWT. A bare compact SD-JWT string (no VP wrapper — SD-JWT IS the
+// presentation, unlike a JWT-VP) is delivered directly where a JWT-VP would otherwise be, hence
+// the isSDJWT() branch below instead of a second function: callers don't know in advance which
+// format the wallet will send back.
+async function verifyAndExtractRealPersonClaims(vpJwt, expectedChallenge, expectedDomain) {
   if (!vpJwt || typeof vpJwt !== 'string') throw new Error('No JWT VP provided');
+
+  if (isSDJWT(vpJwt)) {
+    const sdResult = await verifySDJWTPresentationCredentials(
+      { compact: vpJwt, expectedNonce: expectedChallenge, expectedAud: expectedDomain },
+      realPersonIssuerResolver
+    );
+    if (!sdResult.success) throw new Error(`RealPersonIdentity SD-JWT verification failed: ${sdResult.error} — ${sdResult.message}`);
+
+    const realPersonCred = sdResult.credentials.find(c => c.claims?.credentialType === 'RealPersonIdentity');
+    if (!realPersonCred) throw new Error('RealPersonIdentity credential not found in presented SD-JWT');
+
+    if (!realPersonTrustRegistry.isTrustedIssuer(realPersonCred.issuerDID, 'RealPersonIdentity')) {
+      throw new Error(`Untrusted RealPersonIdentity issuer: ${realPersonCred.issuerDID}`);
+    }
+    // verifySDJWTPresentationCredentials already enforces holder binding via the Key-Binding JWT
+    // against the credential's own cnf.jwk — no separate subject-vs-presenter check needed here
+    // (unlike the JWT-VP branch below, which does its own outer-signature + subject check).
+
+    const cs = realPersonCred.claims;
+    return {
+      firstName: cs.firstName || null,
+      lastName: cs.lastName || null,
+      uniqueId: cs.uniqueId || null,
+      photo: cs.photo || null,
+      credentialStatus: null, // SD-JWT has no StatusList2021 credentialStatus claim
+    };
+  }
 
   const outerDecoded = decodeJWT(vpJwt);
   if (!outerDecoded) throw new Error('Malformed outer VP JWT');
@@ -3370,6 +3418,205 @@ app.delete('/api/admin/releasable-partners/:partnerId', requireCompany, async (r
  * POST /api/enterprise-messages-webhook
  * Receives BasicMessageReceived webhook events from the enterprise cloud agent.
  */
+/**
+ * Handles a `document-upload/1.0` `.../request` or `.../branch` envelope received as the
+ * `content` of an enterprise DIDComm basic-message (see the webhook handler below for how this
+ * gets detected and dispatched here). Runs the SAME pipeline `/api/employee-portal/documents/
+ * upload` uses (Iagon upload → wrap DEK → create PRISM DID with a DocumentAccessGate service
+ * endpoint → register in DocumentRegistry) - deliberately not a parallel implementation, since
+ * this envelope's `body`/`attachments` carry the same information an authenticated employee HTTP
+ * session normally supplies, just addressed by DIDComm connectionId instead of a session cookie.
+ *
+ * `/branch`'s `parentDocumentDID` is accepted but not yet wired into DocumentRegistry's own
+ * branch/versioning semantics (05-protocols.md §5.3: "clearanceLevel/releasableTo optional -
+ * inherited from parent when omitted") - out of scope for this pass, which is about landing the
+ * base `request` case end-to-end first.
+ */
+async function handleDocumentUploadEnvelope(envelope, connectionId) {
+  const kind = envelope.type.endsWith('/branch') ? 'branch' : 'request';
+  console.log(`[DocumentUploadDIDComm] Received ${kind} id=${envelope.id} connectionId=${connectionId}`);
+
+  const body = envelope.body || {};
+  const { title, clearanceLevel, releasableTo, filename } = body;
+  const attachment = (envelope.attachments || []).find((a) => a.id === 'file');
+  const base64Data = attachment?.data?.base64;
+  if (!base64Data) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: no "file" attachment with base64 data, aborting`);
+    return;
+  }
+  const fileBuffer = Buffer.from(base64Data, 'base64');
+  const mimeType = attachment.mediaType || 'application/octet-stream';
+  console.log(`[DocumentUploadDIDComm] ${envelope.id}: file=${filename || '(untitled)'} size=${fileBuffer.length} bytes mimeType=${mimeType}`);
+
+  if (!process.env.ENTERPRISE_DB_PASSWORD) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: ENTERPRISE_DB_PASSWORD not configured, cannot resolve the sending employee`);
+    return;
+  }
+
+  // Resolve the sending employee's own department/identity from their DIDComm connectionId - the
+  // DIDComm equivalent of the HTTP path's `req.employeeSession` (department, email, prismDid).
+  const empDb = getEnterpriseDb();
+  const connectionMap = await empDb.getEmployeeConnectionMap();
+  const connectionRow = connectionMap.get(connectionId);
+  if (!connectionRow) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: no employee found for connectionId=${connectionId}, aborting`);
+    return;
+  }
+  const employee = await empDb.getEmployeeByEmail(connectionRow.email);
+  if (!employee) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: employee row for ${connectionRow.email} vanished between lookups, aborting`);
+    return;
+  }
+
+  const department = connectionRow.department || 'IT';
+  const departmentApiKey = DEPARTMENT_API_KEYS[department];
+  if (!departmentApiKey) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: no API key configured for department "${department}", aborting`);
+    return;
+  }
+
+  const releasableToIssuerDIDs = (releasableTo || [])
+    .map((companyName) => COMPANY_ISSUER_DIDS[companyName])
+    .filter(Boolean);
+  if (releasableToIssuerDIDs.length === 0) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: no valid "releasableTo" companies resolved from [${(releasableTo || []).join(', ')}], aborting`);
+    return;
+  }
+
+  const resolvedTitle = title || filename || 'Untitled Document';
+  const resolvedClearance = clearanceLevel || 'UNCLASSIFIED';
+
+  const { getIagonClient } = require('./lib/IagonStorageClient');
+  const iagonClient = getIagonClient();
+  let uploadResult;
+  try {
+    uploadResult = await iagonClient.uploadFile(fileBuffer, `${Date.now()}_${filename || 'document'}`, { classificationLevel: resolvedClearance });
+  } catch (err) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: Iagon upload failed:`, err.message);
+    return;
+  }
+  console.log(`[DocumentUploadDIDComm] ${envelope.id}: uploaded via ${uploadResult.storageBackend || 'iagon'}, fileId=${uploadResult.fileId}`);
+
+  let encryptionManifestId = null;
+  let wrappedManifest = null;
+  if (uploadResult.rawDEK) {
+    try {
+      wrappedManifest = cmk.wrapDEK(uploadResult.rawDEK, resolvedClearance);
+      uploadResult.rawDEK.fill(0); // zero raw key from memory (PFS) - same discipline as the HTTP path
+      const { manifestFileId } = await iagonClient.uploadKeyManifest(wrappedManifest, `doc-${Date.now()}`);
+      encryptionManifestId = manifestFileId;
+    } catch (manifestErr) {
+      console.error(`[DocumentUploadDIDComm] ${envelope.id}: key manifest upload failed (continuing without it):`, manifestErr.message);
+    }
+  }
+
+  const iagonStorage = {
+    fileId: uploadResult.fileId,
+    nodeId: uploadResult.nodeId,
+    iagonUrl: uploadResult.iagonUrl,
+    filename: uploadResult.filename,
+    contentHash: uploadResult.contentHash,
+    encryptionManifestId,
+    encryptionInfo: uploadResult.encryptionInfo,
+    uploadedAt: uploadResult.uploadedAt,
+    fileSize: uploadResult.fileSize,
+    originalSize: uploadResult.originalSize,
+  };
+
+  const PUBLIC_URL = process.env.PUBLIC_URL || 'https://identuslabel.cz/company-admin';
+  const documentManager = new EnterpriseDocumentManager(ENTERPRISE_CLOUD_AGENT_URL, departmentApiKey);
+  let didResult;
+  try {
+    didResult = await documentManager.createDocumentDIDWithServiceEndpoint(
+      department,
+      {
+        title: resolvedTitle,
+        classificationLevel: resolvedClearance,
+        releasableTo: releasableToIssuerDIDs,
+        filename,
+        createdBy: employee.email,
+        createdByDID: employee.prism_did,
+      },
+      {
+        fileId: iagonStorage.fileId,
+        downloadUrl: iagonStorage.iagonUrl,
+        contentHash: iagonStorage.contentHash,
+        encryptionInfo: iagonStorage.encryptionInfo,
+      },
+      [{ id: 'document-access-gate', type: 'DocumentAccessGate', serviceEndpoint: `${PUBLIC_URL}/api/access-gate/challenge` }],
+      {},
+    );
+  } catch (err) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: document DID creation failed:`, err.message);
+    return;
+  }
+  console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ document DID created: ${didResult.documentDID.substring(0, 60)}...`);
+
+  await DocumentRegistry.registerDocument({
+    documentDID: didResult.documentDID,
+    title: resolvedTitle,
+    classificationLevel: resolvedClearance,
+    releasableTo: releasableToIssuerDIDs,
+    contentEncryptionKey: encryptionManifestId || 'no-encryption',
+    ownerCompanyDID: connectionRow.company_id ? (COMPANY_ISSUER_DIDS['TechCorp Corporation'] || null) : null,
+    metadata: {
+      title: resolvedTitle,
+      department,
+      createdBy: employee.email,
+      createdByDID: employee.prism_did,
+      originalFilename: filename,
+      fileSize: fileBuffer.length,
+      mimeType,
+      uploadedVia: 'document-upload/1.0 (DIDComm)',
+      createdAt: new Date().toISOString(),
+    },
+    iagonStorage,
+  });
+
+  console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ registered in DocumentRegistry, releasable to ${releasableToIssuerDIDs.length} compan${releasableToIssuerDIDs.length === 1 ? 'y' : 'ies'}`);
+
+  // Push KeyManifest VC to identus-document-service, mirroring the HTTP upload paths' own "STEP 5"
+  // (server.js's ClassifiedUpload/preEncrypted and legacy section-based handlers). Without this,
+  // the DIDComm path registered a document with no VCKeyStore entry - /access still verifies the
+  // presented VP and logs "Access GRANTED", but has no key material to build a real response from,
+  // returning success:true with encryptedDEK/fileIv/fileAuthTag/contentHash all null (confirmed live
+  // 2026-09-27, Phase 5e redaction spike - two independent DIDComm uploads, both hit this).
+  if (wrappedManifest && didResult.documentDID) {
+    try {
+      const docServiceUrl = process.env.DOCUMENT_SERVICE_URL || null;
+      const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+      const vcIssuer = new KeyManifestVCIssuer(docServiceUrl, adminKey);
+      const prevVC = await fetchCurrentManifestVC(didResult.documentDID, docServiceUrl, adminKey);
+      const versionNumber = (prevVC?.claims?.versionNumber ?? 0) + 1;
+      const predecessorHash = prevVC ? KeyManifestVCIssuer.computePredecessorHash(prevVC.vcJwt) : null;
+
+      const vcResult = await vcIssuer.issue({
+        documentDID: didResult.documentDID,
+        issuerDID: (connectionRow.company_id ? COMPANY_ISSUER_DIDS['TechCorp Corporation'] : null) || process.env.SERVICE_DID,
+        iagonFileId: iagonStorage.fileId,
+        classificationLevel: resolvedClearance,
+        releasableTo: releasableToIssuerDIDs,
+        wrappedKey: wrappedManifest.wrappedKey,
+        iv: wrappedManifest.iv,
+        authTag: wrappedManifest.authTag,
+        wrappingAlgorithm: wrappedManifest.wrappingAlgorithm || 'AES-256-GCM',
+        fileAlgorithm: uploadResult.encryptionInfo?.algorithm || 'AES-256-GCM',
+        fileIv: uploadResult.encryptionInfo?.iv,
+        fileAuthTag: uploadResult.encryptionInfo?.authTag,
+        contentHash: uploadResult.contentHash || null,
+        versionNumber,
+        updatedBy: employee.prism_did || employee.email || null,
+        predecessorHash,
+      });
+      console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ KeyManifest VC v${versionNumber} pushed: ${vcResult.vcId}`);
+    } catch (vcPushErr) {
+      console.error(`[DocumentUploadDIDComm] ${envelope.id}: ⚠️ KeyManifest VC push failed:`, vcPushErr.message);
+    }
+  } else {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: ⚠️ no wrappedManifest available - document registered but will NOT be accessible (no key material)`);
+  }
+}
+
 app.post('/api/enterprise-messages-webhook', async (req, res) => {
   res.sendStatus(200); // ack immediately
   const { type, walletId: bodyWalletId, data } = req.body || {};
@@ -3390,6 +3637,28 @@ app.post('/api/enterprise-messages-webhook', async (req, res) => {
     }
   }
   connectionId = connectionId || fromDid || 'admin';
+
+  // `document-upload/1.0` (`docs/kotlin-port/05-protocols.md` §5.3 in the Kotlin port; real source
+  // idl-wallet-v2/src/actions/enterpriseAgentActions.ts's `sendEnterpriseDocumentUpload`) rides as
+  // a JSON string inside an ordinary basic-message `content` field (single-wrapped envelope, per
+  // that same doc's §5.0/EnvelopeCodec convention) - detect it before falling through to the
+  // plain-chat-message handling below, which would otherwise just dump the raw JSON into someone's
+  // inbox. Confirmed live, 2026-09-12, that this protocol's frontend action existed in idl-wallet-v2
+  // with NO corresponding server-side handler at all until this one.
+  let documentUploadEnvelope = null;
+  try {
+    const candidate = JSON.parse(content);
+    if (candidate && typeof candidate.type === 'string' && candidate.type.startsWith('https://identuslabel.cz/protocols/document-upload/1.0/')) {
+      documentUploadEnvelope = candidate;
+    }
+  } catch (_) { /* not JSON - an ordinary chat message, fall through to the existing handling */ }
+
+  if (documentUploadEnvelope) {
+    handleDocumentUploadEnvelope(documentUploadEnvelope, connectionId).catch((err) => {
+      console.error(`[DocumentUploadDIDComm] Unhandled error processing ${documentUploadEnvelope.id}:`, err.message);
+    });
+    return;
+  }
 
   // Look up which colleague sent this via the connection map (keyed by walletId:connectionId)
   const mapping = connectionId ? connectionColleagueMap.get(`${walletId}:${connectionId}`) : null;
@@ -4425,12 +4694,39 @@ function handleDIDCommWebhook(didCommService, companyLabel) {
         const stdBody = JSON.parse(actualContent);
         if (stdBody && typeof stdBody.content === 'string') actualContent = stdBody.content;
       } catch (_) {}
+
+      // connectionId is absent from BasicMessageReceived payloads — resolve from sender DID.
+      // Needed up-front now (not just for adminInbox below) so `document-upload/1.0` detection
+      // can pass a real connectionId into handleDocumentUploadEnvelope.
+      const resolvedConnId = eventConnId || await didCommService.cfg.resolveConnection(senderId).catch(() => null);
+
+      // `document-upload/1.0` (see handleDocumentUploadEnvelope's own doc comment for the full
+      // derivation) rides as a JSON string inside this same basic-message `content` field.
+      // Connections onboarded via `companyPortalRegistry`'s ServiceAccessService (this handler)
+      // route ALL their BasicMessageReceived events here, not to `/api/enterprise-messages-
+      // webhook` - confirmed live, 2026-09-12: a real document-upload/1.0 test message sent over
+      // a connection onboarded through `POST /api/company/invite-employee` arrived at THIS
+      // handler, never at that other one. Detect it here too, before it falls through to
+      // ServiceAccessService's own message handling / the adminInbox chat log below.
+      let documentUploadEnvelope = null;
+      try {
+        const candidate = JSON.parse(actualContent);
+        if (candidate && typeof candidate.type === 'string' && candidate.type.startsWith('https://identuslabel.cz/protocols/document-upload/1.0/')) {
+          documentUploadEnvelope = candidate;
+        }
+      } catch (_) { /* not JSON - fall through to the existing handling below */ }
+
+      if (documentUploadEnvelope && resolvedConnId) {
+        handleDocumentUploadEnvelope(documentUploadEnvelope, resolvedConnId).catch((err) => {
+          console.error(`[DocumentUploadDIDComm] Unhandled error processing ${documentUploadEnvelope.id}:`, err.message);
+        });
+        return res.status(200).json({ received: true });
+      }
+
       didCommService.handleIncomingMessage(senderId, actualContent).catch(e =>
         console.error(`[DIDCommWebhook/${companyLabel}] handleIncomingMessage error:`, e.message)
       );
       // Feed admin inbox so admin chat shows employee messages.
-      // connectionId is absent from BasicMessageReceived payloads — resolve from sender DID.
-      const resolvedConnId = eventConnId || await didCommService.cfg.resolveConnection(senderId).catch(() => null);
       if (resolvedConnId && actualContent) {
         const adminMsgs = adminInbox.get(resolvedConnId) || [];
         adminMsgs.push({
@@ -4697,7 +4993,17 @@ setInterval(async () => {
                 options: { challenge, domain },
                 goalCode: 'present-vp',
                 goal: 'Share your RealPersonIdentity credential for employee onboarding',
-                credentialFormat: 'JWT'
+                // RealPerson issuance has been SD-JWT-exclusive since 2026-08-07 — see
+                // verifyAndExtractRealPersonClaims's header comment.
+                credentialFormat: 'SDJWT',
+                // REQUIRED for credentialFormat: 'SDJWT' — see the comment on this same field in
+                // POST /api/company/connections/:connectionId/request-rp-proof above.
+                // credentialType included so verifyAndExtractRealPersonClaims's own post-verification
+          // lookup (claims?.credentialType === 'RealPersonIdentity') can actually find it - it was
+          // previously absent from this request while being required by that check, a real
+          // mismatch confirmed live (idl-wallet-kotlin session, 2026-09-11): the wallet correctly
+          // discloses only what's requested, so an unrequested credentialType is never present.
+          claims: { firstName: {}, lastName: {}, uniqueId: {}, dateOfBirth: {}, gender: {}, credentialType: {} }
               })
             }
           );
@@ -4706,6 +5012,7 @@ setInterval(async () => {
           data.proofState = 'requested';
           data.proofSentAt = Date.now();
           data.proofChallenge = challenge;
+          data.proofDomain = domain;
           data.proofResetCount = data.proofResetCount || 0;
           global.pendingInvitations.set(connectionId, data);
           console.log(`[AUTO-PROOF] Proof request sent for connection ${connectionId.substring(0,8)}..., presentationId: ${data.presentationId}`);
@@ -4724,7 +5031,7 @@ setInterval(async () => {
           global.pendingInvitations.set(connectionId, data);
 
           const vpJwt = Array.isArray(presResult.data?.data) ? presResult.data.data[0] : (presResult.data?.data || presResult.data?.presentation || null);
-          const claims = await verifyAndExtractRealPersonClaims(vpJwt, data.proofChallenge);
+          const claims = await verifyAndExtractRealPersonClaims(vpJwt, data.proofChallenge, data.proofDomain);
 
           const fullName = [claims.firstName, claims.lastName].filter(Boolean).join(' ');
           const existingEmails = getExistingEmailsForCompany(company.id);
@@ -7610,6 +7917,20 @@ app.post('/api/access-gate/present', async (req, res) => {
         message: 'This document\'s encryption key is unavailable. The document must be re-uploaded by an administrator.'
       });
     }
+    // Everything up to this point in the handler (challenge, VP signature/trust, releasability,
+    // clearance, revocation) already succeeded by the time IagonStorageClient.downloadFile can
+    // throw — this is a storage-layer failure on an already-authorized request, not a rejected
+    // one. Distinguishing it (503 + accessGranted:true) instead of the generic 500 below lets the
+    // wallet show "you're authorized, storage is temporarily unavailable, try again" instead of a
+    // generic error indistinguishable from an actual bug or a denied request.
+    if (error.message && /^Download failed after \d+ attempts:/.test(error.message)) {
+      return res.status(503).json({
+        success: false,
+        accessGranted: true,
+        error: 'StorageUnavailable',
+        message: 'Your access was verified and granted, but the document could not be retrieved from storage right now. Please try again in a moment.'
+      });
+    }
     res.status(500).json({
       success: false,
       error: 'InternalServerError',
@@ -8463,6 +8784,54 @@ const pendingClearanceVerifications = new Map();
  * Flow: Employee Portal → Company Admin Portal → searches 8200 connections for personal wallet →
  *       sends proof request to personal wallet connection → IDL Wallet (personal mode) receives it
  */
+
+/**
+ * Re-issues a pending clearance proof request with credentialFormat: 'JWT' when the initial
+ * SD-JWT attempt (the preferred format) didn't pan out — used by both the "declined" and "still
+ * pending" branches of GET /clearance/status below, since a wallet holding only a legacy JWT
+ * (v4.0.0) clearance credential can surface that failure either way (see the call sites' own
+ * comments for which — confirmed live via wallet debug logs, 2026-08-29, that a decline is the
+ * actual observed path: the wallet SDK throws "Invalid presentation proof arguments" client-side
+ * when asked to present a plain-JWT credential in SD-JWT format, then explicitly declines, rather
+ * than the Cloud Agent ever reporting PresentationVerificationFailed).
+ *
+ * Mutates `verification` in place (new presentationId, format, triedJWTFallback) — the caller's
+ * `pendingClearanceVerifications` entry IS `verification` (same object reference), so no separate
+ * .set() call is needed.
+ *
+ * @returns {Promise<boolean>} true if a retry was actually issued (caller should report 'pending'
+ *   instead of its normal terminal/pending response for this poll).
+ */
+async function maybeRetryClearanceWithJWT(verification, verificationId, { allowTimeoutTrigger = false } = {}) {
+  const eligible = verification.format === 'SDJWT' && !verification.triedJWTFallback;
+  const shouldTry = eligible && (!allowTimeoutTrigger || Date.now() - verification.createdAt > 20000);
+  if (!shouldTry) return false;
+
+  console.log(`[ClearanceVerification] SD-JWT attempt for ${verificationId} did not succeed — retrying with legacy JWT format`);
+  try {
+    const MULTITENANCY_URL = process.env.MULTITENANCY_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
+    const retryResponse = await fetch(`${MULTITENANCY_URL}/present-proof/presentations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': verification.companyApiKey },
+      body: JSON.stringify({
+        connectionId: verification.connectionId,
+        proofs: [],
+        options: { challenge: verification.challenge, domain: verification.domain },
+        credentialFormat: 'JWT'
+      })
+    });
+    if (!retryResponse.ok) return false;
+    const retryData = await retryResponse.json();
+    verification.presentationId = retryData.presentationId || retryData.id;
+    verification.format = 'JWT';
+    verification.triedJWTFallback = true;
+    return true;
+  } catch (e) {
+    console.warn(`[ClearanceVerification] JWT fallback retry failed: ${e.message}`);
+    return false;
+  }
+}
+
 app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, async (req, res) => {
   try {
     const session = req.employeeSession;
@@ -8589,6 +8958,9 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
     console.log(`[ClearanceVerification] Sending proof request via ${foundCompany.id} connection ${employeeConnection.connectionId}`);
     console.log(`   Label: ${employeeConnection.label}  apiKey: ${foundCompany.apiKey.slice(0, 8)}...`);
 
+    const clearanceChallenge = require('crypto').randomBytes(16).toString('hex');
+    const clearanceDomain = 'clearance.identuslabel.cz';
+
     const proofResponse = await fetch(`${MULTITENANCY_URL}/present-proof/presentations`, {
       method: 'POST',
       headers: {
@@ -8599,13 +8971,26 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
         connectionId: employeeConnection.connectionId,
         proofs: [],
         options: {
-          challenge: require('crypto').randomBytes(16).toString('hex'),
+          challenge: clearanceChallenge,
           // Must contain the 'clearance' token — the wallet's DOMAIN_SCHEMA_HINTS matcher
           // (idl-wallet/src/actions/index.ts) uses this to filter credential selection down
           // to SecurityClearance; without it the wallet offers all shareable credential types
           // and may present the wrong one (e.g. RealPersonIdentity).
-          domain: 'clearance.identuslabel.cz'
-        }
+          domain: clearanceDomain
+        },
+        // Prefer SD-JWT (the CA's new v6.0.0 clearance schema) — a wallet holding only a legacy
+        // JWT (v4.0.0) clearance credential falls back once this terminally fails, in
+        // GET /clearance/status below. Declaring this up front matters, not just as an
+        // optimization: an implicitly-JWT-format request against an SD-JWT presentation hits the
+        // Cloud Agent's confirmed-live JwtLengthException failure mode (see
+        // certification-authority/server.js's comment on this exact bug) instead of the
+        // SD-JWT-shaped PresentationReceived-parked-forever behavior this endpoint expects.
+        credentialFormat: 'SDJWT',
+        // REQUIRED for credentialFormat: 'SDJWT' — the Cloud Agent's SD-JWT present-proof path
+        // 500s with error:Presentation:MissingSDJWTPresentationRequest ("presentation request is
+        // missing claims to be disclosed") without this. Same claim set the CA's own
+        // 'security-clearance' capability proofSpec declares.
+        claims: { clearanceLevel: {}, issuedDate: {}, expiryDate: {} }
       })
     });
 
@@ -8634,7 +9019,11 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
       sessionToken: token,
       status: 'pending',
       createdAt: Date.now(),
-      expiresAt: Date.now() + 5 * 60 * 1000
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      challenge: clearanceChallenge,
+      domain: clearanceDomain,
+      format: 'SDJWT',
+      triedJWTFallback: false
     });
 
     console.log(`[ClearanceVerification] ✅ Proof request sent via ${foundCompany.id}. Presentation ID: ${verificationId}`);
@@ -8750,10 +9139,49 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
       // Extract clearance level from the presentation
       let clearanceLevel = 'UNKNOWN';
 
-      // Parse the credential data from the presentation
-      // Cloud Agent returns data[] as array of VP JWT strings
+      // SD-JWT branch, checked first: a compact SD-JWT string also happens to split('.') into 3
+      // parts (its own header.payload.signature, with the disclosures trailing after a literal
+      // '~' the .split('.') check below never looks for) — without this branch first, an SD-JWT
+      // presentation would silently fall into the JWT-VP parser below, decode its own flat
+      // credential payload as if it were a VP wrapper, find no `.vp.verifiableCredential`, and
+      // leave clearanceLevel at 'UNKNOWN' with no error surfaced. Unlike the local decode used
+      // elsewhere in this codebase for the CA's own issuance records, this cryptographically
+      // verifies the presentation (issuer signature + Key-Binding-JWT holder binding) since it is
+      // being verified as presented back by an untrusted party, not decoded from CA-controlled state.
       let caPersonalDID = null; // personal CA DID extracted from the presented SecurityClearance VC
       if (presentationData.data && presentationData.data.length > 0) {
+        for (const item of presentationData.data) {
+          if (typeof item !== 'string' || !isSDJWT(item)) continue;
+          const sdResult = await verifySDJWTPresentationCredentials(
+            { compact: item, expectedNonce: verification.challenge, expectedAud: verification.domain },
+            realPersonIssuerResolver
+          );
+          if (!sdResult.success) {
+            console.warn(`[ClearanceVerification] SD-JWT verification failed: ${sdResult.error} — ${sdResult.message}`);
+            continue;
+          }
+          // sdResult has no top-level issuerDID — verifySDJWTPresentationCredentials nests it
+          // per-credential inside credentials[], same shape verifyAndExtractRealPersonClaims
+          // already relies on elsewhere in this file. Reading sdResult.issuerDID here always
+          // read undefined, so every SD-JWT SecurityClearance presentation was rejected as
+          // "untrusted" regardless of actual issuer.
+          const sdIssuerDID = sdResult.credentials[0]?.issuerDID;
+          if (!ACCEPTED_ISSUER_DIDS.includes(sdIssuerDID)) {
+            console.warn(`[ClearanceVerification] Ignoring SD-JWT clearanceLevel claim from untrusted issuer: ${sdIssuerDID}`);
+            continue;
+          }
+          const claims = sdResult.credentials[0].claims;
+          if (claims.clearanceLevel) {
+            clearanceLevel = claims.clearanceLevel;
+            console.log('[ClearanceVerification] ✅ Found SD-JWT clearanceLevel:', clearanceLevel);
+            break;
+          }
+        }
+      }
+
+      // Parse the credential data from the presentation (legacy JWT-VP shape)
+      // Cloud Agent returns data[] as array of VP JWT strings
+      if (clearanceLevel === 'UNKNOWN' && presentationData.data && presentationData.data.length > 0) {
         for (const vpJwtOrObject of presentationData.data) {
           try {
             // Check if it's a raw JWT string (the VP)
@@ -8953,6 +9381,24 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
         verifiedAt: verification.verifiedAt
       });
     } else if (presentationData.status === 'PresentationRejected' || presentationData.status === 'RequestRejected') {
+      // A wallet holding ONLY a legacy JWT (v4.0.0) clearance credential can't satisfy an
+      // SD-JWT-format request at all — the SDK throws "Invalid presentation proof arguments"
+      // client-side when asked to present a plain-JWT credential in SD-JWT format, and the wallet
+      // then explicitly declines rather than the Cloud Agent ever reporting
+      // PresentationVerificationFailed (confirmed live via wallet debug logs, 2026-08-29). This
+      // lands here, in the decline branch, not the generic "still pending" one below — so the
+      // JWT-fallback retry must be tried here too, or every JWT-only holder would see an
+      // immediate false "declined" with no fallback ever attempted.
+      if (await maybeRetryClearanceWithJWT(verification, verificationId)) {
+        return res.json({
+          success: true,
+          verificationId,
+          status: 'pending',
+          clearanceLevel: null,
+          verifiedAt: null,
+          message: 'Retrying with legacy credential format...'
+        });
+      }
       verification.status = 'declined';
       return res.json({
         success: true,
@@ -8963,7 +9409,12 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
         message: 'User declined the proof request'
       });
     } else {
-      // Still pending (RequestSent, etc.)
+      // Still pending (RequestSent, PresentationVerificationFailed, etc.). A 20s+ timeout also
+      // triggers the JWT fallback: SD-JWT parks at PresentationReceived forever rather than
+      // reaching a terminal state, so a wallet with no SD-JWT clearance that doesn't explicitly
+      // decline (e.g. auto-response disabled) may never produce ANY data either.
+      await maybeRetryClearanceWithJWT(verification, verificationId, { allowTimeoutTrigger: true });
+
       return res.json({
         success: true,
         verificationId,
