@@ -133,6 +133,84 @@ class KeyManifestVCIssuer {
   }
 
   /**
+   * Build, sign (Ed25519), and push a SECTIONED DocumentKeyManifest VC — one where each
+   * section of the document was encrypted separately with its own key and carries its own
+   * clearance tag, so document-service can filter by section at access time WITHOUT ever
+   * decrypting anything (Phase 5e redaction architecture, 2026-09-27). The server only ever
+   * reads the public `clearanceLevel` tag on each section entry; the ciphertext and wrapped
+   * key for a section above the requester's clearance are simply never included in the
+   * response — there is no decrypt step anywhere in the access path for this VC shape either,
+   * same zero-knowledge property as `issue()`, just applied per section instead of once.
+   *
+   * @param {object} params
+   * @param {string}   params.issuerDID
+   * @param {string}   params.documentDID
+   * @param {Array<object>} params.sections - each: { sectionId, clearanceLevel, iagonFileId,
+   *   wrappedKey, iv, authTag, wrappingAlgorithm, fileIv, fileAuthTag, fileAlgorithm, contentHash }
+   * @param {string[]} params.releasableTo
+   * @param {number}   [params.versionNumber]
+   * @param {string}   [params.updatedBy]
+   * @param {string}   [params.predecessorHash]
+   * @returns {Promise<{ vcId: string, vcJwt: string }>}
+   */
+  async issueSectioned(params) {
+    const { issuerDID, documentDID, sections, releasableTo, versionNumber, updatedBy, predecessorHash } = params;
+
+    if (!documentDID) throw new Error('[KeyManifestVCIssuer] documentDID is required');
+    if (!Array.isArray(sections) || sections.length === 0) {
+      throw new Error('[KeyManifestVCIssuer] sections must be a non-empty array');
+    }
+    for (const s of sections) {
+      if (!s.sectionId) throw new Error('[KeyManifestVCIssuer] each section requires a sectionId');
+      if (!s.clearanceLevel) throw new Error(`[KeyManifestVCIssuer] section ${s.sectionId} requires a clearanceLevel`);
+      if (!s.iagonFileId) throw new Error(`[KeyManifestVCIssuer] section ${s.sectionId} requires an iagonFileId`);
+      if (!s.wrappedKey) throw new Error(`[KeyManifestVCIssuer] section ${s.sectionId} requires a wrappedKey`);
+    }
+
+    const vcId = crypto.randomUUID();
+    const now  = Math.floor(Date.now() / 1000);
+
+    const claims = {
+      documentDID,
+      releasableTo: Array.isArray(releasableTo) ? releasableTo : [],
+      sections: sections.map((s) => ({
+        sectionId:          s.sectionId,
+        clearanceLevel:     s.clearanceLevel,
+        iagonFileId:        s.iagonFileId,
+        wrappedKey:          s.wrappedKey,
+        iv:                  s.iv,
+        authTag:             s.authTag,
+        wrappingAlgorithm:   s.wrappingAlgorithm || 'AES-256-GCM',
+        fileIv:              s.fileIv,
+        fileAuthTag:         s.fileAuthTag,
+        fileAlgorithm:       s.fileAlgorithm || 'AES-256-GCM',
+        contentHash:         s.contentHash || null,
+      })),
+    };
+
+    if (versionNumber !== undefined && versionNumber !== null) claims.versionNumber = versionNumber;
+    if (updatedBy) claims.updatedBy = updatedBy;
+    if (predecessorHash) claims.predecessorHash = predecessorHash;
+
+    const payload = {
+      jti: vcId,
+      iss: issuerDID || process.env.SERVICE_DID || 'unknown',
+      sub: documentDID,
+      iat: now,
+      vc: {
+        '@context': ['https://www.w3.org/2018/credentials/v1'],
+        type:       ['VerifiableCredential', 'DocumentKeyManifest'],
+        credentialSubject: claims
+      }
+    };
+
+    const vcJwt = this._sign(payload);
+    await this._push(documentDID, vcId, vcJwt, claims);
+
+    return { vcId, vcJwt };
+  }
+
+  /**
    * Notify document-service to delete the VC for a document (revocation).
    * @param {string} documentDID
    */

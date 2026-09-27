@@ -3438,15 +3438,22 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
 
   const body = envelope.body || {};
   const { title, clearanceLevel, releasableTo, filename } = body;
-  const attachment = (envelope.attachments || []).find((a) => a.id === 'file');
+  // Sectioned envelopes (Phase 5e redaction, 2026-09-27) carry one attachment PER SECTION, none
+  // of them named "file" — this lookup and its abort-on-missing check are for the single-blob
+  // path only; the sectioned branch further down does its own attachment validation instead.
+  const attachment = body.sectioned === true ? null : (envelope.attachments || []).find((a) => a.id === 'file');
   const base64Data = attachment?.data?.base64;
-  if (!base64Data) {
+  if (!base64Data && body.sectioned !== true) {
     console.error(`[DocumentUploadDIDComm] ${envelope.id}: no "file" attachment with base64 data, aborting`);
     return;
   }
-  const fileBuffer = Buffer.from(base64Data, 'base64');
-  const mimeType = attachment.mediaType || 'application/octet-stream';
-  console.log(`[DocumentUploadDIDComm] ${envelope.id}: file=${filename || '(untitled)'} size=${fileBuffer.length} bytes mimeType=${mimeType}`);
+  const fileBuffer = body.sectioned === true ? null : Buffer.from(base64Data, 'base64');
+  const mimeType = body.sectioned === true ? null : (attachment.mediaType || 'application/octet-stream');
+  if (body.sectioned !== true) {
+    console.log(`[DocumentUploadDIDComm] ${envelope.id}: file=${filename || '(untitled)'} size=${fileBuffer.length} bytes mimeType=${mimeType}`);
+  } else {
+    console.log(`[DocumentUploadDIDComm] ${envelope.id}: sectioned upload, file=${filename || '(untitled)'} sections=${(envelope.attachments || []).length}`);
+  }
 
   if (!process.env.ENTERPRISE_DB_PASSWORD) {
     console.error(`[DocumentUploadDIDComm] ${envelope.id}: ENTERPRISE_DB_PASSWORD not configured, cannot resolve the sending employee`);
@@ -3485,6 +3492,20 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
 
   const resolvedTitle = title || filename || 'Untitled Document';
   const resolvedClearance = clearanceLevel || 'UNCLASSIFIED';
+
+  // ── Sectioned upload (Phase 5e redaction, 2026-09-27) ─────────────────────
+  // body.sectioned === true means every entry in `attachments` is its own section, each with
+  // its own clearanceLevel tag, instead of one whole-document attachment named "file". Each
+  // section gets encrypted separately (own DEK) and uploaded separately, so document-service
+  // can later filter by section without ever decrypting anything (see ReEncryptionService.js's
+  // buildSectionedAccessResponse). Falls through to the existing single-blob path below when
+  // body.sectioned is not explicitly true, so every pre-existing caller is unaffected.
+  if (body.sectioned === true) {
+    return handleSectionedDocumentUploadEnvelope(envelope, {
+      resolvedTitle, resolvedClearance, releasableToIssuerDIDs, filename,
+      employee, department, connectionRow,
+    });
+  }
 
   const { getIagonClient } = require('./lib/IagonStorageClient');
   const iagonClient = getIagonClient();
@@ -3615,6 +3636,178 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
   } else {
     console.error(`[DocumentUploadDIDComm] ${envelope.id}: ⚠️ no wrappedManifest available - document registered but will NOT be accessible (no key material)`);
   }
+}
+
+// Clearance ordering for computing a sectioned document's overall (lowest) tier — matches
+// DocxRedactionService.js / ClearanceDocumentParser.js's own CLEARANCE_LEVELS table.
+const SECTION_CLEARANCE_ORDER = { UNCLASSIFIED: 0, INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3, SECRET: 4, 'TOP-SECRET': 4 };
+
+/**
+ * Sectioned counterpart to handleDocumentUploadEnvelope (Phase 5e redaction, 2026-09-27).
+ * Each entry in `envelope.attachments` is its own section with its own clearanceLevel tag.
+ * Every section is encrypted SEPARATELY, with its own DEK, and uploaded to Iagon separately -
+ * document-service later filters by each section's public tag without ever decrypting
+ * anything (see ReEncryptionService.js's buildSectionedAccessResponse). The document DID's own
+ * DocumentMetadata carries the LOWEST clearance level among sections, so the document is at
+ * least discoverable/listable at that tier - per-section filtering happens at access time.
+ */
+async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
+  const { resolvedTitle, resolvedClearance, releasableToIssuerDIDs, filename, employee, department, connectionRow } = ctx;
+  const { getIagonClient } = require('./lib/IagonStorageClient');
+  const iagonClient = getIagonClient();
+
+  const rawAttachments = envelope.attachments || [];
+  if (rawAttachments.length === 0) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: sectioned upload with no attachments, aborting`);
+    return;
+  }
+
+  const sections = [];
+  for (const att of rawAttachments) {
+    const sectionId = att.id;
+    const sectionClearance = att.clearanceLevel;
+    const base64Data = att.data?.base64;
+    if (!sectionId || !sectionClearance || !base64Data) {
+      console.error(`[DocumentUploadDIDComm] ${envelope.id}: section missing id/clearanceLevel/data.base64, aborting whole upload`);
+      return;
+    }
+    const sectionBuffer = Buffer.from(base64Data, 'base64');
+
+    let uploadResult;
+    try {
+      uploadResult = await iagonClient.uploadFile(
+        sectionBuffer,
+        `${Date.now()}_${filename || 'document'}_${sectionId}`,
+        { classificationLevel: sectionClearance },
+      );
+    } catch (err) {
+      console.error(`[DocumentUploadDIDComm] ${envelope.id}: Iagon upload failed for section=${sectionId}:`, err.message);
+      return;
+    }
+
+    if (!uploadResult.rawDEK) {
+      console.error(`[DocumentUploadDIDComm] ${envelope.id}: section=${sectionId} got no rawDEK from Iagon upload, aborting whole upload`);
+      return;
+    }
+    const wrappedManifest = cmk.wrapDEK(uploadResult.rawDEK, sectionClearance);
+    uploadResult.rawDEK.fill(0); // zero raw key from memory (PFS), same discipline as the flat path
+
+    sections.push({
+      sectionId,
+      clearanceLevel:    sectionClearance,
+      iagonFileId:       uploadResult.fileId,
+      iagonUrl:          uploadResult.iagonUrl,
+      wrappedKey:         wrappedManifest.wrappedKey,
+      iv:                 wrappedManifest.iv,
+      authTag:            wrappedManifest.authTag,
+      wrappingAlgorithm:  wrappedManifest.wrappingAlgorithm || 'AES-256-GCM',
+      fileIv:             uploadResult.encryptionInfo?.iv,
+      fileAuthTag:        uploadResult.encryptionInfo?.authTag,
+      fileAlgorithm:      uploadResult.encryptionInfo?.algorithm || 'AES-256-GCM',
+      contentHash:        uploadResult.contentHash || null,
+    });
+    console.log(`[DocumentUploadDIDComm] ${envelope.id}: uploaded section=${sectionId} clearanceLevel=${sectionClearance} via ${uploadResult.storageBackend || 'iagon'} fileId=${uploadResult.fileId}`);
+  }
+
+  // Overall document tier = lowest clearance among its sections, so the document is
+  // discoverable/listable to a requester who can only see the lowest-tier section.
+  const overallClearance = sections.reduce((lowest, s) => {
+    const lvl = SECTION_CLEARANCE_ORDER[s.clearanceLevel] ?? 0;
+    return lvl < (SECTION_CLEARANCE_ORDER[lowest] ?? 99) ? s.clearanceLevel : lowest;
+  }, sections[0].clearanceLevel);
+  const lowestSection = sections.find((s) => s.clearanceLevel === overallClearance);
+
+  const PUBLIC_URL = process.env.PUBLIC_URL || 'https://identuslabel.cz/company-admin';
+  const documentManager = new EnterpriseDocumentManager(ENTERPRISE_CLOUD_AGENT_URL, DEPARTMENT_API_KEYS[department] || null);
+  let didResult;
+  try {
+    didResult = await documentManager.createDocumentDIDWithServiceEndpoint(
+      department,
+      {
+        title: resolvedTitle,
+        classificationLevel: overallClearance,
+        releasableTo: releasableToIssuerDIDs,
+        filename,
+        createdBy: employee.email,
+        createdByDID: employee.prism_did,
+      },
+      {
+        // Representative entry so DocumentMetadata always has an iagonFileId (resolver
+        // requirement) - the authoritative per-section data lives in the sectioned VC, not here.
+        // downloadUrl from the lowest section is what lets DIDDocumentResolver's
+        // iagonFilenameFromUrl fallback recover a real filename for discovery listings, same as
+        // the flat path does with its single iagonStorage.iagonUrl.
+        fileId: lowestSection.iagonFileId,
+        downloadUrl: lowestSection.iagonUrl,
+        contentHash: lowestSection.contentHash,
+        encryptionInfo: null,
+      },
+      [{ id: 'document-access-gate', type: 'DocumentAccessGate', serviceEndpoint: `${PUBLIC_URL}/api/access-gate/challenge` }],
+      {},
+    );
+  } catch (err) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: document DID creation failed:`, err.message);
+    return;
+  }
+  console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ sectioned document DID created: ${didResult.documentDID.substring(0, 60)}...`);
+
+  // Push the KeyManifest VC BEFORE registering in DocumentRegistry (order matters here, unlike
+  // the flat path): DocumentRegistry.registerDocument is what makes the document appear in
+  // `documents list` discovery. If discovery landed first, a caller polling immediately after
+  // could find the document and call /access before the manifest exists in document-service's
+  // VCKeyStore, hitting the legacy-fallback branch (no VC, no iagonEncManifestId) and getting a
+  // flat, keyless response instead of a real sectioned one - confirmed live, 2026-09-27, as a
+  // genuine race in this exact window. Never discoverable-before-accessible.
+  let vcPushOk = false;
+  try {
+    const docServiceUrl = process.env.DOCUMENT_SERVICE_URL || null;
+    const adminKey = process.env.DOCUMENT_SERVICE_ADMIN_KEY;
+    const vcIssuer = new KeyManifestVCIssuer(docServiceUrl, adminKey);
+    const vcResult = await vcIssuer.issueSectioned({
+      documentDID: didResult.documentDID,
+      issuerDID: (connectionRow.company_id ? COMPANY_ISSUER_DIDS['TechCorp Corporation'] : null) || process.env.SERVICE_DID,
+      sections,
+      releasableTo: releasableToIssuerDIDs,
+      updatedBy: employee.prism_did || employee.email || null,
+    });
+    vcPushOk = true;
+    console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ sectioned KeyManifest VC pushed: ${vcResult.vcId}`);
+  } catch (vcPushErr) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: ⚠️ sectioned KeyManifest VC push failed:`, vcPushErr.message);
+  }
+  if (!vcPushOk) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: aborting before DocumentRegistry registration - a document with no key manifest must never become discoverable`);
+    return;
+  }
+
+  await DocumentRegistry.registerDocument({
+    documentDID: didResult.documentDID,
+    title: resolvedTitle,
+    classificationLevel: overallClearance,
+    releasableTo: releasableToIssuerDIDs,
+    contentEncryptionKey: 'sectioned', // authoritative key material lives in the sectioned VC
+    ownerCompanyDID: connectionRow.company_id ? (COMPANY_ISSUER_DIDS['TechCorp Corporation'] || null) : null,
+    // Representative entry so listing endpoints that read DocumentRegistry's own iagonStorage
+    // field directly (rather than resolving the DID) still show hasIagonStorage:true and the
+    // real filename - same reasoning as the DID metadata's own representative entry above.
+    iagonStorage: {
+      fileId: lowestSection.iagonFileId,
+      iagonUrl: lowestSection.iagonUrl,
+      filename,
+      contentHash: lowestSection.contentHash,
+    },
+    metadata: {
+      title: resolvedTitle,
+      department,
+      createdBy: employee.email,
+      createdByDID: employee.prism_did,
+      originalFilename: filename,
+      sectionCount: sections.length,
+      uploadedVia: 'document-upload/1.0 (DIDComm, sectioned)',
+      createdAt: new Date().toISOString(),
+    },
+  });
+  console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ registered in DocumentRegistry (sectioned, ${sections.length} sections), releasable to ${releasableToIssuerDIDs.length} compan${releasableToIssuerDIDs.length === 1 ? 'y' : 'ies'}`);
 }
 
 app.post('/api/enterprise-messages-webhook', async (req, res) => {
