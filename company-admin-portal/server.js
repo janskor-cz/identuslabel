@@ -2814,6 +2814,44 @@ async function verifyAndExtractRealPersonClaims(vpJwt, expectedChallenge, expect
 }
 
 /**
+ * Cryptographically verify a legacy JWT-VP SecurityClearance presentation (04-05 security review
+ * §24). Same checks as verifyAndExtractRealPersonClaims's JWT-VP branch: PRISM holder DID, nonce ==
+ * the challenge issued for THIS verification, outer signature against the holder's authentication
+ * key, every VC's signature via verifyPresentationCredentials, issuer on ACCEPTED_ISSUER_DIDS, and
+ * the presenter being the credential's subject. Returns { clearanceLevel, subjectDID } or null
+ * when no trusted clearance credential is present; throws on any verification failure.
+ */
+async function verifyLegacyClearanceVp(vpJwt, expectedChallenge) {
+  const outer = decodeJWT(vpJwt);
+  if (!outer) throw new Error('Malformed outer VP JWT');
+  const holderDID = outer.payload.iss;
+  if (!holderDID || !holderDID.startsWith('did:prism:')) throw new Error('Holder DID must be a PRISM DID');
+  if (!expectedChallenge || outer.payload.nonce !== expectedChallenge) {
+    throw new Error('Presentation nonce does not match the challenge issued for this verification');
+  }
+  const holderSigValid = await verifyES256KSignature(outer, holderDID, realPersonIssuerResolver, 'authentication');
+  if (!holderSigValid) throw new Error('Outer VP JWT signature verification failed (holder binding)');
+  const vpResult = await verifyPresentationCredentials(
+    { verifiableCredential: outer.payload?.vp?.verifiableCredential || [], rawVpJwt: vpJwt },
+    realPersonIssuerResolver
+  );
+  if (!vpResult.success) throw new Error(`Clearance VC verification failed: ${vpResult.error} — ${vpResult.message}`);
+  for (const cred of vpResult.credentials) {
+    const level = cred.claims?.clearanceLevel || cred.claims?.securityLevel;
+    if (!level) continue;
+    if (!ACCEPTED_ISSUER_DIDS.some((did) => prismDidsMatch(did, cred.issuerDID))) {
+      console.warn(`[ClearanceVerification] Ignoring clearance claim from untrusted issuer: ${cred.issuerDID}`);
+      continue;
+    }
+    const subjectDID = cred.subjectDID || cred.claims?.id;
+    if (!prismDidsMatch(subjectDID, holderDID)) throw new Error('Holder binding failed: presenter is not the credential subject');
+    return { clearanceLevel: level, subjectDID };
+  }
+  return null;
+}
+
+
+/**
  * Helper function to check CIS Training status
  * @param {string} prismDid - Employee's PRISM DID
  * @returns {Object} Training status with hasValidTraining and expiryDate
@@ -3491,7 +3529,14 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
   }
 
   const resolvedTitle = title || filename || 'Untitled Document';
-  const resolvedClearance = clearanceLevel || 'UNCLASSIFIED';
+  // 04-05 security review §18: canonicalise at receipt and refuse anything else. A label the
+  // CMK layer accepts but document-service's level table does not recognise used to be stored
+  // raw and then released to level-0 requesters. A missing label keeps its documented default.
+  const resolvedClearance = canonicalUploadClearance(clearanceLevel || 'UNCLASSIFIED');
+  if (!resolvedClearance) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: unrecognised clearanceLevel ${JSON.stringify(clearanceLevel)}, aborting`);
+    return;
+  }
 
   // ── Sectioned upload (Phase 5e redaction, 2026-09-27) ─────────────────────
   // body.sectioned === true means every entry in `attachments` is its own section, each with
@@ -3642,6 +3687,16 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
 // DocxRedactionService.js / ClearanceDocumentParser.js's own CLEARANCE_LEVELS table.
 const SECTION_CLEARANCE_ORDER = { UNCLASSIFIED: 0, INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3, SECRET: 4, 'TOP-SECRET': 4 };
 
+// 04-05 security review §18 (2026-09-27): the only labels that BOTH have a CMK here and are an
+// exact key of identus-document-service's LEVEL_NUMBERS. SECRET is deliberately absent - it has no
+// CMK, so it could never be wrapped. Normalisation matches ClassificationKeyManager._normalise.
+const UPLOAD_CLEARANCE_LABELS = new Set(['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET']);
+function canonicalUploadClearance(label) {
+  if (typeof label !== 'string') return null;
+  const canonical = label.toUpperCase().trim().replace(/_/g, '-');
+  return UPLOAD_CLEARANCE_LABELS.has(canonical) ? canonical : null;
+}
+
 /**
  * Sectioned counterpart to handleDocumentUploadEnvelope (Phase 5e redaction, 2026-09-27).
  * Each entry in `envelope.attachments` is its own section with its own clearanceLevel tag.
@@ -3665,9 +3720,13 @@ async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
   const sections = [];
   for (const att of rawAttachments) {
     const sectionId = att.id;
-    const sectionClearance = att.clearanceLevel;
+    const sectionClearance = canonicalUploadClearance(att.clearanceLevel); // §18: canonical or null
     const base64Data = att.data?.base64;
     if (!sectionId || !sectionClearance || !base64Data) {
+      if (sectionId && att.clearanceLevel && !sectionClearance) {
+        console.error(`[DocumentUploadDIDComm] ${envelope.id}: section=${sectionId} has unrecognised clearanceLevel ${JSON.stringify(att.clearanceLevel)}, aborting whole upload`);
+        return;
+      }
       console.error(`[DocumentUploadDIDComm] ${envelope.id}: section missing id/clearanceLevel/data.base64, aborting whole upload`);
       return;
     }
@@ -3810,7 +3869,45 @@ async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
   console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ registered in DocumentRegistry (sectioned, ${sections.length} sections), releasable to ${releasableToIssuerDIDs.length} compan${releasableToIssuerDIDs.length === 1 ? 'y' : 'ies'}`);
 }
 
+// 04-05 security review §19 (2026-09-27): both cloud-agent webhooks were unauthenticated
+// ("trusts network topology") yet publicly routed by Caddy, and 04-04 attached document creation
+// (storage writes, PRISM DID creation, signed key-manifest VCs) to them. Every registered webhook
+// URL now carries COMPANY_ADMIN_WEBHOOK_TOKEN; a request without it is rejected before any
+// processing. Fails closed when the token is not configured.
+function webhookTokenValid(req) {
+  const expected = process.env.COMPANY_ADMIN_WEBHOOK_TOKEN;
+  if (!expected) return false;
+  const got = typeof req.query?.token === 'string' ? req.query.token : '';
+  const a = Buffer.from(got), b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+// The Cloud Agent allows ONE webhook per wallet (TooManyWebhookError), so a pre-§19 tokenless
+// registration must be removed before the tokenised URL can be registered. Deletes only webhooks
+// pointing at this portal's own base path that are not the exact tokenised URL.
+async function replaceStaleWebhooks(agentUrl, apiKey, baseUrl, tokenisedUrl) {
+  const r = await fetch(`${agentUrl}/events/webhooks`, { headers: { apikey: apiKey } }).catch(() => null);
+  if (!r || !r.ok) return 0;
+  const d = await r.json().catch(() => ({}));
+  let removed = 0;
+  for (const w of (d.contents || d.items || [])) {
+    if (typeof w.url === 'string' && w.url.startsWith(baseUrl) && w.url !== tokenisedUrl && w.id) {
+      const del = await fetch(`${agentUrl}/events/webhooks/${w.id}`, { method: 'DELETE', headers: { apikey: apiKey } }).catch(() => null);
+      if (del && del.ok) removed++;
+    }
+  }
+  return removed;
+}
+function withWebhookToken(url) {
+  const token = process.env.COMPANY_ADMIN_WEBHOOK_TOKEN;
+  if (!token) throw new Error('COMPANY_ADMIN_WEBHOOK_TOKEN is not set - refusing to register an unauthenticated webhook');
+  return `${url}?token=${encodeURIComponent(token)}`;
+}
+
 app.post('/api/enterprise-messages-webhook', async (req, res) => {
+  if (!webhookTokenValid(req)) {
+    console.warn('[EnterpriseWebhook] rejected: missing or invalid webhook token');
+    return res.sendStatus(401);
+  }
   res.sendStatus(200); // ack immediately
   const { type, walletId: bodyWalletId, data } = req.body || {};
   const walletId = req.query.walletId || bodyWalletId;
@@ -4877,6 +4974,10 @@ app.post('/api/employee-portal/auth/logout', requireEmployeeSession, (req, res) 
 
 function handleDIDCommWebhook(didCommService, companyLabel) {
   return express.Router().post('/', express.json(), async (req, res) => {
+    if (!webhookTokenValid(req)) { // 04-05 §19
+      console.warn(`[DIDCommWebhook/${companyLabel}] rejected: missing or invalid webhook token`);
+      return res.sendStatus(401);
+    }
     const type = req.body?.type || '(unknown)';
     console.log(`🔔 [DIDCommWebhook/${companyLabel}] Event: ${type}`);
 
@@ -9374,74 +9475,26 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
 
       // Parse the credential data from the presentation (legacy JWT-VP shape)
       // Cloud Agent returns data[] as array of VP JWT strings
+      // Legacy JWT-VP shape (04-05 security review §24, 2026-09-27). Previously decode-only: the VP
+      // and VC payloads were JSON-parsed without any signature check and `iss` was trusted as-is,
+      // and a bare object carrying `claims.clearanceLevel` was accepted outright - reachable on
+      // demand via maybeRetryClearanceWithJWT's fallback, and while the Cloud Agent still reports
+      // PresentationReceived (before its own verification). Now verified the same way
+      // verifyAndExtractRealPersonClaims's JWT-VP branch is (see verifyLegacyClearanceVp); the
+      // unverifiable object shapes are no longer accepted at all.
       if (clearanceLevel === 'UNKNOWN' && presentationData.data && presentationData.data.length > 0) {
-        for (const vpJwtOrObject of presentationData.data) {
+        for (const item of presentationData.data) {
+          if (typeof item !== 'string' || isSDJWT(item)) continue;
           try {
-            // Check if it's a raw JWT string (the VP)
-            if (typeof vpJwtOrObject === 'string' && vpJwtOrObject.split('.').length === 3) {
-              console.log('[ClearanceVerification] Parsing VP JWT from data array');
-              const vpParts = vpJwtOrObject.split('.');
-              const vpPayload = JSON.parse(Buffer.from(vpParts[1], 'base64url').toString());
-
-              // VP contains vp.verifiableCredential[] array of VC JWTs
-              if (vpPayload.vp && vpPayload.vp.verifiableCredential) {
-                for (const vcJwt of vpPayload.vp.verifiableCredential) {
-                  try {
-                    const vcParts = vcJwt.split('.');
-                    if (vcParts.length === 3) {
-                      const vcPayload = JSON.parse(Buffer.from(vcParts[1], 'base64url').toString());
-                      console.log('[ClearanceVerification] Parsed VC credentialSubject:',
-                        vcPayload.vc?.credentialSubject?.credentialType || 'unknown type');
-
-                      // Check if this is a SecurityClearance VC. Issuer must be trusted — same
-                      // ACCEPTED_ISSUER_DIDS check the login flow applies to this VC type
-                      // (see isSecurityClearanceCred handling above) — otherwise any VC carrying
-                      // a self-asserted clearanceLevel/securityLevel claim from an untrusted
-                      // issuer would be accepted as a real clearance.
-                      if (vcPayload.vc && vcPayload.vc.credentialSubject) {
-                        const subject = vcPayload.vc.credentialSubject;
-                        if (!ACCEPTED_ISSUER_DIDS.includes(vcPayload.iss)) {
-                          if (subject.clearanceLevel || subject.securityLevel) {
-                            console.warn(`[ClearanceVerification] Ignoring clearanceLevel/securityLevel claim from untrusted issuer: ${vcPayload.iss}`);
-                          }
-                        } else if (subject.clearanceLevel) {
-                          // Capture the personal CA DID (sub of VC JWT) for sync linkage
-                          if (vcPayload.sub && !caPersonalDID) {
-                            caPersonalDID = vcPayload.sub;
-                            console.log(`[ClearanceVerification] Captured caPersonalDID: ${caPersonalDID.substring(0, 40)}...`);
-                          }
-                          clearanceLevel = subject.clearanceLevel;
-                          console.log('[ClearanceVerification] ✅ Found clearanceLevel:', clearanceLevel);
-                        } else if (subject.securityLevel) {
-                          clearanceLevel = subject.securityLevel;
-                          console.log('[ClearanceVerification] ✅ Found securityLevel:', clearanceLevel);
-                        }
-                      }
-                    }
-                  } catch (vcErr) {
-                    console.error('[ClearanceVerification] Error parsing nested VC JWT:', vcErr.message);
-                  }
-                }
-              }
-            } else if (typeof vpJwtOrObject === 'object') {
-              // Legacy object format with claims or credential property
-              if (vpJwtOrObject.claims) {
-                clearanceLevel = vpJwtOrObject.claims.clearanceLevel || vpJwtOrObject.claims.securityLevel || clearanceLevel;
-              }
-              if (vpJwtOrObject.credential) {
-                const parts = vpJwtOrObject.credential.split('.');
-                if (parts.length === 3) {
-                  const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
-                  if (payload.vc && payload.vc.credentialSubject) {
-                    clearanceLevel = payload.vc.credentialSubject.clearanceLevel ||
-                                     payload.vc.credentialSubject.securityLevel ||
-                                     clearanceLevel;
-                  }
-                }
-              }
+            const verified = await verifyLegacyClearanceVp(item, verification.challenge);
+            if (verified) {
+              clearanceLevel = verified.clearanceLevel;
+              if (verified.subjectDID && !caPersonalDID) caPersonalDID = verified.subjectDID;
+              console.log('[ClearanceVerification] ✅ Verified legacy JWT clearanceLevel:', clearanceLevel);
+              break;
             }
           } catch (e) {
-            console.error('[ClearanceVerification] Error parsing presentation data:', e.message);
+            console.warn(`[ClearanceVerification] Legacy JWT-VP rejected: ${e.message}`);
           }
         }
       }
@@ -12354,7 +12407,7 @@ app.listen(PORT, async () => {
   // The /events/webhooks endpoint does not accept x-admin-api-key; per-wallet registration is required.
   // We use a deterministic key per entity (so restarts stay idempotent) and register in the background.
   console.log('🔧 Registering enterprise agent webhooks for all employee wallets (background)...');
-  const enterpriseWebhookUrl = `${COMPANY_PUBLIC_BASE_URL}/api/enterprise-messages-webhook`;
+  const enterpriseWebhookUrl = withWebhookToken(`${COMPANY_PUBLIC_BASE_URL}/api/enterprise-messages-webhook`); // 04-05 §19
   // No hardcoded fallback: this is the enterprise agent's full admin token, and this file is
   // tracked in a public repository. It comes from company-admin-portal/.env only.
   const ENTERPRISE_ADMIN_TOKEN = process.env.ENTERPRISE_ADMIN_TOKEN;
@@ -12397,6 +12450,10 @@ app.listen(PORT, async () => {
             if (items.some(w => w.url === enterpriseWebhookUrl)) { skipped++; continue; }
           }
 
+          // 04-05 §19: clear a stale tokenless registration first (one webhook per wallet)
+          await replaceStaleWebhooks(ENTERPRISE_CLOUD_AGENT_URL, webhookKey,
+            `${COMPANY_PUBLIC_BASE_URL}/api/enterprise-messages-webhook`, enterpriseWebhookUrl);
+
           // Register webhook for this entity's wallet
           const regResp = await fetch(`${ENTERPRISE_CLOUD_AGENT_URL}/events/webhooks`, {
             method: 'POST',
@@ -12419,7 +12476,18 @@ app.listen(PORT, async () => {
   // Runs for every company in the registry (not just techcorp/acme) — each registration is
   // independently caught so one company's failure doesn't abort the others.
   console.log('🔧 Registering DIDComm access-request webhooks...');
-  companyPortalRegistry.registerAllWebhooks((id) => `${COMPANY_PUBLIC_BASE_URL}/api/didcomm-webhook/${id}`);
+  // 04-05 §19: replace each company's stale tokenless registration, then register the tokenised URL.
+  (async () => {
+    for (const { id, service } of companyPortalRegistry.entries) {
+      try {
+        const removed = await replaceStaleWebhooks(service.cfg.cloudAgentUrl, service.cfg.apiKey,
+          `${COMPANY_PUBLIC_BASE_URL}/api/didcomm-webhook/${id}`,
+          withWebhookToken(`${COMPANY_PUBLIC_BASE_URL}/api/didcomm-webhook/${id}`));
+        if (removed) console.log(`   🔁 [DIDCommAccess] ${id}: removed ${removed} stale webhook registration(s)`);
+      } catch (e) { console.error(`[DIDCommAccess] ${id} stale-webhook cleanup error:`, e.message); }
+    }
+    companyPortalRegistry.registerAllWebhooks((id) => withWebhookToken(`${COMPANY_PUBLIC_BASE_URL}/api/didcomm-webhook/${id}`));
+  })();
 
   console.log('='.repeat(70));
   console.log('✅ Server ready for connections\n');

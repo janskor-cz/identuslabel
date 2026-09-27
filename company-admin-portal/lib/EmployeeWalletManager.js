@@ -197,7 +197,8 @@ async function createEmployeeWallet(employeeData, company = null, preloadedRealP
 
     // Register enterprise webhook for this wallet so BasicMessageReceived fires to the portal
     const COMPANY_PORTAL_BASE_URL = process.env.COMPANY_PORTAL_BASE_URL || 'https://identuslabel.cz/company-admin';
-    const enterpriseWebhookUrl = `${COMPANY_PORTAL_BASE_URL}/api/enterprise-messages-webhook`;
+    // 04-05 security review §19: the webhook rejects requests without COMPANY_ADMIN_WEBHOOK_TOKEN.
+    const enterpriseWebhookUrl = `${COMPANY_PORTAL_BASE_URL}/api/enterprise-messages-webhook?token=${encodeURIComponent(process.env.COMPANY_ADMIN_WEBHOOK_TOKEN || '')}`;
     await fetch(`${EMPLOYEE_CLOUD_AGENT_URL}/events/webhooks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'apikey': partialData.apiKey },
