@@ -3513,6 +3513,14 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
     return;
   }
 
+  // 04-05 security review §20: the owner and key-manifest issuer are the uploading employee's OWN
+  // employer (COMPANIES[company_id].did), never a hardcoded company. Unknown employer → refuse.
+  const employerDID = COMPANIES[connectionRow.company_id]?.did || null;
+  if (!employerDID) {
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: no known employer for company_id=${JSON.stringify(connectionRow.company_id)}, aborting`);
+    return;
+  }
+
   const department = connectionRow.department || 'IT';
   const departmentApiKey = DEPARTMENT_API_KEYS[department];
   if (!departmentApiKey) {
@@ -3548,7 +3556,7 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
   if (body.sectioned === true) {
     return handleSectionedDocumentUploadEnvelope(envelope, {
       resolvedTitle, resolvedClearance, releasableToIssuerDIDs, filename,
-      employee, department, connectionRow,
+      employee, department, connectionRow, employerDID,
     });
   }
 
@@ -3624,7 +3632,7 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
     classificationLevel: resolvedClearance,
     releasableTo: releasableToIssuerDIDs,
     contentEncryptionKey: encryptionManifestId || 'no-encryption',
-    ownerCompanyDID: connectionRow.company_id ? (COMPANY_ISSUER_DIDS['TechCorp Corporation'] || null) : null,
+    ownerCompanyDID: employerDID,
     metadata: {
       title: resolvedTitle,
       department,
@@ -3658,7 +3666,7 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
 
       const vcResult = await vcIssuer.issue({
         documentDID: didResult.documentDID,
-        issuerDID: (connectionRow.company_id ? COMPANY_ISSUER_DIDS['TechCorp Corporation'] : null) || process.env.SERVICE_DID,
+        issuerDID: employerDID,
         iagonFileId: iagonStorage.fileId,
         classificationLevel: resolvedClearance,
         releasableTo: releasableToIssuerDIDs,
@@ -3707,7 +3715,7 @@ function canonicalUploadClearance(label) {
  * least discoverable/listable at that tier - per-section filtering happens at access time.
  */
 async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
-  const { resolvedTitle, resolvedClearance, releasableToIssuerDIDs, filename, employee, department, connectionRow } = ctx;
+  const { resolvedTitle, resolvedClearance, releasableToIssuerDIDs, filename, employee, department, connectionRow, employerDID } = ctx;
   const { getIagonClient } = require('./lib/IagonStorageClient');
   const iagonClient = getIagonClient();
 
@@ -3824,7 +3832,7 @@ async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
     const vcIssuer = new KeyManifestVCIssuer(docServiceUrl, adminKey);
     const vcResult = await vcIssuer.issueSectioned({
       documentDID: didResult.documentDID,
-      issuerDID: (connectionRow.company_id ? COMPANY_ISSUER_DIDS['TechCorp Corporation'] : null) || process.env.SERVICE_DID,
+      issuerDID: employerDID,
       sections,
       releasableTo: releasableToIssuerDIDs,
       updatedBy: employee.prism_did || employee.email || null,
@@ -3845,7 +3853,7 @@ async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
     classificationLevel: overallClearance,
     releasableTo: releasableToIssuerDIDs,
     contentEncryptionKey: 'sectioned', // authoritative key material lives in the sectioned VC
-    ownerCompanyDID: connectionRow.company_id ? (COMPANY_ISSUER_DIDS['TechCorp Corporation'] || null) : null,
+    ownerCompanyDID: employerDID,
     // Representative entry so listing endpoints that read DocumentRegistry's own iagonStorage
     // field directly (rather than resolving the DID) still show hasIagonStorage:true and the
     // real filename - same reasoning as the DID metadata's own representative entry above.
