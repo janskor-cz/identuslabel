@@ -8225,6 +8225,7 @@ app.post('/api/access-gate/present', async (req, res) => {
       copyHash,
       ephemeralDID: ephemeralMetadata.ephemeralDID,
       clearanceLevel: clearanceLevel || 'UNCLASSIFIED',
+      sectioned: isSectionedDoc, // 04-05 UAT G-04-1c: lets the wallet hide whole-document update
       documentMetadata: {
         title: document.metadata?.title || document.metadata?.name || `Document ${copyId}`,
         overallClassification: document.classificationLevel || 'UNCLASSIFIED'
@@ -8431,6 +8432,20 @@ app.post('/api/document-update/request-edit', async (req, res) => {
         message: 'documentDID, vp, and challenge are required'
       });
     }
+
+    // 04-05 UAT G-04-1c (2026-09-28): a sectioned document has no whole-document update path - a
+    // single edited file would replace per-section encryption with one flat, unredacted version.
+    // Refuse before anything else happens, whatever the client offers.
+    try {
+      const updRoutingVC = await fetchCurrentManifestVC(documentDID, process.env.DOCUMENT_SERVICE_URL, process.env.DOCUMENT_SERVICE_ADMIN_KEY);
+      if (Array.isArray(updRoutingVC?.claims?.sections)) {
+        return res.status(409).json({
+          success: false,
+          error: 'SectionedUpdateNotSupported',
+          message: 'This document is split into clearance sections and cannot be updated as a single file.'
+        });
+      }
+    } catch (_) { /* no manifest: fall through to the existing checks */ }
 
     // 2. Consume challenge (one-time use)
     const pendingChallenge = pendingDocumentAccessChallenges.get(challenge);
