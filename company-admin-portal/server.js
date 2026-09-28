@@ -2815,43 +2815,6 @@ async function verifyAndExtractRealPersonClaims(vpJwt, expectedChallenge, expect
   };
 }
 
-/**
- * Cryptographically verify a legacy JWT-VP SecurityClearance presentation (04-05 security review
- * §24). Same checks as verifyAndExtractRealPersonClaims's JWT-VP branch: PRISM holder DID, nonce ==
- * the challenge issued for THIS verification, outer signature against the holder's authentication
- * key, every VC's signature via verifyPresentationCredentials, issuer on ACCEPTED_ISSUER_DIDS, and
- * the presenter being the credential's subject. Returns { clearanceLevel, subjectDID } or null
- * when no trusted clearance credential is present; throws on any verification failure.
- */
-async function verifyLegacyClearanceVp(vpJwt, expectedChallenge) {
-  const outer = decodeJWT(vpJwt);
-  if (!outer) throw new Error('Malformed outer VP JWT');
-  const holderDID = outer.payload.iss;
-  if (!holderDID || !holderDID.startsWith('did:prism:')) throw new Error('Holder DID must be a PRISM DID');
-  if (!expectedChallenge || outer.payload.nonce !== expectedChallenge) {
-    throw new Error('Presentation nonce does not match the challenge issued for this verification');
-  }
-  const holderSigValid = await verifyES256KSignature(outer, holderDID, realPersonIssuerResolver, 'authentication');
-  if (!holderSigValid) throw new Error('Outer VP JWT signature verification failed (holder binding)');
-  const vpResult = await verifyPresentationCredentials(
-    { verifiableCredential: outer.payload?.vp?.verifiableCredential || [], rawVpJwt: vpJwt },
-    realPersonIssuerResolver
-  );
-  if (!vpResult.success) throw new Error(`Clearance VC verification failed: ${vpResult.error} — ${vpResult.message}`);
-  for (const cred of vpResult.credentials) {
-    const level = cred.claims?.clearanceLevel || cred.claims?.securityLevel;
-    if (!level) continue;
-    if (!ACCEPTED_ISSUER_DIDS.some((did) => prismDidsMatch(did, cred.issuerDID))) {
-      console.warn(`[ClearanceVerification] Ignoring clearance claim from untrusted issuer: ${cred.issuerDID}`);
-      continue;
-    }
-    const subjectDID = cred.subjectDID || cred.claims?.id;
-    if (!prismDidsMatch(subjectDID, holderDID)) throw new Error('Holder binding failed: presenter is not the credential subject');
-    return { clearanceLevel: level, subjectDID };
-  }
-  return null;
-}
-
 
 /**
  * Helper function to check CIS Training status
@@ -9172,52 +9135,6 @@ const pendingClearanceVerifications = new Map();
  *       sends proof request to personal wallet connection → IDL Wallet (personal mode) receives it
  */
 
-/**
- * Re-issues a pending clearance proof request with credentialFormat: 'JWT' when the initial
- * SD-JWT attempt (the preferred format) didn't pan out — used by both the "declined" and "still
- * pending" branches of GET /clearance/status below, since a wallet holding only a legacy JWT
- * (v4.0.0) clearance credential can surface that failure either way (see the call sites' own
- * comments for which — confirmed live via wallet debug logs, 2026-08-29, that a decline is the
- * actual observed path: the wallet SDK throws "Invalid presentation proof arguments" client-side
- * when asked to present a plain-JWT credential in SD-JWT format, then explicitly declines, rather
- * than the Cloud Agent ever reporting PresentationVerificationFailed).
- *
- * Mutates `verification` in place (new presentationId, format, triedJWTFallback) — the caller's
- * `pendingClearanceVerifications` entry IS `verification` (same object reference), so no separate
- * .set() call is needed.
- *
- * @returns {Promise<boolean>} true if a retry was actually issued (caller should report 'pending'
- *   instead of its normal terminal/pending response for this poll).
- */
-async function maybeRetryClearanceWithJWT(verification, verificationId, { allowTimeoutTrigger = false } = {}) {
-  const eligible = verification.format === 'SDJWT' && !verification.triedJWTFallback;
-  const shouldTry = eligible && (!allowTimeoutTrigger || Date.now() - verification.createdAt > 20000);
-  if (!shouldTry) return false;
-
-  console.log(`[ClearanceVerification] SD-JWT attempt for ${verificationId} did not succeed — retrying with legacy JWT format`);
-  try {
-    const MULTITENANCY_URL = process.env.MULTITENANCY_CLOUD_AGENT_URL || 'http://91.99.4.54:8200';
-    const retryResponse = await fetch(`${MULTITENANCY_URL}/present-proof/presentations`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'apikey': verification.companyApiKey },
-      body: JSON.stringify({
-        connectionId: verification.connectionId,
-        proofs: [],
-        options: { challenge: verification.challenge, domain: verification.domain },
-        credentialFormat: 'JWT'
-      })
-    });
-    if (!retryResponse.ok) return false;
-    const retryData = await retryResponse.json();
-    verification.presentationId = retryData.presentationId || retryData.id;
-    verification.format = 'JWT';
-    verification.triedJWTFallback = true;
-    return true;
-  } catch (e) {
-    console.warn(`[ClearanceVerification] JWT fallback retry failed: ${e.message}`);
-    return false;
-  }
-}
 
 app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, async (req, res) => {
   try {
@@ -9365,9 +9282,8 @@ app.post('/api/employee-portal/clearance/initiate', requireEmployeeSession, asyn
           // and may present the wrong one (e.g. RealPersonIdentity).
           domain: clearanceDomain
         },
-        // Prefer SD-JWT (the CA's new v6.0.0 clearance schema) — a wallet holding only a legacy
-        // JWT (v4.0.0) clearance credential falls back once this terminally fails, in
-        // GET /clearance/status below. Declaring this up front matters, not just as an
+        // SD-JWT only (the CA's v6.0.0 clearance schema). The legacy JWT (v4.0.0) fallback was
+        // removed (04-05 UAT G-04-4, 2026-09-28); holders of old clearances need a new one from the CA. Declaring this up front matters, not just as an
         // optimization: an implicitly-JWT-format request against an SD-JWT presentation hits the
         // Cloud Agent's confirmed-live JwtLengthException failure mode (see
         // certification-authority/server.js's comment on this exact bug) instead of the
@@ -9568,29 +9484,9 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
 
       // Parse the credential data from the presentation (legacy JWT-VP shape)
       // Cloud Agent returns data[] as array of VP JWT strings
-      // Legacy JWT-VP shape (04-05 security review §24, 2026-09-27). Previously decode-only: the VP
-      // and VC payloads were JSON-parsed without any signature check and `iss` was trusted as-is,
-      // and a bare object carrying `claims.clearanceLevel` was accepted outright - reachable on
-      // demand via maybeRetryClearanceWithJWT's fallback, and while the Cloud Agent still reports
-      // PresentationReceived (before its own verification). Now verified the same way
-      // verifyAndExtractRealPersonClaims's JWT-VP branch is (see verifyLegacyClearanceVp); the
-      // unverifiable object shapes are no longer accepted at all.
-      if (clearanceLevel === 'UNKNOWN' && presentationData.data && presentationData.data.length > 0) {
-        for (const item of presentationData.data) {
-          if (typeof item !== 'string' || isSDJWT(item)) continue;
-          try {
-            const verified = await verifyLegacyClearanceVp(item, verification.challenge);
-            if (verified) {
-              clearanceLevel = verified.clearanceLevel;
-              if (verified.subjectDID && !caPersonalDID) caPersonalDID = verified.subjectDID;
-              console.log('[ClearanceVerification] ✅ Verified legacy JWT clearanceLevel:', clearanceLevel);
-              break;
-            }
-          } catch (e) {
-            console.warn(`[ClearanceVerification] Legacy JWT-VP rejected: ${e.message}`);
-          }
-        }
-      }
+      // 04-05 UAT G-04-4 (2026-09-28): only SD-JWT SecurityClearance presentations (verified above) are
+      // accepted. The legacy JWT fallback - decode-only before §24, then signature-checked but untestable
+      // because the CA no longer issues that format - was removed at the maintainer's decision.
 
       // The wallet may have presented a credential other than SecurityClearance (e.g. the
       // request wasn't scoped tightly enough, or the user picked the wrong VC) — 'UNKNOWN' is
@@ -9720,24 +9616,7 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
         verifiedAt: verification.verifiedAt
       });
     } else if (presentationData.status === 'PresentationRejected' || presentationData.status === 'RequestRejected') {
-      // A wallet holding ONLY a legacy JWT (v4.0.0) clearance credential can't satisfy an
-      // SD-JWT-format request at all — the SDK throws "Invalid presentation proof arguments"
-      // client-side when asked to present a plain-JWT credential in SD-JWT format, and the wallet
-      // then explicitly declines rather than the Cloud Agent ever reporting
-      // PresentationVerificationFailed (confirmed live via wallet debug logs, 2026-08-29). This
-      // lands here, in the decline branch, not the generic "still pending" one below — so the
-      // JWT-fallback retry must be tried here too, or every JWT-only holder would see an
-      // immediate false "declined" with no fallback ever attempted.
-      if (await maybeRetryClearanceWithJWT(verification, verificationId)) {
-        return res.json({
-          success: true,
-          verificationId,
-          status: 'pending',
-          clearanceLevel: null,
-          verifiedAt: null,
-          message: 'Retrying with legacy credential format...'
-        });
-      }
+      // 04-05 UAT G-04-4 (2026-09-28): no legacy-JWT retry - a decline is final.
       verification.status = 'declined';
       return res.json({
         success: true,
@@ -9748,12 +9627,7 @@ app.get('/api/employee-portal/clearance/status/:verificationId', requireEmployee
         message: 'User declined the proof request'
       });
     } else {
-      // Still pending (RequestSent, PresentationVerificationFailed, etc.). A 20s+ timeout also
-      // triggers the JWT fallback: SD-JWT parks at PresentationReceived forever rather than
-      // reaching a terminal state, so a wallet with no SD-JWT clearance that doesn't explicitly
-      // decline (e.g. auto-response disabled) may never produce ANY data either.
-      await maybeRetryClearanceWithJWT(verification, verificationId, { allowTimeoutTrigger: true });
-
+      // Still pending (RequestSent, PresentationVerificationFailed, etc.).
       return res.json({
         success: true,
         verificationId,
