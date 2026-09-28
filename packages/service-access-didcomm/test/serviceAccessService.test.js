@@ -126,9 +126,12 @@ async function run() {
         res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');
         return;
       }
-      if (req.method === 'POST' && /\/connections\/.+\/basic-messages/.test(url)) {
-        const connectionId = url.split('/')[2];
-        sentMessages.push({ connectionId, content: JSON.parse(body).content });
+      if (req.method === 'POST' && url === '/basicmessage/send') {
+        // Real Cloud Agent endpoint (see ServiceAccessService.js's _send comment) — this mock
+        // previously matched /connections/{id}/basic-messages, a convention that never existed
+        // on the real Cloud Agent and 404'd every grant/error this library ever sent live.
+        const { connectionId, content } = JSON.parse(body);
+        sentMessages.push({ connectionId, content });
         res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');
         return;
       }

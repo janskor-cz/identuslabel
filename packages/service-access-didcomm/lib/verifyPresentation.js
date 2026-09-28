@@ -34,8 +34,10 @@
  * package to skip holder-binding once `rawVpJwt` is available — it is not optional in that case.
  */
 
-const { decodeJWT, verifyES256KSignature } = require('./jwtCrypto');
+const crypto = require('crypto');
+const { decodeJWT, verifyES256KSignature, b64urlToBuffer } = require('./jwtCrypto');
 const { prismDidsMatch } = require('./didCompare');
+const { splitSDJWT, decodeSDJWTPart, verifyEdDSASignature, resolveVerifiedDisclosures } = require('./sdJwtCrypto');
 
 /**
  * @param {{ verifiableCredential: string[], rawVpJwt?: string }} vp
@@ -114,6 +116,14 @@ async function verifyPresentationCredentials(vp, resolveIssuerDID) {
       return { success: false, error: 'INVALID_VC_SIGNATURE', message: `Credential at index ${i} failed signature verification` };
     }
 
+    // `exp` is a registered top-level JWT claim, not a `credentialSubject` field — it is never
+    // behind selective disclosure, so this applies regardless of which (if any) subject claims
+    // the holder chose to reveal. Missing `exp` means the issuer set no expiration, not "expired"
+    // — only reject when the field is present AND has passed.
+    if (typeof payload.exp === 'number' && Date.now() >= payload.exp * 1000) {
+      return { success: false, error: 'CREDENTIAL_EXPIRED', message: `Credential at index ${i} expired at ${new Date(payload.exp * 1000).toISOString()}` };
+    }
+
     const subjectDID = payload.sub || claims.id || null;
 
     // The presenter must BE the credential's own subject — otherwise a copied/stolen VC-JWT
@@ -143,4 +153,105 @@ async function verifyPresentationCredentials(vp, resolveIssuerDID) {
   return { success: true, credentials, holderDID, holderBindingChecked };
 }
 
-module.exports = { verifyPresentationCredentials };
+/**
+ * SD-JWT counterpart to verifyPresentationCredentials. One SD-JWT compact string IS both the
+ * credential and (with a Key-Binding JWT appended) the presentation — there is no separate outer
+ * VP-JWT to unwrap the way there is for a JWT-VP, so this has its own holder-binding mechanism:
+ * a KB-JWT signed by the credential subject's own `cnf.jwk` (embedded directly in the credential
+ * at issuance — no DID resolution needed for this signature, unlike the issuer signature check).
+ *
+ * Same fail-closed posture as the JWT-VP path's `!vp.rawVpJwt` case, but enforced HERE rather
+ * than left to the caller: a missing KB-JWT means holder binding cannot be proven at all for this
+ * format (there is nothing else that could carry it), so `success: false, HOLDER_BINDING_FAILED`
+ * is returned rather than a soft warning — ServiceAccessService.js is this function's only
+ * caller today and already requires holder binding unconditionally for the JWT-VP path; this
+ * keeps that requirement equally strict for SD-JWT rather than accidentally weakening it because
+ * SD-JWT's binding mechanism happens to live at a different layer.
+ *
+ * @param {{ compact: string, expectedNonce?: string, expectedAud?: string }} vp
+ * @param {(did: string) => Promise<object>} resolveIssuerDID
+ * @returns {Promise<
+ *   { success: true, credentials: Array<{ issuerDID: string, claims: object, payload: object, subjectDID: string|null, credentialStatus: null }>,
+ *     holderDID: string|null, holderBindingChecked: true }
+ *   | { success: false, error: string, message: string }
+ * >}
+ */
+async function verifySDJWTPresentationCredentials(vp, resolveIssuerDID) {
+  if (!vp || typeof vp.compact !== 'string') {
+    return { success: false, error: 'NoVP', message: 'No SD-JWT presentation provided' };
+  }
+
+  const { jwtPart, disclosures, kbJwt } = splitSDJWT(vp.compact);
+  const decoded = decodeSDJWTPart(jwtPart);
+  if (!decoded) {
+    return { success: false, error: 'MALFORMED_CREDENTIAL', message: 'SD-JWT header.payload.signature part is malformed' };
+  }
+
+  const issuerDID = decoded.payload.iss;
+  const sigValid = await verifyEdDSASignature(decoded, issuerDID, resolveIssuerDID);
+  if (!sigValid) {
+    return { success: false, error: 'INVALID_VC_SIGNATURE', message: 'SD-JWT issuer signature verification failed' };
+  }
+
+  // Same as the JWT-VP path's check: `exp` is a top-level signed claim, always visible regardless
+  // of which fields were selectively disclosed. Missing `exp` means no expiration was set.
+  if (typeof decoded.payload.exp === 'number' && Date.now() >= decoded.payload.exp * 1000) {
+    return { success: false, error: 'CREDENTIAL_EXPIRED', message: `SD-JWT credential expired at ${new Date(decoded.payload.exp * 1000).toISOString()}` };
+  }
+
+  let claims;
+  try {
+    claims = resolveVerifiedDisclosures(decoded.payload, disclosures);
+  } catch (err) {
+    return { success: false, error: 'UNSUPPORTED_DIGEST_ALG', message: err.message };
+  }
+
+  const subjectDID = decoded.payload.sub || null;
+
+  // ── Holder binding (Key-Binding JWT) ────────────────────────────────────────
+  if (!kbJwt) {
+    console.warn(`[verifyPresentation] SD-JWT presentation from issuer=${issuerDID} has no Key-Binding JWT — cannot prove the presenter is this credential's rightful subject. Rejecting (fail closed), same posture as the missing-rawVpJwt case for JWT-VP.`);
+    return { success: false, error: 'HOLDER_BINDING_FAILED', message: 'SD-JWT presentation has no Key-Binding JWT — holder binding cannot be verified.' };
+  }
+
+  const cnfJwk = decoded.payload.cnf?.jwk;
+  if (!cnfJwk) {
+    return { success: false, error: 'HOLDER_BINDING_FAILED', message: 'Credential has no cnf.jwk — cannot verify Key-Binding JWT against it.' };
+  }
+
+  const kbDecoded = decodeSDJWTPart(kbJwt); // KB-JWT is itself header.payload.signature — same shape
+  if (!kbDecoded) {
+    return { success: false, error: 'HOLDER_BINDING_FAILED', message: 'Key-Binding JWT is malformed.' };
+  }
+  if (kbDecoded.header.alg !== 'EdDSA' || kbDecoded.header.typ !== 'kb+jwt') {
+    return { success: false, error: 'HOLDER_BINDING_FAILED', message: `Key-Binding JWT has unexpected header (alg=${kbDecoded.header.alg}, typ=${kbDecoded.header.typ}).` };
+  }
+  if (vp.expectedNonce && kbDecoded.payload.nonce !== vp.expectedNonce) {
+    return { success: false, error: 'CHALLENGE_MISMATCH', message: 'Key-Binding JWT nonce does not match the request challenge.' };
+  }
+  if (vp.expectedAud && kbDecoded.payload.aud !== vp.expectedAud) {
+    return { success: false, error: 'HOLDER_BINDING_FAILED', message: 'Key-Binding JWT aud does not match this verifier.' };
+  }
+
+  let kbSigValid = false;
+  try {
+    const pubKey = crypto.createPublicKey({ key: cnfJwk, format: 'jwk' });
+    kbSigValid = crypto.verify(null, kbDecoded.signingInput, pubKey, kbDecoded.signature);
+  } catch (err) {
+    console.error(`[verifyPresentation] Key-Binding JWT signature check threw: ${err.message}`);
+  }
+  if (!kbSigValid) {
+    return { success: false, error: 'HOLDER_BINDING_FAILED', message: 'Key-Binding JWT signature verification failed against the credential\'s cnf.jwk.' };
+  }
+
+  const holderDID = subjectDID; // SD-JWT VCs bind the holder via cnf.jwk, not a separate holder DID iss
+
+  return {
+    success: true,
+    credentials: [{ issuerDID, claims, payload: decoded.payload, subjectDID, credentialStatus: null }],
+    holderDID,
+    holderBindingChecked: true
+  };
+}
+
+module.exports = { verifyPresentationCredentials, verifySDJWTPresentationCredentials };

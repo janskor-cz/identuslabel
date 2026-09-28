@@ -31,7 +31,8 @@ class CapabilityError extends Error {
   }
 }
 
-const { verifyPresentationCredentials } = require('./verifyPresentation');
+const { verifyPresentationCredentials, verifySDJWTPresentationCredentials } = require('./verifyPresentation');
+const { isSDJWT } = require('./sdJwtCrypto');
 const { extractClaims, classifyCredential, DEFAULT_CLAIM_RULES } = require('./ClaimExtractor');
 
 const PROTOCOL_PREFIX = 'https://identuslabel.cz/protocols/service-access/1.0';
@@ -66,10 +67,35 @@ function normalizePollingVp(presentationData) {
   try {
     const dataArr = presentationData.data;
     if (Array.isArray(dataArr) && typeof dataArr[0] === 'string') {
-      const vpParts = dataArr[0].split('.');
+      const raw = dataArr[0];
+
+      // SD-JWT format: the Cloud Agent's own extraction (the `vpParts.length === 3` unwrap
+      // below) only recovers a bare outer VP-JWT for the classic JWT-VP shape — for an SD-JWT
+      // presentation there is no such outer VP-JWT, so `data[0]` instead comes through as the
+      // raw `dif/presentation-exchange/submission@v1.0` attachment JSON text unmodified
+      // (confirmed live: `{"presentation_submission":{...},"verifiablePresentation":["<sd-jwt>"]}`).
+      // MUST try the JSON-wrapper unwrap FIRST: `raw` (the outer JSON text) itself also contains
+      // `~` characters (they're part of the SD-JWT compact string nested inside as a JSON string
+      // value), so `isSDJWT(raw)` is true for the *wrapper* too — checking it first previously
+      // caused `rawVpJwt` to be set to the whole wrapper JSON instead of the actual SD-JWT compact
+      // string, which verifySDJWTPresentationCredentials then rejected as MALFORMED_CREDENTIAL
+      // (confirmed live). Only fall back to treating `raw` itself as the bare SD-JWT compact
+      // string if it isn't JSON at all.
+      try {
+        const wrapper = JSON.parse(raw);
+        const inner = wrapper?.verifiablePresentation?.[0];
+        if (typeof inner === 'string' && isSDJWT(inner)) {
+          return { verifiableCredential: [], rawVpJwt: inner, isSDJWT: true };
+        }
+      } catch (_) { /* not JSON */ }
+      if (isSDJWT(raw)) {
+        return { verifiableCredential: [], rawVpJwt: raw, isSDJWT: true };
+      }
+
+      const vpParts = raw.split('.');
       if (vpParts.length === 3) {
         const vpPayload = JSON.parse(b64urlDecode(vpParts[1]));
-        return { verifiableCredential: vpPayload?.vp?.verifiableCredential ?? [], rawVpJwt: dataArr[0] };
+        return { verifiableCredential: vpPayload?.vp?.verifiableCredential ?? [], rawVpJwt: raw };
       }
     }
   } catch (_) { /* fall through */ }
@@ -290,6 +316,38 @@ class ServiceAccessService {
   }
 
   /**
+   * `{key, label, icon}` for every capability this service is configured with — for a service to
+   * embed as `body.capabilities` in the OOB invitations it creates, so a wallet can discover what
+   * it can request from THIS PARTICULAR CONNECTION directly out of the invitation, instead of
+   * needing hardcoded, per-service recognition logic (the CA/company-name-matching special cases
+   * `idl-wallet-v2/src/utils/connectionAccessTargets.ts` carries today). Generated from this
+   * service's own `capabilities` config, so it can never drift out of sync with what the service
+   * actually offers.
+   *
+   * 🔒 Self-declared by the inviter, not signed or independently verified — a wallet reading this
+   * must treat it exactly like today's other "heuristic" evidence: sufficient to decide which
+   * buttons to render, never sufficient on its own to accept the eventual grant (see
+   * PROTOCOL.md's "Trust model" and `isTrustedGrantSender`'s tiers). This only closes the
+   * "nothing to tap" gap, not the grant-acceptance trust decision, which still needs its own
+   * evidence (pinned-endpoint fetch, live-verified challenge, or a trusted-issuer VC).
+   *
+   * @param {string[]} [keys]  restrict to these capability keys (in the given order), for a
+   *   service that defines several requirement PROFILES under different capability keys (e.g.
+   *   link-gateway-service's 'link-access' vs 'link-access-verified') and wants a given
+   *   connection's invitation to advertise only the one profile that connection actually uses —
+   *   rather than every profile the whole service supports. Omit to advertise everything (the
+   *   original, whole-service behavior).
+   */
+  advertisedCapabilities(keys) {
+    const entries = keys
+      ? keys.filter(k => this.cfg.capabilities[k]).map(k => [k, this.cfg.capabilities[k]])
+      : Object.entries(this.cfg.capabilities);
+    return entries.map(([key, c]) => ({
+      key, label: c.label, icon: c.icon || '🔐'
+    }));
+  }
+
+  /**
    * Consume the pending grant/error for a given request id (one-time, deletes on read).
    * For consumers that can't observe an incoming DIDComm message directly (see the
    * `_pendingResults` note in the constructor) and must instead poll an HTTP endpoint keyed by
@@ -414,7 +472,17 @@ class ServiceAccessService {
     const proofPayload = {
       connectionId, proofs,
       options: { challenge, domain },
-      credentialFormat: 'JWT',
+      // Per-capability, not a fixed literal: RealPerson-backed capabilities ('portal'/'login')
+      // moved to SD-JWT-exclusive issuance on 2026-08-07 (certification-authority/server.js's
+      // credential-issuance/1.0 'realperson' capability, and vcValidation.ts's
+      // TRUSTED_REALPERSON_SCHEMA_ID comment on that switch) - a hardcoded 'JWT' here meant the
+      // Cloud Agent demanded a presentation format no wallet could supply anymore, so every
+      // attempt failed PresentationVerificationFailed regardless of which schemaId candidate was
+      // tried (confirmed live: 4-for-4 failure even against the correct v5.0.0 schemaId, logged
+      // misleadingly as "schema mismatch" since _retryOrReject can't distinguish the two causes).
+      // SecurityClearance is unaffected - still issued as plain JWT - so this only changes
+      // behavior for capabilities that explicitly opt in via proofSpec.credentialFormat.
+      credentialFormat: capability.proofSpec.credentialFormat || 'JWT',
       goalCode: capability.proofSpec.goalCode,
       goal:     capability.proofSpec.goal,
       claims:   capability.proofSpec.claims
@@ -498,11 +566,39 @@ class ServiceAccessService {
         const data  = await resp.json();
         const state = data.state || data.status;
 
-        if (state === 'PresentationVerified') {
+        // The Cloud Agent's own PresentationVerified/PresentationVerificationFailed verdict
+        // cannot be trusted for an SD-JWT-format request: its present-proof verification handler
+        // routes every presentation through a JWT-only code path regardless of the request's
+        // declared credentialFormat (confirmed live: the Cloud Agent's own log names the handler
+        // "o.h.i.a.s.j.P.V.P.handleJWT" even when credentialFormat: 'SDJWT' was requested), so it
+        // reports PresentationVerificationFailed for every structurally-valid SD-JWT presentation
+        // — which _retryOrReject would otherwise (mis)treat as a schema mismatch and burn through
+        // every schemaIdFallbacks candidate before giving up, none of which could ever succeed.
+        // The presentation record still carries the raw presentation data regardless of the
+        // Cloud Agent's own verdict (confirmed live), so for SD-JWT capabilities this verifies
+        // the presentation itself via sdJwtCrypto.js/verifyPresentation.js's own independent,
+        // cryptographically real check instead of trusting that verdict at all.
+        const vp = normalizePollingVp(data);
+        const capFormat = pending.capability.proofSpec.credentialFormat;
+        // For an SD-JWT-format request, the Cloud Agent's own state field cannot be trusted at
+        // all — not just its PresentationVerified/Failed verdict (its present-proof verification
+        // handler is JWT-only regardless of declared credentialFormat — confirmed live via the
+        // handler class name "o.h.i.a.s.j.P.V.P.handleJWT" in its own logs), but its *lifecycle*
+        // too: a `credentialFormat: 'SDJWT'` request has no `presentation_definition` body at all
+        // (confirmed live), so the Cloud Agent never even attempts to move it past
+        // "PresentationReceived" — it just parks there forever, never reaching
+        // PresentationVerified OR any TERMINAL_REJECTED_STATES entry. Waiting on `state` here
+        // would mean waiting on a transition that never happens. Instead, for an SD-JWT capability
+        // this proceeds the moment the presentation record actually carries real SD-JWT data
+        // (`vp.isSDJWT`), independent of whatever `state` string is attached to it, and verifies
+        // it itself via sdJwtCrypto.js/verifyPresentation.js's own cryptographically real check.
+        const sdjwtDataReady = capFormat === 'SDJWT' && vp.isSDJWT;
+
+        if (state === 'PresentationVerified' || sdjwtDataReady) {
           clearInterval(timerId);
           this._pending.delete(proofId);
           pending.vpNonce = _extractVpNonce(data);
-          await this._onProofVerified(pending, normalizePollingVp(data), {
+          await this._onProofVerified(pending, vp, {
             acceptPresentation: () => fetch(`${this.cfg.cloudAgentUrl}/present-proof/presentations/${proofId}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json', apikey: this.cfg.apiKey },
@@ -510,6 +606,19 @@ class ServiceAccessService {
             })
           });
         } else if (TERMINAL_REJECTED_STATES.has(state)) {
+          // Observed live: for an SD-JWT-format request the Cloud Agent's own verdict can flip
+          // to PresentationVerificationFailed on the very next poll after the wallet's presentation
+          // is sent, while `data` (the actual presentation payload normalizePollingVp needs to
+          // detect isSDJWT) is still empty — a manual re-fetch of the same presentationId a few
+          // seconds later shows `data` fully populated. Without this grace window, every SD-JWT
+          // attempt loses the sdjwtDataReady race and gets treated as a genuine schema mismatch,
+          // burning through schemaIdFallbacks for a capability that was never actually about
+          // schema — same failure mode the sdjwtDataReady bypass above exists to prevent.
+          const dataStillEmpty = !vp.isSDJWT && !vp.rawVpJwt && (vp.verifiableCredential?.length ?? 0) === 0;
+          if (capFormat === 'SDJWT' && dataStillEmpty) {
+            pending._sdjwtDataGraceTicks = (pending._sdjwtDataGraceTicks || 0) + 1;
+            if (pending._sdjwtDataGraceTicks <= 5) return; // keep polling — give `data` time to arrive
+          }
           clearInterval(timerId);
           this._pending.delete(proofId);
           await this._retryOrReject(pending, proofId, state);
@@ -552,14 +661,31 @@ class ServiceAccessService {
     // gap for, so — unlike verifyPresentationCredentials itself, which tolerates a missing
     // rawVpJwt for other callers that already do this check their own way — a missing rawVpJwt
     // HERE is fail-closed, not silently skipped. There is no config flag to bypass this.
-    if (!vp.rawVpJwt) {
+    // (Skipped for the SD-JWT branch below — `vp.isSDJWT` presentations use `verifySDJWTPresentationCredentials`,
+    // which enforces its own equally-strict holder-binding gate via the Key-Binding JWT.)
+    if (!vp.isSDJWT && !vp.rawVpJwt) {
       console.error(`[ServiceAccessService] Could not recover the outer VP JWT for requestId=${requestId} (capability="${capabilityKey}") — rejecting fail-closed, holder binding cannot be verified`);
       await this._sendError(connectionId, requestId, 'HOLDER_BINDING_FAILED',
         'Could not verify presentation holder binding.');
       return;
     }
 
-    const vpResult = await verifyPresentationCredentials(vp, this.cfg.resolveIssuerDID);
+    // SD-JWT presentations verify differently end to end (one compact string is both credential
+    // and presentation, holder-bound via a Key-Binding JWT rather than an outer VP-JWT) — see
+    // verifySDJWTPresentationCredentials's own header comment for why this is a separate
+    // function rather than a branch inside verifyPresentationCredentials.
+    // `aud` must match `pending.domain`, NOT `this.cfg.publicBaseUrl` — a wallet builds its
+    // Key-Binding JWT purely from what the present-proof request itself transmits
+    // (`options.domain`, per the SD-JWT KB-JWT convention both this port's Kotlin wallet and the
+    // stock TS SDK's own sdjwt/PresentationRequest.ts plugin follow: `aud: domain`), and
+    // `publicBaseUrl` is never sent to the wallet at all — no correctly-implemented wallet could
+    // ever satisfy that check, it would fail every real KB-JWT unconditionally.
+    const vpResult = vp.isSDJWT
+      ? await verifySDJWTPresentationCredentials(
+          { compact: vp.rawVpJwt, expectedNonce: pending.challenge, expectedAud: pending.domain },
+          this.cfg.resolveIssuerDID,
+        )
+      : await verifyPresentationCredentials(vp, this.cfg.resolveIssuerDID);
     if (!vpResult.success) {
       console.warn(`[ServiceAccessService] VP verification failed (${vpResult.error}): ${vpResult.message}`);
       await this._sendError(connectionId, requestId, vpResult.error, vpResult.message);
@@ -572,7 +698,20 @@ class ServiceAccessService {
     // Agent's presentation request enforced upstream (defense in depth, not a replacement).
     const rules = capability.claimRules || DEFAULT_CLAIM_RULES;
     if (capability.trustedIssuerVcType) {
-      const matched = vpResult.credentials.find(c => classifyCredential(c.claims, rules)?.vcType === capability.trustedIssuerVcType);
+      // Default: only a credential that CLASSIFIES as this vcType (i.e. its disclosed claims
+      // match claimRules) is eligible — correct when the capability actually consumes those
+      // claims downstream (extractClaims below, or buildResult). A capability that only needs
+      // "a credential from this trusted issuer, however little was disclosed" — e.g.
+      // link-gateway-service's link-access, which only needs to know the holder is a real,
+      // CA-vouched person and never reads their name/ID — can opt in via
+      // `trustByIssuerOnly: true`: issuer identity is itself sufficient proof of vcType here,
+      // since a trust-registry entry is already scoped to one issuer DID -> one vcType, and the
+      // issuer (`iss`) is a signed, always-visible JWT claim regardless of what the holder chose
+      // to selectively disclose. Opt-in only — CA's and company-admin-portal's existing
+      // capabilities are unaffected.
+      const matched = capability.trustByIssuerOnly
+        ? vpResult.credentials.find(c => this.cfg.trustRegistry.isTrustedIssuer(c.issuerDID, capability.trustedIssuerVcType))
+        : vpResult.credentials.find(c => classifyCredential(c.claims, rules)?.vcType === capability.trustedIssuerVcType);
       if (!matched || !this.cfg.trustRegistry.isTrustedIssuer(matched.issuerDID, capability.trustedIssuerVcType)) {
         console.error(`[ServiceAccessService] Untrusted issuer for capability "${capabilityKey}": ${matched?.issuerDID}`);
         await this._sendError(connectionId, requestId, 'UNTRUSTED_ISSUER',
@@ -647,14 +786,53 @@ class ServiceAccessService {
     })).catch(() => {});
   }
 
+  /**
+   * Different Cloud Agent deployments in this repo expose different shapes for sending a
+   * BasicMessage — confirmed live against both: the agent certification-authority/server.js uses
+   * (port 8000) only accepts `POST /basicmessage/send` with `{connectionId, content}` in the
+   * body (`/connections/{id}/basic-messages` 404s there); the multitenancy agent (port 8200) that
+   * company-admin-portal and link-gateway-service use is the reverse — only
+   * `POST /connections/{id}/basic-messages` with `{content}` works, and `/basicmessage/send`
+   * 404s. Neither shape is universally correct, so this probes once per `cloudAgentUrl` and
+   * caches which one this deployment's agent actually accepts, instead of assuming either one.
+   */
+  static _sendShapeCache = new Map(); // cloudAgentUrl → 'new' | 'old'
+
+  async _sendViaShape(shape, connectionId, text) {
+    return shape === 'new'
+      ? fetch(`${this.cfg.cloudAgentUrl}/basicmessage/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: this.cfg.apiKey },
+          body: JSON.stringify({ connectionId, content: text })
+        })
+      : fetch(`${this.cfg.cloudAgentUrl}/connections/${connectionId}/basic-messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: this.cfg.apiKey },
+          body: JSON.stringify({ content: text })
+        });
+  }
+
   async _send(connectionId, text) {
     try {
-      const resp = await fetch(`${this.cfg.cloudAgentUrl}/connections/${connectionId}/basic-messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', apikey: this.cfg.apiKey },
-        body: JSON.stringify({ content: text })
-      });
-      if (!resp.ok) console.error(`[ServiceAccessService] _send failed (${resp.status}) to conn ${connectionId.slice(0, 12)}...`);
+      const cached = ServiceAccessService._sendShapeCache.get(this.cfg.cloudAgentUrl);
+      const firstShape = cached ?? 'new';
+      let resp = await this._sendViaShape(firstShape, connectionId, text);
+
+      if (resp.status === 404 && !cached) {
+        // Unknown agent, first shape guessed wrong — try the other one before giving up.
+        const fallbackShape = firstShape === 'new' ? 'old' : 'new';
+        resp = await this._sendViaShape(fallbackShape, connectionId, text);
+        if (resp.ok) {
+          ServiceAccessService._sendShapeCache.set(this.cfg.cloudAgentUrl, fallbackShape);
+        }
+      } else if (resp.ok && !cached) {
+        ServiceAccessService._sendShapeCache.set(this.cfg.cloudAgentUrl, firstShape);
+      }
+
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        console.error(`[ServiceAccessService] _send failed (${resp.status}) to conn ${connectionId.slice(0, 12)}...: ${errBody.slice(0, 500)}`);
+      }
     } catch (e) {
       console.error('[ServiceAccessService] _send error:', e.message);
     }

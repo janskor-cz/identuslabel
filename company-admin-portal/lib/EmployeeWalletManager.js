@@ -18,6 +18,7 @@
 
 const fetch = require('node-fetch');
 const { COMPANIES } = require('./companies');
+const { verifySDJWTPresentationCredentials, isSDJWT, createIssuerResolver } = require('service-access-didcomm');
 
 // Throws at require-time if a required secret is missing — no silent fallback to committed values.
 function requireEnv(name) {
@@ -35,6 +36,8 @@ const TECHCORP_CLOUD_AGENT_URL = process.env.TECHCORP_CLOUD_AGENT_URL || 'http:/
 const TECHCORP_API_KEY    = requireEnv('TECHCORP_API_KEY');
 const TECHCORP_WALLET_ID  = requireEnv('TECHCORP_WALLET_ID');
 const TECHCORP_PRISM_DID  = process.env.TECHCORP_PRISM_DID || 'did:prism:6ee757c2913a76aa4eb2f09e9cd3cc40ead73cfaffc7d712c303ee5bc38f21bf';
+
+const techcorpIssuerResolver = createIssuerResolver({ cloudAgentUrl: TECHCORP_CLOUD_AGENT_URL, apiKey: TECHCORP_API_KEY });
 
 // Shared PostgreSQL connection pool (lazy-initialised, reused for the module lifetime).
 let _dbPool = null;
@@ -554,6 +557,7 @@ async function publishPrismDid(longFormDid, apiKey) {
 async function requestRealPersonProof(techCorpConnectionId) {
   const { randomBytes } = require('crypto');
   const challenge = randomBytes(32).toString('hex');
+  const domain = 'identuslabel.cz';
 
   const response = await fetch(`${TECHCORP_CLOUD_AGENT_URL}/present-proof/presentations`, {
     method: 'POST',
@@ -561,10 +565,15 @@ async function requestRealPersonProof(techCorpConnectionId) {
     body: JSON.stringify({
       connectionId: techCorpConnectionId,
       proofs: [],
-      options: { challenge, domain: 'identuslabel.cz' },
+      options: { challenge, domain },
       goalCode: 'present-vp',
       goal: 'Share your RealPersonIdentity credential for employee onboarding',
-      credentialFormat: 'JWT'
+      // RealPerson issuance has been SD-JWT-exclusive since 2026-08-07 (see
+      // certification-authority's vcValidation.ts TRUSTED_REALPERSON_SCHEMA_ID comment).
+      credentialFormat: 'SDJWT',
+      // REQUIRED for credentialFormat: 'SDJWT' — the Cloud Agent's SD-JWT present-proof path
+      // 500s with error:Presentation:MissingSDJWTPresentationRequest without this.
+      claims: { firstName: {}, lastName: {}, uniqueId: {}, dateOfBirth: {}, gender: {} }
     })
   });
 
@@ -573,9 +582,9 @@ async function requestRealPersonProof(techCorpConnectionId) {
   }
 
   const data = await response.json();
-  // Return both presentationId and challenge — caller must pass challenge to
-  // waitForPresentationAndExtract for replay-attack prevention.
-  return { presentationId: data.presentationId || data.thid, challenge };
+  // Return presentationId, challenge and domain — caller must pass challenge+domain to
+  // waitForPresentationAndExtract for replay-attack prevention (nonce/aud binding).
+  return { presentationId: data.presentationId || data.thid, challenge, domain };
 }
 
 /**
@@ -586,7 +595,8 @@ async function waitForPresentationAndExtract(
   presentationId,
   originalChallenge,
   maxAttempts = 150,
-  intervalMs = 2000
+  intervalMs = 2000,
+  originalDomain
 ) {
   console.log(`[EmployeeWalletMgr] Waiting for RealPerson proof (max ${maxAttempts * intervalMs / 1000}s)...`);
 
@@ -604,6 +614,33 @@ async function waitForPresentationAndExtract(
 
     const data = await response.json();
     console.log(`[EmployeeWalletMgr] Proof attempt ${attempt}/${maxAttempts} - State: ${data.status}`);
+
+    // SD-JWT never reaches PresentationVerified — the Cloud Agent's present-proof verifier is
+    // JWT-only regardless of declared credentialFormat (see requestRealPersonProof's comment and
+    // packages/service-access-didcomm/lib/ServiceAccessService.js's header comment on this exact,
+    // confirmed-live behavior) — it parks at PresentationReceived forever. Checked independently
+    // and cryptographically here (signature + Key-Binding-JWT holder binding) rather than trusting
+    // that parked state alone, so this branch can safely run before the JWT branch's stricter
+    // PresentationVerified-only check below.
+    const dataArr = Array.isArray(data.data) ? data.data : (data.data ? [data.data] : []);
+    for (const item of dataArr) {
+      if (typeof item !== 'string' || !isSDJWT(item)) continue;
+      const sdResult = await verifySDJWTPresentationCredentials(
+        { compact: item, expectedNonce: originalChallenge, expectedAud: originalDomain },
+        techcorpIssuerResolver
+      );
+      if (!sdResult.success) {
+        console.warn(`[EmployeeWalletMgr] SD-JWT verification failed: ${sdResult.error} — ${sdResult.message}`);
+        continue;
+      }
+      const cred = sdResult.credentials.find(c => c.claims?.credentialType === 'RealPersonIdentity');
+      if (!cred) continue;
+      return {
+        uniqueId: cred.claims.uniqueId || null,
+        lastName: cred.claims.lastName || null,
+        photo: cred.claims.photo || null
+      };
+    }
 
     // Only trust PresentationVerified — Cloud Agent has already verified the VP signature.
     // PresentationReceived means signature not yet checked; do not extract claims from it.

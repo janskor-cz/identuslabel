@@ -27,6 +27,42 @@ Piuris are namespaced under `https://identuslabel.cz/protocols/service-access/1.
 application-specific piuri under an owned domain is the normal DIDComm convention for a protocol
 with no corresponding global spec.
 
+## Capability discovery (OOB invitation → holder)
+
+A service SHOULD advertise the capabilities reachable over a connection by embedding them in the
+`body` of the out-of-band invitation used to establish it:
+
+```json
+{
+  "type": "https://didcomm.org/out-of-band/2.0/invitation",
+  "from": "did:peer:...",
+  "body": {
+    "goal_code": "...", "goal": "...", "accept": [],
+    "capabilities": [
+      { "key": "link-access", "label": "Open Link", "icon": "🔗" }
+    ]
+  }
+}
+```
+
+`ServiceAccessService.advertisedCapabilities()` generates this array straight from the service's
+own `capabilities` config, so a service embeds it with one line
+(`invitation.body.capabilities = didCommService.advertisedCapabilities()`) and it can never drift
+out of sync with what the service actually offers.
+
+This exists so a holder can populate "what can I request here?" (e.g. a wallet's Request Access
+menu) generically, directly from the invitation, instead of needing hardcoded per-service
+recognition logic (name-matching a specific service, or a service-specific `goal_code` check) —
+the gap that otherwise makes new services need wallet code changes just to appear in that menu.
+
+🔒 **This is discovery only, not trust.** `body` is not covered by any signature in this
+invitation shape — a holder MUST treat a declared capability exactly like today's "heuristic"
+evidence tier (see "Trust model" below): sufficient to decide which buttons/menu entries to
+render, **never** sufficient on its own to accept the `.../grant` this capability eventually
+produces. Accepting a grant still requires independent evidence about the sender (a pinned-HTTPS
+fetch, a live-verified challenge, or a trusted-issuer VC) exactly as before — this section changes
+nothing about that decision.
+
 ## Message shapes
 
 ### `.../request` (holder → service)
@@ -120,6 +156,7 @@ implements the service side of this.
 | `PROOF_TIMEOUT` | No verified presentation arrived within the polling timeout. |
 | `UNTRUSTED_ISSUER` | The presented credential's issuer signature verified, but that issuer is not on this capability's trust registry. |
 | `HOLDER_BINDING_FAILED` | Protocol-level (not capability-specific): either the outer VP-JWT's own signature did not verify against its `iss` DID's `authentication` key, or a contained credential's subject DID does not match that `iss` DID. Means the presenter could not be proven to be the credential's rightful holder — e.g. a copied/stolen VC-JWT replayed by a different DID. See "Trust model" below. |
+| `CREDENTIAL_EXPIRED` | The presented credential's `exp` (a signed, always-visible JWT claim — never behind selective disclosure) has passed. Checked independently of which subject claims were disclosed. |
 | `CHALLENGE_MISMATCH` / `STALE_REQUEST` | Anti-replay: the presentation's bound nonce didn't match the request's challenge, or the request itself was too old. |
 
 ## State machine
@@ -153,6 +190,19 @@ Symmetrically, a service must only grant a capability after independently verify
 presented VC's cryptographic signature against the issuer's resolved DID document and checking
 that issuer DID against its own capability-scoped trust registry — Cloud Agent's internal
 presentation-verified state is necessary but not sufficient on its own.
+
+**Trusting a credential by issuer alone, with zero subject-claim disclosure.** By default, a
+capability's `trustedIssuerVcType` is only satisfied by a credential that also *classifies* as
+that vcType — i.e. whose disclosed claims match the shape `ClaimExtractor`'s rules expect (see
+`claimRules` in `ServiceAccessService`'s constructor JSDoc). That's correct when the capability
+actually consumes those claims (a name, a clearance level, ...). Some capabilities never need to —
+they only need to know "a credential from this issuer was presented," full stop (e.g.
+link-gateway-service's `link-access`, which only ever needs to know the holder is a real,
+CA-vouched person, never who they are). Since a trust-registry entry already scopes one issuer DID
+to one vcType, and the issuer (`iss`) is itself a signed, always-visible JWT claim regardless of
+what the holder selectively disclosed, such a capability may set `trustByIssuerOnly: true` to
+trust by issuer identity alone — down to zero disclosed subject claims. This is opt-in per
+capability; it changes nothing for a capability that omits it.
 
 **This is now enforced by the shared library itself, not just documented as an expectation.**
 `verifyPresentationCredentials` (`lib/verifyPresentation.js`), given the outer VP-JWT the
