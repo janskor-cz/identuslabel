@@ -8095,6 +8095,11 @@ app.post('/api/access-gate/present', async (req, res) => {
           const result = await verifier.verify(vcRecord);
           if (!result.valid) throw new ManifestVCInvalid(result.reason);
           const { claims } = result;
+          if (Array.isArray(claims.sections)) {
+            // A sectioned manifest has no whole-document key; refuse clearly (UAT G-04-1) instead of
+            // failing inside unwrapDEK on the absent fields.
+            throw new Error('DocumentKeyUnavailable: sectioned manifest cannot be served as a whole document');
+          }
           const rawDEK = cmk.unwrapDEK(claims, classLevel);
           const fullEncInfo = {
             algorithm: claims.fileAlgorithm || 'AES-256-GCM',
@@ -8124,7 +8129,14 @@ app.post('/api/access-gate/present', async (req, res) => {
       return iagonClient.downloadFile(storage.fileId, storage.encryptionInfo || null);
     }
 
-    const isSectionedDoc = document.contentEncryptionKey === 'sectioned';
+    // Routed by the document's key manifest itself - the authoritative record. DocumentRegistry
+    // deliberately never stores contentEncryptionKey (raw keys stay out of the registry), so the
+    // registry cannot say whether a document is sectioned (UAT G-04-1, 2026-09-28).
+    let isSectionedDoc = false;
+    try {
+      const routingVC = await fetchCurrentManifestVC(documentDID, process.env.DOCUMENT_SERVICE_URL, process.env.DOCUMENT_SERVICE_ADMIN_KEY);
+      isSectionedDoc = Array.isArray(routingVC?.claims?.sections);
+    } catch (_) { /* no manifest -> not sectioned; the flat paths below apply their own checks */ }
     if (isSectionedDoc) {
       // 04-05 §22b: sectioned (Phase 5e Option 1) documents on this server-side-decrypt path. Sections
       // above the requester's clearance are filtered by their tag BEFORE any key unwrap or storage
@@ -11558,6 +11570,11 @@ app.post('/api/employee-portal/documents/prepare-download/:documentDID', require
           const result = await verifier.verify(vcRecord);
           if (!result.valid) throw new ManifestVCInvalid(result.reason);
           const { claims } = result;
+          if (Array.isArray(claims.sections)) {
+            // A sectioned manifest has no whole-document key; refuse clearly (UAT G-04-1) instead of
+            // failing inside unwrapDEK on the absent fields.
+            throw new Error('DocumentKeyUnavailable: sectioned manifest cannot be served as a whole document');
+          }
           const rawDEK = cmk.unwrapDEK(claims, classLevel);
           const fullEncInfo = {
             algorithm: claims.fileAlgorithm || 'AES-256-GCM',
