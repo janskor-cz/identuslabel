@@ -160,6 +160,10 @@ class KeyManifestVCIssuer {
     if (!Array.isArray(sections) || sections.length === 0) {
       throw new Error('[KeyManifestVCIssuer] sections must be a non-empty array');
     }
+    // 04-05 §21: an empty releasableTo disables the releasability check downstream - never issue one.
+    if (!Array.isArray(releasableTo) || releasableTo.length === 0) {
+      throw new Error('[KeyManifestVCIssuer] releasableTo must be a non-empty array for a sectioned manifest');
+    }
     for (const s of sections) {
       if (!s.sectionId) throw new Error('[KeyManifestVCIssuer] each section requires a sectionId');
       if (!s.clearanceLevel) throw new Error(`[KeyManifestVCIssuer] section ${s.sectionId} requires a clearanceLevel`);

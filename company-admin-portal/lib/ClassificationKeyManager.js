@@ -35,7 +35,8 @@ const ENV_VAR_MAP = {
   'TOP-SECRET':     'CMK_TOP_SECRET',
   // aliases
   'UNCLASSIFIED':   'CMK_INTERNAL',  // treat UNCLASSIFIED same as INTERNAL
-  'TOP_SECRET':     'CMK_TOP_SECRET' // underscore variant
+  'TOP_SECRET':     'CMK_TOP_SECRET', // underscore variant
+  'SECRET':         'CMK_TOP_SECRET'  // 04-05 §23b: level 4 (LEVEL_NUMBERS SECRET=4=TOP-SECRET) had no key at all
 };
 
 class ClassificationKeyManager {

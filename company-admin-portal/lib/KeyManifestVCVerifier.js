@@ -221,6 +221,23 @@ class KeyManifestVCVerifier {
       return { valid: false, reason: 'JWT payload missing vc.credentialSubject' };
     }
 
+    // Sectioned manifests (Phase 5e redaction; added here 04-05 §22b - this copy lacked the branch).
+    if (Array.isArray(claims.sections)) {
+      if (claims.sections.length === 0) return { valid: false, reason: 'sections must be a non-empty array' };
+      const sectionRequired = ['sectionId', 'clearanceLevel', 'iagonFileId', 'wrappedKey', 'iv', 'authTag', 'wrappingAlgorithm', 'fileIv', 'fileAuthTag'];
+      for (const section of claims.sections) {
+        const missingInSection = sectionRequired.filter(f => section[f] === undefined || section[f] === null);
+        if (missingInSection.length > 0) {
+          return { valid: false, reason: `Section ${section.sectionId || '(unknown)'} missing required claims: ${missingInSection.join(', ')}` };
+        }
+      }
+      if (!claims.documentDID) return { valid: false, reason: 'Missing required claims: documentDID' };
+      if (!Array.isArray(claims.releasableTo) || claims.releasableTo.length === 0) {
+        return { valid: false, reason: 'Sectioned manifest missing a non-empty releasableTo' }; // 04-05 §21
+      }
+      return { valid: true, claims };
+    }
+
     const required = ['documentDID', 'iagonFileId', 'wrappedKey', 'iv', 'authTag',
                       'wrappingAlgorithm', 'classificationLevel',
                       'fileIv', 'fileAuthTag', 'fileAlgorithm', 'releasableTo'];

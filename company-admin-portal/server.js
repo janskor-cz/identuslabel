@@ -123,9 +123,11 @@ const CA_BASE_URL = process.env.CA_BASE_URL || 'https://identuslabel.cz/ca';
 
 // Department API Keys (for issuing ServiceConfiguration VCs to employees)
 const DEPARTMENT_API_KEYS = {
-  HR: process.env.HR_API_KEY || '2c1c82a0028bda281454b1a3d1b20aab0e3a0879954eb68c467a5d867d12283c',
-  IT: process.env.IT_API_KEY || '63ca7582205fff117077caef24978d157f1c34dc8dbfcd9a3f42769d9ce7af52',
-  Security: process.env.SECURITY_API_KEY || '23ce715f58f9b9055de5502cc31de1910b320707dfbf28f81acec2b641c73288'
+  // 04-05 follow-up (2026-09-28): no hardcoded fallbacks - the former literals were published in a
+  // public repository and have been rotated. Unset -> that department is unconfigured (fails closed).
+  HR: process.env.HR_API_KEY,
+  IT: process.env.IT_API_KEY,
+  Security: process.env.SECURITY_API_KEY
 };
 
 // Soft-delete storage
@@ -3205,6 +3207,7 @@ setInterval(saveAdminInbox, 10_000);
  * Also routes BasicMessageReceived events to adminInbox so admin chat sees employee messages.
  */
 app.post('/api/multitenancy-test-webhook', async (req, res) => {
+  if (!webhookTokenValid(req)) return res.sendStatus(401); // 04-05 §19 follow-up
   res.sendStatus(200);
   const event = req.body;
   if (!event) return;
@@ -3575,8 +3578,11 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
   let wrappedManifest = null;
   if (uploadResult.rawDEK) {
     try {
-      wrappedManifest = cmk.wrapDEK(uploadResult.rawDEK, resolvedClearance);
-      uploadResult.rawDEK.fill(0); // zero raw key from memory (PFS) - same discipline as the HTTP path
+      try {
+        wrappedManifest = cmk.wrapDEK(uploadResult.rawDEK, resolvedClearance);
+      } finally {
+        uploadResult.rawDEK.fill(0); // zero raw key even if wrapping throws (04-05 §23b)
+      }
       const { manifestFileId } = await iagonClient.uploadKeyManifest(wrappedManifest, `doc-${Date.now()}`);
       encryptionManifestId = manifestFileId;
     } catch (manifestErr) {
@@ -3626,29 +3632,9 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
   }
   console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ document DID created: ${didResult.documentDID.substring(0, 60)}...`);
 
-  await DocumentRegistry.registerDocument({
-    documentDID: didResult.documentDID,
-    title: resolvedTitle,
-    classificationLevel: resolvedClearance,
-    releasableTo: releasableToIssuerDIDs,
-    contentEncryptionKey: encryptionManifestId || 'no-encryption',
-    ownerCompanyDID: employerDID,
-    metadata: {
-      title: resolvedTitle,
-      department,
-      createdBy: employee.email,
-      createdByDID: employee.prism_did,
-      originalFilename: filename,
-      fileSize: fileBuffer.length,
-      mimeType,
-      uploadedVia: 'document-upload/1.0 (DIDComm)',
-      createdAt: new Date().toISOString(),
-    },
-    iagonStorage,
-  });
-
-  console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ registered in DocumentRegistry, releasable to ${releasableToIssuerDIDs.length} compan${releasableToIssuerDIDs.length === 1 ? 'y' : 'ies'}`);
-
+  // 04-05 §22b: the VC push now runs BEFORE DocumentRegistry.registerDocument (same ordering the
+  // sectioned path already uses) and a failed push aborts the upload instead of registering a
+  // discoverable-but-unopenable document.
   // Push KeyManifest VC to identus-document-service, mirroring the HTTP upload paths' own "STEP 5"
   // (server.js's ClassifiedUpload/preEncrypted and legacy section-based handlers). Without this,
   // the DIDComm path registered a document with no VCKeyStore entry - /access still verifies the
@@ -3684,11 +3670,36 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
       });
       console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ KeyManifest VC v${versionNumber} pushed: ${vcResult.vcId}`);
     } catch (vcPushErr) {
-      console.error(`[DocumentUploadDIDComm] ${envelope.id}: ⚠️ KeyManifest VC push failed:`, vcPushErr.message);
+      console.error(`[DocumentUploadDIDComm] ${envelope.id}: ⚠️ KeyManifest VC push failed - aborting before DocumentRegistry registration:`, vcPushErr.message);
+      return; // 04-05 §22b: a document with no key manifest must never become discoverable
     }
   } else {
-    console.error(`[DocumentUploadDIDComm] ${envelope.id}: ⚠️ no wrappedManifest available - document registered but will NOT be accessible (no key material)`);
+    console.error(`[DocumentUploadDIDComm] ${envelope.id}: ⚠️ no wrappedManifest available - no key material - aborting before DocumentRegistry registration`);
+    return; // 04-05 §22b
   }
+  await DocumentRegistry.registerDocument({
+    documentDID: didResult.documentDID,
+    title: resolvedTitle,
+    classificationLevel: resolvedClearance,
+    releasableTo: releasableToIssuerDIDs,
+    contentEncryptionKey: encryptionManifestId || 'no-encryption',
+    ownerCompanyDID: employerDID,
+    metadata: {
+      title: resolvedTitle,
+      department,
+      createdBy: employee.email,
+      createdByDID: employee.prism_did,
+      originalFilename: filename,
+      fileSize: fileBuffer.length,
+      mimeType,
+      uploadedVia: 'document-upload/1.0 (DIDComm)',
+      createdAt: new Date().toISOString(),
+    },
+    iagonStorage,
+  });
+
+  console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ registered in DocumentRegistry, releasable to ${releasableToIssuerDIDs.length} compan${releasableToIssuerDIDs.length === 1 ? 'y' : 'ies'}`);
+
 }
 
 // Clearance ordering for computing a sectioned document's overall (lowest) tier — matches
@@ -3696,9 +3707,9 @@ async function handleDocumentUploadEnvelope(envelope, connectionId) {
 const SECTION_CLEARANCE_ORDER = { UNCLASSIFIED: 0, INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3, SECRET: 4, 'TOP-SECRET': 4 };
 
 // 04-05 security review §18 (2026-09-27): the only labels that BOTH have a CMK here and are an
-// exact key of identus-document-service's LEVEL_NUMBERS. SECRET is deliberately absent - it has no
-// CMK, so it could never be wrapped. Normalisation matches ClassificationKeyManager._normalise.
-const UPLOAD_CLEARANCE_LABELS = new Set(['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'TOP-SECRET']);
+// exact key of identus-document-service's LEVEL_NUMBERS. SECRET maps to the level-4 CMK
+// (ClassificationKeyManager alias, 04-05 §23b), like TOP-SECRET. Normalisation matches ClassificationKeyManager._normalise.
+const UPLOAD_CLEARANCE_LABELS = new Set(['UNCLASSIFIED', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET', 'TOP-SECRET']);
 function canonicalUploadClearance(label) {
   if (typeof label !== 'string') return null;
   const canonical = label.toUpperCase().trim().replace(/_/g, '-');
@@ -3718,11 +3729,19 @@ async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
   const { resolvedTitle, resolvedClearance, releasableToIssuerDIDs, filename, employee, department, connectionRow, employerDID } = ctx;
   const { getIagonClient } = require('./lib/IagonStorageClient');
   const iagonClient = getIagonClient();
+  // 04-05 §23b: best-effort removal of section blobs already written when the upload aborts part-way.
+  const uploadedBlobs = [];
+  async function cleanupUploaded() {
+    for (const u of uploadedBlobs) {
+      try { await iagonClient.deleteFile(u.nodeId, u.filename); }
+      catch (e) { console.warn(`[DocumentUploadDIDComm] ${envelope.id}: orphaned section blob not removed (${u.filename}): ${e.message}`); }
+    }
+  }
 
   const rawAttachments = envelope.attachments || [];
   if (rawAttachments.length === 0) {
     console.error(`[DocumentUploadDIDComm] ${envelope.id}: sectioned upload with no attachments, aborting`);
-    return;
+    { await cleanupUploaded(); return; }
   }
 
   const sections = [];
@@ -3733,10 +3752,10 @@ async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
     if (!sectionId || !sectionClearance || !base64Data) {
       if (sectionId && att.clearanceLevel && !sectionClearance) {
         console.error(`[DocumentUploadDIDComm] ${envelope.id}: section=${sectionId} has unrecognised clearanceLevel ${JSON.stringify(att.clearanceLevel)}, aborting whole upload`);
-        return;
+        { await cleanupUploaded(); return; }
       }
       console.error(`[DocumentUploadDIDComm] ${envelope.id}: section missing id/clearanceLevel/data.base64, aborting whole upload`);
-      return;
+      { await cleanupUploaded(); return; }
     }
     const sectionBuffer = Buffer.from(base64Data, 'base64');
 
@@ -3749,15 +3768,23 @@ async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
       );
     } catch (err) {
       console.error(`[DocumentUploadDIDComm] ${envelope.id}: Iagon upload failed for section=${sectionId}:`, err.message);
-      return;
+      { await cleanupUploaded(); return; }
     }
 
+    uploadedBlobs.push({ nodeId: uploadResult.nodeId, filename: uploadResult.filename });
     if (!uploadResult.rawDEK) {
       console.error(`[DocumentUploadDIDComm] ${envelope.id}: section=${sectionId} got no rawDEK from Iagon upload, aborting whole upload`);
-      return;
+      { await cleanupUploaded(); return; }
     }
-    const wrappedManifest = cmk.wrapDEK(uploadResult.rawDEK, sectionClearance);
-    uploadResult.rawDEK.fill(0); // zero raw key from memory (PFS), same discipline as the flat path
+    let wrappedManifest;
+    try {
+      wrappedManifest = cmk.wrapDEK(uploadResult.rawDEK, sectionClearance);
+    } catch (wrapErr) {
+      console.error(`[DocumentUploadDIDComm] ${envelope.id}: key wrapping failed for section=${sectionId}, aborting whole upload:`, wrapErr.message);
+      { await cleanupUploaded(); return; }
+    } finally {
+      uploadResult.rawDEK.fill(0); // zero raw key even if wrapping throws (04-05 §23b)
+    }
 
     sections.push({
       sectionId,
@@ -3814,7 +3841,7 @@ async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
     );
   } catch (err) {
     console.error(`[DocumentUploadDIDComm] ${envelope.id}: document DID creation failed:`, err.message);
-    return;
+    { await cleanupUploaded(); return; }
   }
   console.log(`[DocumentUploadDIDComm] ${envelope.id}: ✅ sectioned document DID created: ${didResult.documentDID.substring(0, 60)}...`);
 
@@ -3844,7 +3871,7 @@ async function handleSectionedDocumentUploadEnvelope(envelope, ctx) {
   }
   if (!vcPushOk) {
     console.error(`[DocumentUploadDIDComm] ${envelope.id}: aborting before DocumentRegistry registration - a document with no key manifest must never become discoverable`);
-    return;
+    { await cleanupUploaded(); return; }
   }
 
   await DocumentRegistry.registerDocument({
@@ -7966,7 +7993,10 @@ app.post('/api/access-gate/present', async (req, res) => {
 
     // --- 6. Clearance check ---
     const CLEARANCE_NUMERIC = { 'UNCLASSIFIED': 0, 'INTERNAL': 1, 'CONFIDENTIAL': 2, 'RESTRICTED': 3, 'SECRET': 4, 'TOP-SECRET': 4, 'TOP_SECRET': 4 };
-    const docLevel = CLEARANCE_NUMERIC[document.classificationLevel] ?? 1;
+    // 04-05 follow-up (same class as §18): normalise like the CMK layer; an unrecognised label now
+    // denies instead of silently meaning INTERNAL. A missing label keeps its INTERNAL default.
+    const docLevelLabel = typeof document.classificationLevel === 'string' ? document.classificationLevel.toUpperCase().trim().replace(/_/g, '-') : '';
+    const docLevel = docLevelLabel === '' ? 1 : (CLEARANCE_NUMERIC[docLevelLabel] ?? Number.POSITIVE_INFINITY);
     const userLevel = clearanceLevel ? (CLEARANCE_NUMERIC[clearanceLevel.toUpperCase()] ?? 0) : 0;
     if (userLevel < docLevel) {
       console.log(`[AccessGate] DENIED — clearance ${clearanceLevel} (${userLevel}) < required ${document.classificationLevel} (${docLevel})`);
@@ -8094,7 +8124,50 @@ app.post('/api/access-gate/present', async (req, res) => {
       return iagonClient.downloadFile(storage.fileId, storage.encryptionInfo || null);
     }
 
-    if (isDocxDoc) {
+    const isSectionedDoc = document.contentEncryptionKey === 'sectioned';
+    if (isSectionedDoc) {
+      // 04-05 §22b: sectioned (Phase 5e Option 1) documents on this server-side-decrypt path. Sections
+      // above the requester's clearance are filtered by their tag BEFORE any key unwrap or storage
+      // read - their keys and ciphertext are never touched here either; they become placeholders.
+      const vcRecord = await fetchCurrentManifestVC(documentDID, process.env.DOCUMENT_SERVICE_URL, process.env.DOCUMENT_SERVICE_ADMIN_KEY);
+      if (!vcRecord) throw new Error('DocumentKeyUnavailable: sectioned document has no key manifest');
+      const sectVerifier = new (require('./lib/KeyManifestVCVerifier'))({ inlineJwk: process.env.MANIFEST_SIGNING_KEY_PUBLIC });
+      const sectResult = await sectVerifier.verify(vcRecord);
+      if (!sectResult.valid) throw new ManifestVCInvalid(sectResult.reason);
+      const manifestSections = sectResult.claims.sections;
+      if (!Array.isArray(manifestSections) || manifestSections.length === 0) {
+        throw new ManifestVCInvalid('sectioned document manifest carries no sections');
+      }
+      const rank = (label, unknown) => {
+        const k = typeof label === 'string' ? label.toUpperCase().trim().replace(/_/g, '-') : '';
+        return Object.prototype.hasOwnProperty.call(CLEARANCE_NUMERIC, k) ? CLEARANCE_NUMERIC[k] : unknown;
+      };
+      const requesterRank = rank(clearanceLevel || 'UNCLASSIFIED', 0);        // unknown requester -> 0
+      const parts = [];
+      for (const section of manifestSections) {
+        const sectionRank = rank(section.clearanceLevel, Number.POSITIVE_INFINITY); // unknown section -> never visible
+        if (sectionRank > requesterRank) {
+          parts.push(`[REDACTED - requires ${section.clearanceLevel} clearance]`);
+          continue;
+        }
+        const rawSectionDEK = cmk.unwrapDEK({
+          wrappedKey: section.wrappedKey, iv: section.iv, authTag: section.authTag,
+          classificationLevel: section.clearanceLevel
+        }, section.clearanceLevel);
+        try {
+          const sectionBytes = await iagonClient.downloadFile(section.iagonFileId, {
+            algorithm: section.fileAlgorithm || 'AES-256-GCM',
+            iv:        section.fileIv,
+            authTag:   section.fileAuthTag,
+            key:       rawSectionDEK.toString('base64')
+          });
+          parts.push(Buffer.from(sectionBytes).toString('utf8'));
+        } finally {
+          rawSectionDEK.fill(0);
+        }
+      }
+      redactedContent = Buffer.from(parts.join('\n\n'), 'utf8');
+    } else if (isDocxDoc) {
       // Full-fidelity DOCX redaction — use originalDocxFileId when available, fallback to fileId
       let originalDocx;
       if (document.iagonStorage.originalDocxFileId) {
@@ -8187,7 +8260,7 @@ app.post('/api/access-gate/present', async (req, res) => {
         serverPublicKey:  encrypted.serverPublicKey,
         copyId,
         filename:         document.iagonStorage?.filename || `document-${copyId}`,
-        mimeType:         isDocxDoc
+        mimeType:         isSectionedDoc ? 'text/plain' : isDocxDoc
           ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
           : 'text/html',
         classificationLevel: document.classificationLevel
@@ -8196,7 +8269,7 @@ app.post('/api/access-gate/present', async (req, res) => {
       nonce:            encrypted.nonce,
       serverPublicKey:  encrypted.serverPublicKey,
       filename:         document.iagonStorage?.filename || `document-${copyId}`,
-      mimeType:         isDocxDoc
+      mimeType:         isSectionedDoc ? 'text/plain' : isDocxDoc
         ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         : 'text/html',
       classificationLevel: document.classificationLevel,
@@ -12342,7 +12415,9 @@ app.use((err, req, res, next) => {
 // Server Startup
 // ============================================================================
 
-app.listen(PORT, async () => {
+// 04-05 follow-up: listen on loopback only - Caddy (127.0.0.1:3010 upstream) is the sole intended
+// entry point; the port was reachable directly from the internet, bypassing the proxy.
+app.listen(PORT, process.env.LISTEN_HOST || '127.0.0.1', async () => {
   console.log('\n' + '='.repeat(70));
   console.log('🏢 Company Admin Portal - Server Started');
   console.log('='.repeat(70));
