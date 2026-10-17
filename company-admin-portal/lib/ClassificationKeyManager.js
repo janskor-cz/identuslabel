@@ -155,7 +155,10 @@ class ClassificationKeyManager {
     if (!level) return 'INTERNAL';
     const upper = level.toUpperCase().trim();
     // Normalise underscores → hyphens for TOP-SECRET
-    return upper.replace('_', '-');
+    const hyphenated = upper.replace('_', '-');
+    // SECRET is the canonical name of level 4; its CMK is stored under TOP-SECRET
+    // (04-05 §23b alias was only in ENV_VAR_MAP, so _getCMK('SECRET') had no key).
+    return hyphenated === 'SECRET' ? 'TOP-SECRET' : hyphenated;
   }
 
   _assertLoaded() {
